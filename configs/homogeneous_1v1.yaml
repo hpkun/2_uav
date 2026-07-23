@@ -1,0 +1,35 @@
+simulation:
+  dt: 0.1
+  max_steps: 600
+  gravity: 9.81
+action:
+  delta_yaw_max: 3.141592653589793
+  delta_pitch_max: 1.0471975511965976
+  delta_speed_max: 50.0
+aircraft:
+  v_min: 100.0
+  v_max: 250.0
+  theta_min: -0.7853981633974483
+  theta_max: 0.7853981633974483
+  nx_min: -0.5
+  nx_max: 0.5
+  nz_min: 0.0
+  nz_max: 3.0
+  phi_min: -1.5707963267948966
+  phi_max: 1.5707963267948966
+  yaw_rate_max: 0.35
+  pitch_rate_max: 0.25
+  acceleration_max: 8.0
+  k_yaw: 1.0
+  k_pitch: 1.0
+  k_speed: 0.5
+battlefield:
+  x_limit: 10000.0
+  y_limit: 10000.0
+  altitude_min: 500.0
+  altitude_max: 6000.0
+  collision_distance: 30.0
+initial_state:
+  red: {x: 0.0, y: 0.0, altitude: 3000.0, v: 150.0, theta: 0.0, psi: 0.0}
+  blue: {x: 3000.0, y: 0.0, altitude: 3000.0, v: 150.0, theta: 0.0, psi: 3.141592653589793}
+
