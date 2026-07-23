@@ -3,11 +3,27 @@
   "gpu": "NVIDIA GeForce RTX 5060 Laptop GPU",
   "torch": "2.11.0+cu128",
   "torch_cuda": "12.8",
-  "fixed_environment_steps": 4096,
-  "actual_environment_steps": 4096,
-  "fixed_elapsed_seconds": 28.20514478000041,
-  "total_elapsed_seconds": 38.69314772100006,
+  "actual_environment_steps": 8192,
+  "fixed_elapsed_seconds": 53.98417866900127,
+  "total_elapsed_seconds": 88.69841907299997,
   "peak_gpu_memory_bytes": 19391488,
+  "stages": {
+    "straight_tail_chase": {
+      "environment_steps": 2048,
+      "updates": 16,
+      "elapsed_seconds": 20.668023669997638
+    },
+    "pursuit_tail_chase": {
+      "environment_steps": 2048,
+      "updates": 16,
+      "elapsed_seconds": 11.83645176799837
+    },
+    "pursuit_all_scenarios": {
+      "environment_steps": 4096,
+      "updates": 32,
+      "elapsed_seconds": 21.478262373999314
+    }
+  },
   "fixed_gate_win_rate": 0.0,
   "fixed_gate_pass": false,
   "competitive_executed": false

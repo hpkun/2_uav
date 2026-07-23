@@ -74,8 +74,25 @@ class HomogeneousAirCombatEnv:
             )
             targets[aircraft.aircraft_id], controls[aircraft.aircraft_id] = target, control
             diagnostics = self.controller.diagnostics(old_states[aircraft.aircraft_id], target, control, aircraft.spec)
+            derivatives = self.dynamics.derivatives(old_states[aircraft.aircraft_id], control)
+            actual_acceleration, actual_pitch_rate, actual_yaw_rate = map(float, derivatives[3:6])
+            diagnostics.update({
+                "actual_acceleration": actual_acceleration,
+                "actual_pitch_rate": actual_pitch_rate,
+                "actual_yaw_rate": actual_yaw_rate,
+                "acceleration_tracking_error": diagnostics["clipped_acceleration"] - actual_acceleration,
+                "pitch_rate_tracking_error": diagnostics["clipped_pitch_rate"] - actual_pitch_rate,
+                "yaw_rate_tracking_error": diagnostics["clipped_yaw_rate"] - actual_yaw_rate,
+            })
+            diagnostics.update({
+                "acceleration_tracking_absolute_error": abs(diagnostics["acceleration_tracking_error"]),
+                "pitch_rate_tracking_absolute_error": abs(diagnostics["pitch_rate_tracking_error"]),
+                "yaw_rate_tracking_absolute_error": abs(diagnostics["yaw_rate_tracking_error"]),
+            })
             clipped_action = np.clip(np.asarray(actions[aircraft.aircraft_id], dtype=float), -1.0, 1.0)
             diagnostics.update({"action_yaw": float(clipped_action[0]), "action_pitch": float(clipped_action[1]), "action_speed": float(clipped_action[2]), "delta_yaw": float(angle_difference(target.desired_psi, old_states[aircraft.aircraft_id].psi)), "delta_pitch": float(target.desired_theta-old_states[aircraft.aircraft_id].theta), "delta_speed": float(target.desired_v-old_states[aircraft.aircraft_id].v)})
+            if not np.all(np.isfinite([value for value in diagnostics.values() if not isinstance(value, (bool, np.bool_))])):
+                raise FloatingPointError("non-finite control diagnostics")
             control_diagnostics[aircraft.aircraft_id] = diagnostics
         new_states = {
             aircraft.aircraft_id: self.integrator.step(

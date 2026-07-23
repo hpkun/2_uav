@@ -6,3 +6,5 @@ outputs/mappo/checkpoints/
 outputs/mappo/*.csv
 outputs/mappo/*.json
 outputs/mappo/*.png
+outputs/mappo_smoke/
+outputs/baselines/
