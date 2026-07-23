@@ -31,10 +31,10 @@ def test_deterministic_and_synchronous():
 
 
 def test_truncation_and_altitude_termination():
-    env = HomogeneousAirCombatEnv(CONFIG); env.reset()
+    env = HomogeneousAirCombatEnv(CONFIG); env.reset(scenario_name="fixed")
     env.config["simulation"]["max_steps"] = 1
     assert env.step(actions())[3]
-    env.reset(); env.aircraft[0].state.z = -100
+    env.reset(scenario_name="fixed"); env.aircraft[0].state.z = -100
     assert env.step(actions())[2]
 
 
@@ -55,11 +55,13 @@ def test_step_requires_active_episode_and_reset_restores_it():
 
 def test_xy_boundary_and_collision_termination():
     env = HomogeneousAirCombatEnv(CONFIG)
-    env.reset(); env.aircraft[0].state.x = env.config["battlefield"]["x_limit"] + 1
+    env.reset(scenario_name="fixed"); env.aircraft[0].state.x = env.config["battlefield"]["x_limit"] + 1
     result = env.step(actions())
     assert result[2] and result[4]["termination_reason"] == "xy_boundary"
-    env.reset()
+    env.reset(scenario_name="fixed")
     env.aircraft[1].state.x = env.aircraft[0].state.x + 10
+    env.aircraft[1].state.y = env.aircraft[0].state.y
+    env.aircraft[1].state.z = env.aircraft[0].state.z
     env.aircraft[1].state.psi = env.aircraft[0].state.psi
     result = env.step(actions())
     assert result[2] and result[4]["termination_reason"] == "collision"
@@ -67,7 +69,7 @@ def test_xy_boundary_and_collision_termination():
 
 
 def test_single_sided_attacks_and_rewards():
-    env = HomogeneousAirCombatEnv(CONFIG); env.reset()
+    env = HomogeneousAirCombatEnv(CONFIG); env.reset(scenario_name="fixed")
     red, blue = env.aircraft
     red.state.x, red.state.psi = 0, 0
     blue.state.x, blue.state.psi = 500, 0
@@ -77,7 +79,7 @@ def test_single_sided_attacks_and_rewards():
     assert rewards["red_0"] > 0 and rewards["blue_0"] < 0
     assert all(value.shape == (13,) for value in observations.values())
 
-    env.reset(); red, blue = env.aircraft
+    env.reset(scenario_name="fixed"); red, blue = env.aircraft
     red.state.x, red.state.psi = 500, 0
     blue.state.x, blue.state.psi = 0, 0
     _, rewards, terminated, _, info = env.step(actions())

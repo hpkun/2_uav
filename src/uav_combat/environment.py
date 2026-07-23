@@ -31,15 +31,16 @@ class HomogeneousAirCombatEnv:
         self.step_count = 0
         self._running = False
 
-    def reset(self, seed: int | None = None) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    def reset(self, seed: int | None = None, scenario_name: str | None = None) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
         """重置确定性场景，并恢复可运行状态。"""
-        self.aircraft = self.scenario.reset(seed)
+        self.aircraft = self.scenario.reset(seed, scenario_name)
         self.step_count = 0
         self._running = True
         geometries = self._geometries()
         scores = self._situation_scores()
         info = {
             "step_count": 0,
+            "scenario_name": self.scenario.scenario_name,
             "targets": {},
             "controls": {},
             "termination_reason": None,
@@ -107,6 +108,7 @@ class HomogeneousAirCombatEnv:
             self._running = False
         info = {
             "step_count": self.step_count,
+            "scenario_name": self.scenario.scenario_name,
             "targets": targets,
             "controls": controls,
             "termination_reason": reason,
@@ -154,7 +156,10 @@ class HomogeneousAirCombatEnv:
     def _observations(self, geometries: dict[str, PairwiseGeometry] | None = None) -> dict[str, np.ndarray]:
         geometries = geometries or self._geometries()
         battlefield = self.config["battlefield"]
-        position_scale = float(np.sqrt(battlefield["x_limit"] ** 2 + battlefield["y_limit"] ** 2 + battlefield["altitude_max"] ** 2))
+        relative_x_scale = 2.0 * battlefield["x_limit"]
+        relative_y_scale = 2.0 * battlefield["y_limit"]
+        relative_z_scale = battlefield["altitude_max"] - battlefield["altitude_min"]
+        distance_scale = float(np.sqrt(relative_x_scale ** 2 + relative_y_scale ** 2 + relative_z_scale ** 2))
         observations: dict[str, np.ndarray] = {}
         for own in self.aircraft:
             geometry = geometries[own.aircraft_id]
@@ -162,9 +167,9 @@ class HomogeneousAirCombatEnv:
             speed_normalized = 2.0 * (own.state.v - own.spec.v_min) / (own.spec.v_max - own.spec.v_min) - 1.0
             observation = np.concatenate((
                 [speed_normalized, own.state.theta / pitch_scale, np.sin(own.state.psi), np.cos(own.state.psi)],
-                geometry.relative_position / position_scale,
+                geometry.relative_position / np.array([relative_x_scale, relative_y_scale, relative_z_scale]),
                 geometry.relative_velocity / (2.0 * own.spec.v_max),
-                [geometry.distance / position_scale, geometry.ata / np.pi, geometry.aa / np.pi],
+                [geometry.distance / distance_scale, geometry.ata / np.pi, geometry.aa / np.pi],
             ))
             observations[own.aircraft_id] = np.clip(observation, -1.0, 1.0).astype(float)
         return observations

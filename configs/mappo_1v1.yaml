@@ -1,0 +1,25 @@
+experiment:
+  seed: 42
+  device: auto
+  output_dir: outputs/mappo
+network:
+  hidden_dim: 128
+  log_std_init: -0.5
+training:
+  total_env_steps: 100000
+  num_envs: 8
+  rollout_steps: 256
+  ppo_epochs: 5
+  minibatch_size: 1024
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_coef: 0.2
+  learning_rate: 0.0003
+  value_loss_coef: 0.5
+  entropy_coef: 0.01
+  max_grad_norm: 0.5
+  eval_interval_updates: 10
+  checkpoint_interval_updates: 10
+evaluation:
+  episodes: 30
+  deterministic: true
