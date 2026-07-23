@@ -9,7 +9,7 @@ def load_config(path: str | Path) -> dict[str, Any]:
     """读取 YAML 配置并检查必要顶层字段。"""
     with Path(path).open("r", encoding="utf-8") as stream:
         config = yaml.safe_load(stream)
-    required = {"simulation", "action", "aircraft", "battlefield", "initial_state"}
+    required = {"simulation", "action", "aircraft", "battlefield", "combat", "initial_state"}
     if not isinstance(config, dict) or not required.issubset(config):
         raise ValueError(f"configuration must contain: {sorted(required)}")
     return config
@@ -18,4 +18,3 @@ def load_config(path: str | Path) -> dict[str, Any]:
 def aircraft_spec(config: dict[str, Any]) -> AircraftSpec:
     """从配置构造不可变飞机规格。"""
     return AircraftSpec(**config["aircraft"])
-

@@ -16,8 +16,9 @@ def test_reset_and_step_structure():
     assert set(observations) == {"red_0", "blue_0"}
     assert env.aircraft[0].spec is env.aircraft[1].spec
     result = env.step(actions())
-    assert len(result) == 5 and all(value.shape == (10,) for value in result[0].values())
-    assert result[1] == {"red_0": 0.0, "blue_0": 0.0}
+    assert len(result) == 5 and all(value.shape == (13,) for value in result[0].values())
+    assert all(np.all(np.isfinite(value)) and np.all(np.abs(value) <= 1) for value in result[0].values())
+    assert np.isclose(result[1]["red_0"], -result[1]["blue_0"])
 
 
 def test_deterministic_and_synchronous():
@@ -62,3 +63,24 @@ def test_xy_boundary_and_collision_termination():
     env.aircraft[1].state.psi = env.aircraft[0].state.psi
     result = env.step(actions())
     assert result[2] and result[4]["termination_reason"] == "collision"
+    assert result[1]["red_0"] < 0 and result[1]["blue_0"] < 0
+
+
+def test_single_sided_attacks_and_rewards():
+    env = HomogeneousAirCombatEnv(CONFIG); env.reset()
+    red, blue = env.aircraft
+    red.state.x, red.state.psi = 0, 0
+    blue.state.x, blue.state.psi = 500, 0
+    observations, rewards, terminated, _, info = env.step(actions())
+    assert terminated and info["outcome"] == "red" and info["termination_reason"] == "red_kill"
+    assert red.state.alive and not blue.state.alive
+    assert rewards["red_0"] > 0 and rewards["blue_0"] < 0
+    assert all(value.shape == (13,) for value in observations.values())
+
+    env.reset(); red, blue = env.aircraft
+    red.state.x, red.state.psi = 500, 0
+    blue.state.x, blue.state.psi = 0, 0
+    _, rewards, terminated, _, info = env.step(actions())
+    assert terminated and info["outcome"] == "blue" and info["termination_reason"] == "blue_kill"
+    assert not red.state.alive and blue.state.alive
+    assert rewards["red_0"] < 0 and rewards["blue_0"] > 0

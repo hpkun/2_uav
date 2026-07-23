@@ -32,3 +32,26 @@ def test_yaw_step_converges_without_speed_or_pitch_drift(spec):
 def test_speed_step_converges(spec):
     state = run_target(spec, TargetCommand(0, 0, 170))
     assert np.isclose(state.v, 170, atol=1e-8)
+
+
+def run_action(spec, action, steps=20):
+    state = AircraftState(0, 0, -3000, 150, 0, 0)
+    controller = TargetStateController()
+    dynamics = PointMassDynamics()
+    integrator = RK4Integrator(0.1)
+    history = []
+    for _ in range(steps):
+        _, control = controller.control_from_action(state, np.asarray(action), spec)
+        state = integrator.step(state, control, dynamics, spec)
+        history.append(state.copy())
+    return history
+
+
+def test_complete_action_to_target_chain_has_correct_directions(spec):
+    positive_yaw = run_action(spec, [0.05, 0, 0])
+    negative_yaw = run_action(spec, [-0.05, 0, 0])
+    assert all(b.psi > a.psi for a, b in zip(positive_yaw, positive_yaw[1:]))
+    assert all(b.psi < a.psi for a, b in zip(negative_yaw, negative_yaw[1:]))
+    assert np.isclose(positive_yaw[-1].psi, -negative_yaw[-1].psi, atol=1e-10)
+    speed = run_action(spec, [0, 0, 0.1])
+    assert all(b.v > a.v for a, b in zip(speed, speed[1:]))

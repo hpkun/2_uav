@@ -13,12 +13,11 @@ def main() -> None:
         observations, _, terminated, truncated, info = env.step({"red_0": np.array([0.05, 0, 0]), "blue_0": np.zeros(3)})
         if terminated or truncated:
             break
-    print(f"steps={info['step_count']}, reason={info['termination_reason']}")
+    print(f"steps={info['step_count']}, reason={info['termination_reason']}, outcome={info['outcome']}")
     for aircraft in env.aircraft:
         print(f"{aircraft.aircraft_id}: {aircraft.state}")
-    print(f"distance={observations['red_0'][-1]:.2f} m")
+    print(f"distance={info['geometries']['red_0'].distance:.2f} m")
 
 
 if __name__ == "__main__":
     main()
-
