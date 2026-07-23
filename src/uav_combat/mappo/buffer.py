@@ -5,12 +5,12 @@ import numpy as np
 class MAPPOBuffer:
     """保存 [T,N,2] 红蓝固定顺序的 on-policy rollout。"""
 
-    def __init__(self, rollout_steps: int, num_envs: int, observation_dim: int = 13, action_dim: int = 3) -> None:
+    def __init__(self, rollout_steps: int, num_envs: int, observation_dim: int = 14, action_dim: int = 3) -> None:
         if rollout_steps <= 0 or num_envs <= 0:
             raise ValueError("rollout_steps and num_envs must be positive")
         self.rollout_steps, self.num_envs = rollout_steps, num_envs
         self.observations = np.zeros((rollout_steps, num_envs, 2, observation_dim), dtype=np.float32)
-        self.global_observations = np.zeros((rollout_steps, num_envs, observation_dim * 2), dtype=np.float32)
+        self.global_states = np.zeros((rollout_steps, num_envs, 14), dtype=np.float32)
         self.actions = np.zeros((rollout_steps, num_envs, 2, action_dim), dtype=np.float32)
         self.log_probs = np.zeros((rollout_steps, num_envs, 2), dtype=np.float32)
         self.rewards = np.zeros((rollout_steps, num_envs, 2), dtype=np.float32)
@@ -20,12 +20,12 @@ class MAPPOBuffer:
         self.returns = np.zeros_like(self.rewards)
         self.position = 0
 
-    def add(self, observations: np.ndarray, global_observations: np.ndarray, actions: np.ndarray, log_probs: np.ndarray, rewards: np.ndarray, values: np.ndarray, dones: np.ndarray) -> None:
+    def add(self, observations: np.ndarray, global_states: np.ndarray, actions: np.ndarray, log_probs: np.ndarray, rewards: np.ndarray, values: np.ndarray, dones: np.ndarray) -> None:
         """加入一个并行环境时间步，并严格检查维数。"""
         if self.position >= self.rollout_steps:
             raise RuntimeError("buffer is full")
         expected = [
-            (observations, self.observations.shape[1:]), (global_observations, self.global_observations.shape[1:]),
+            (observations, self.observations.shape[1:]), (global_states, self.global_states.shape[1:]),
             (actions, self.actions.shape[1:]), (log_probs, self.log_probs.shape[1:]),
             (rewards, self.rewards.shape[1:]), (values, self.values.shape[1:]), (dones, self.dones.shape[1:]),
         ]
@@ -34,7 +34,7 @@ class MAPPOBuffer:
                 raise ValueError(f"expected shape {shape}, got {np.asarray(value).shape}")
         index = self.position
         self.observations[index] = observations
-        self.global_observations[index] = global_observations
+        self.global_states[index] = global_states
         self.actions[index] = actions
         self.log_probs[index] = log_probs
         self.rewards[index] = rewards

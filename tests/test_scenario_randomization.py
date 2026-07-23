@@ -42,11 +42,36 @@ def test_axis_specific_observation_normalization_does_not_saturate_early():
     red.state.x, blue.state.x = -0.9 * limit, 0.9 * limit
     red.state.y = blue.state.y = 0.0; red.state.z = blue.state.z = -3000.0
     observations = env._observations()
-    assert np.isclose(observations["red_0"][4], 0.9)
-    assert all(value.shape == (13,) and np.all(np.isfinite(value)) and np.all(np.abs(value) <= 1) for value in observations.values())
+    assert np.isclose(observations["red_0"][3], 0.9)
+    assert all(value.shape == (14,) and np.all(np.isfinite(value)) and np.all(np.abs(value) <= 1) for value in observations.values())
+
+
+def test_ego_observation_rotation_invariance_altitude_and_global_state():
+    env = HomogeneousAirCombatEnv(CONFIG); env.reset(8, "tail_chase")
+    before = env._observations()["red_0"].copy(); angle = 0.7
+    matrix = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
+    for aircraft in env.aircraft:
+        aircraft.state.x, aircraft.state.y = matrix @ np.array([aircraft.state.x, aircraft.state.y])
+        aircraft.state.psi += angle
+    after = env._observations()["red_0"]
+    assert np.allclose(before, after, atol=1e-12)
+    red = env.aircraft[0]; red.state.z = -env.config["battlefield"]["altitude_min"]
+    assert np.isclose(env._observations()["red_0"][2], -1)
+    red.state.z = -env.config["battlefield"]["altitude_max"]
+    assert np.isclose(env._observations()["red_0"][2], 1)
+    global_state = env.global_state()
+    assert global_state.shape == (14,) and np.all(np.isfinite(global_state)) and np.all(np.abs(global_state) <= 1)
+
+
+def test_tail_chase_rear_aircraft_has_speed_advantage_on_average():
+    differences = []
+    for seed in range(30):
+        env = HomogeneousAirCombatEnv(CONFIG); env.reset(seed, "tail_chase"); red, blue = env.aircraft
+        red_is_rear = np.dot(red.state.velocity_vector()[:2], blue.state.as_array()[:2] - red.state.as_array()[:2]) > 0
+        differences.append((red.state.v - blue.state.v) if red_is_rear else (blue.state.v - red.state.v))
+    assert np.mean(differences) > 15
 
 
 def test_dense_reward_scale_is_below_terminal_event():
     env = HomogeneousAirCombatEnv(CONFIG)
     assert env.config["simulation"]["max_steps"] * env.config["combat"]["situation_reward_scale"] < env.config["combat"]["terminal_reward"]
-

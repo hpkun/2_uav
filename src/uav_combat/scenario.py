@@ -45,8 +45,10 @@ class HomogeneousScenario:
         if name == "tail_chase":
             positions = {"red": np.array([-separation / 2, 0.0]), "blue": np.array([separation / 2, 0.0])}
             headings = {"red": 0.0, "blue": 0.0}
+            rear_team = "red"
             if settings["randomize_roles"] and bool(rng.integers(0, 2)):
                 positions["red"], positions["blue"] = positions["blue"], positions["red"]
+                rear_team = "blue"
         elif name == "offset_head_on":
             offset = settings["lateral_offset"] / 2.0
             positions = {"red": np.array([-separation / 2, offset]), "blue": np.array([separation / 2, -offset])}
@@ -66,8 +68,11 @@ class HomogeneousScenario:
                 settings["altitude_center"] + rng.uniform(-settings["altitude_jitter"], settings["altitude_jitter"]),
                 battlefield["altitude_min"], battlefield["altitude_max"],
             ))
+            speed_offset = 0.0
+            if name == "tail_chase":
+                speed_offset = (0.5 if team == rear_team else -0.5) * settings["tail_chase_speed_advantage"]
             speed = float(np.clip(
-                settings["speed_center"] + rng.uniform(-settings["speed_jitter"], settings["speed_jitter"]),
+                settings["speed_center"] + speed_offset + rng.uniform(-settings["speed_jitter"], settings["speed_jitter"]),
                 self.spec.v_min, self.spec.v_max,
             ))
             heading = wrap_angle(headings[team] + rotation + rng.uniform(-settings["heading_jitter"], settings["heading_jitter"]))

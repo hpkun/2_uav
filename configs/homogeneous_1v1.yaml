@@ -24,8 +24,8 @@ aircraft:
   k_pitch: 1.0
   k_speed: 0.5
 battlefield:
-  x_limit: 10000.0
-  y_limit: 10000.0
+  x_limit: 20000.0
+  y_limit: 20000.0
   altitude_min: 500.0
   altitude_max: 6000.0
   collision_distance: 30.0
@@ -50,6 +50,7 @@ scenario:
   altitude_jitter: 100.0
   speed_center: 150.0
   speed_jitter: 10.0
+  tail_chase_speed_advantage: 20.0
   heading_jitter: 0.08726646259971647
   randomize_roles: true
 initial_state:

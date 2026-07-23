@@ -6,11 +6,12 @@ network:
   hidden_dim: 128
   log_std_init: -0.5
 training:
-  total_env_steps: 100000
-  num_envs: 8
+  total_env_steps: 500000
+  num_envs: 32
   rollout_steps: 256
+  curriculum_tail_chase_env_steps: 100000
   ppo_epochs: 5
-  minibatch_size: 1024
+  minibatch_size: 2048
   gamma: 0.99
   gae_lambda: 0.95
   clip_coef: 0.2
@@ -18,7 +19,7 @@ training:
   value_loss_coef: 0.5
   entropy_coef: 0.01
   max_grad_norm: 0.5
-  eval_interval_updates: 10
+  eval_interval_updates: 5
   checkpoint_interval_updates: 10
 evaluation:
   episodes: 30

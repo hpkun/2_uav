@@ -165,14 +165,37 @@ class HomogeneousAirCombatEnv:
             geometry = geometries[own.aircraft_id]
             pitch_scale = max(abs(own.spec.theta_min), abs(own.spec.theta_max))
             speed_normalized = 2.0 * (own.state.v - own.spec.v_min) / (own.spec.v_max - own.spec.v_min) - 1.0
+            altitude_normalized = 2.0 * (own.state.altitude - battlefield["altitude_min"]) / relative_z_scale - 1.0
+            cosine, sine = np.cos(own.state.psi), np.sin(own.state.psi)
+            dx, dy, dz = geometry.relative_position
+            dvx, dvy, dvz = geometry.relative_velocity
+            relative_ego = np.array([cosine * dx + sine * dy, -sine * dx + cosine * dy, -dz])
+            velocity_ego = np.array([cosine * dvx + sine * dvy, -sine * dvx + cosine * dvy, -dvz])
             observation = np.concatenate((
-                [speed_normalized, own.state.theta / pitch_scale, np.sin(own.state.psi), np.cos(own.state.psi)],
-                geometry.relative_position / np.array([relative_x_scale, relative_y_scale, relative_z_scale]),
-                geometry.relative_velocity / (2.0 * own.spec.v_max),
-                [geometry.distance / distance_scale, geometry.ata / np.pi, geometry.aa / np.pi],
+                [speed_normalized, own.state.theta / pitch_scale, altitude_normalized],
+                relative_ego / np.array([relative_x_scale, relative_y_scale, relative_z_scale]),
+                velocity_ego / (2.0 * own.spec.v_max),
+                [geometry.distance / distance_scale, geometry.yaw_error / np.pi, geometry.pitch_error / (np.pi / 2.0), geometry.ata / np.pi, geometry.aa / np.pi],
             ))
             observations[own.aircraft_id] = np.clip(observation, -1.0, 1.0).astype(float)
         return observations
+
+    def global_state(self) -> np.ndarray:
+        """返回 red、blue 固定顺序的 14 维绝对集中式状态。"""
+        battlefield = self.config["battlefield"]
+        altitude_span = battlefield["altitude_max"] - battlefield["altitude_min"]
+        values: list[float] = []
+        for aircraft_id in ("red_0", "blue_0"):
+            aircraft = self._aircraft_by_id(aircraft_id)
+            state, spec = aircraft.state, aircraft.spec
+            altitude = 2.0 * (state.altitude - battlefield["altitude_min"]) / altitude_span - 1.0
+            speed = 2.0 * (state.v - spec.v_min) / (spec.v_max - spec.v_min) - 1.0
+            pitch = state.theta / max(abs(spec.theta_min), abs(spec.theta_max))
+            values.extend([state.x / battlefield["x_limit"], state.y / battlefield["y_limit"], altitude, speed, pitch, np.sin(state.psi), np.cos(state.psi)])
+        result = np.clip(np.asarray(values, dtype=float), -1.0, 1.0)
+        if not np.all(np.isfinite(result)):
+            raise ValueError("global state must be finite")
+        return result
 
     def _physical_termination(self) -> tuple[str | None, str | None]:
         limits = self.config["battlefield"]

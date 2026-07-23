@@ -16,7 +16,7 @@ def test_reset_and_step_structure():
     assert set(observations) == {"red_0", "blue_0"}
     assert env.aircraft[0].spec is env.aircraft[1].spec
     result = env.step(actions())
-    assert len(result) == 5 and all(value.shape == (13,) for value in result[0].values())
+    assert len(result) == 5 and all(value.shape == (14,) for value in result[0].values())
     assert all(np.all(np.isfinite(value)) and np.all(np.abs(value) <= 1) for value in result[0].values())
     assert np.isclose(result[1]["red_0"], -result[1]["blue_0"])
 
@@ -77,7 +77,7 @@ def test_single_sided_attacks_and_rewards():
     assert terminated and info["outcome"] == "red" and info["termination_reason"] == "red_kill"
     assert red.state.alive and not blue.state.alive
     assert rewards["red_0"] > 0 and rewards["blue_0"] < 0
-    assert all(value.shape == (13,) for value in observations.values())
+    assert all(value.shape == (14,) for value in observations.values())
 
     env.reset(scenario_name="fixed"); red, blue = env.aircraft
     red.state.x, red.state.psi = 500, 0

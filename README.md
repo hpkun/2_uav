@@ -57,9 +57,9 @@ score = distance_score * ata_score * aa_score
 
 训练时从三个可复现模板随机选择：`tail_chase` 为同向尾追并随机交换追击方，`offset_head_on` 为带 400 m 横向偏移的迎头接近，`crossing` 为大致垂直并朝中心交汇。每个模板还施加全局水平旋转、独立高度/速度扰动和小幅航向扰动。给定相同 seed 与模板会产生相同状态；`scenario_name="fixed"` 可继续使用原始确定性场景。
 
-## 13 维观测与规则基线
+## 14 维自机中心观测与规则基线
 
-每架飞机的正式观测为 `[归一化自身速度, 归一化俯仰, sin(psi), cos(psi), 归一化相对 x/y/z, 归一化相对 vx/vy/vz, 归一化距离, ATA/pi, AA/pi]`。相对 x、y 分别除以 `2*x_limit`、`2*y_limit`，相对 z 除以合法高度跨度，距离使用这三个最大相对尺度的欧氏范数；相对速度除以 `2*v_max`。观测不包含绝对位置、生命值、历史、雷达或友机信息，全部裁剪至 `[-1, 1]`。
+Actor 观测为 `[自身速度, 自身俯仰, 自身高度, 相对 forward/right/up, 相对速度 forward/right/up, 距离, yaw error, pitch error, ATA, AA]` 的 14 维归一化向量。以自身航向为基准，`forward=cos(psi)Dx+sin(psi)Dy`，`right=-sin(psi)Dx+cos(psi)Dy`，NED 中 `up=-Dz`；相对速度采用相同变换。观测不含绝对 x/y 或全局航向，具有水平平移和旋转近似不变性，并裁剪至 `[-1,1]`。
 
 `PurePursuitPolicy` 是用于端到端环境验证的单纯视线追击策略：直接跟踪当前 LOS，并尝试比目标快 `20 m/s`。它不预测、不规避、不读取奖励，也没有有限状态切换。
 
@@ -69,9 +69,13 @@ score = distance_score * ata_score * aa_score
 
 ## 参数共享 MAPPO 基线
 
-本项目的 MAPPO 是验证环境可学习性的简化基线，不是研究创新，也不是对某篇论文代码或超参数的严格复现。红蓝双方参与自博弈并共享同一个 Actor；Actor 仅使用各自 13 维 ego-centric 局部观测独立决策，不含 team one-hot 或 agent id。训练时，集中式 Critic 接收固定顺序拼接的 `[red_obs, blue_obs]` 26 维观测，并同时输出两个价值。两方样本共同更新 Actor；执行阶段不需要对方观测，符合集中训练、分散执行。
+本项目的 MAPPO 是验证环境可学习性的简化基线，不是研究创新。旧版让零和竞争双方共享一个正在更新的 Actor，红蓝相反 advantage 会产生抵消梯度；当前改为参数完全独立的 `red_actor` 和 `blue_actor`，各自只用本方样本更新。参数共享适合同一合作团队内的同构智能体；以后扩展 2v2 时，可让同队飞机共享本队 Actor，但竞争队伍不能共享同步更新的策略。
 
-Actor 是两层 128 单元 Tanh MLP，输出高斯均值并学习三维 `log_std`。它采样 `raw_action ~ Normal(mean,std)`，执行 `action=tanh(raw_action)`，log probability 包含 `-log(1-action²+epsilon)` Jacobian 修正，因此不会用概率不一致的事后 clip。Critic 是同样两层的 MLP，输出 `[V_red,V_blue]`。
+训练时保留一个集中式 Critic，输入按 red、blue 顺序拼接的绝对全局状态；每架飞机包含 `[x,y,高度,速度,俯仰,sin(psi),cos(psi)]`，共 14 维，能判断边界风险并输出 `[V_red,V_blue]`。执行时两个 Actor 都只读取本方 14 维局部观测，属于集中训练、分散执行。
+
+两个 Actor 都是两层 128 单元 Tanh MLP，输出高斯均值并学习限制在 `[-5,2]` 的三维 `log_std`。它采样 `raw_action ~ Normal(mean,std)`，执行 `action=tanh(raw_action)`，log probability 包含 Jacobian 修正。
+
+前 100,000 环境步只使用带后方速度优势的 `tail_chase` 课程模板，之后恢复三种模板随机训练；周期评估始终覆盖所有模板。v2 检查点分别保存两个 Actor，明确不兼容旧共享 Actor 检查点。
 
 训练使用 GAE 与 PPO clipped objective：
 
@@ -96,14 +100,14 @@ python scripts/run_dynamics_demo.py
 python scripts/run_env_smoke.py
 python scripts/run_combat_demo.py
 
-# 完整训练
-python scripts/train_mappo.py --env-config configs/homogeneous_1v1.yaml --train-config configs/mappo_1v1.yaml
+# CUDA 完整训练
+python scripts/train_mappo.py --env-config configs/homogeneous_1v1.yaml --train-config configs/mappo_1v1.yaml --device cuda
 
 # 快速管线验证
-python scripts/train_mappo.py --env-config configs/homogeneous_1v1.yaml --train-config configs/mappo_1v1.yaml --smoke
+python scripts/train_mappo.py --env-config configs/homogeneous_1v1.yaml --train-config configs/mappo_1v1.yaml --smoke --device cuda
 
 # 对零动作或纯追击对手评估
-python scripts/evaluate_mappo.py --checkpoint outputs/mappo/checkpoints/best.pt --episodes 100 --opponent zero --side both --scenario all
+python scripts/evaluate_mappo.py --checkpoint outputs/mappo/checkpoints/best.pt --actor red --episodes 90 --opponent pursuit --side both --scenario all --device cuda
 ```
 
 动力学演示独立运行 60 秒水平配平、30° 航向阶跃、-10° 俯仰阶跃和 170 m/s 速度阶跃验证，输出漂移与最终误差，并将四个响应面板保存为 `outputs/dynamics_demo.png`。

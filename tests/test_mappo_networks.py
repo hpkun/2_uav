@@ -1,11 +1,11 @@
 import torch
-from uav_combat.mappo.networks import CentralizedCritic, SharedActor
+from uav_combat.mappo.networks import CentralizedCritic, GaussianActor
 
 
 def test_actor_shapes_probabilities_and_gradients():
     torch.manual_seed(0)
-    actor = SharedActor(hidden_dim=32)
-    observation = torch.randn(7, 13)
+    actor = GaussianActor(hidden_dim=32)
+    observation = torch.randn(7, 14)
     action, sampled_log_prob = actor.sample_action(observation)
     evaluated_log_prob, entropy = actor.evaluate_actions(observation, action)
     assert action.shape == (7, 3) and sampled_log_prob.shape == (7,)
@@ -16,9 +16,10 @@ def test_actor_shapes_probabilities_and_gradients():
     assert deterministic.shape == (7, 3) and torch.isfinite(deterministic).all()
     (-evaluated_log_prob.mean()).backward()
     assert all(parameter.grad is not None and torch.isfinite(parameter.grad).all() for parameter in actor.parameters())
+    actor.log_std.data.fill_(100)
+    assert torch.allclose(actor._distribution(observation).scale, torch.full((7, 3), torch.exp(torch.tensor(2.0))))
 
 
 def test_centralized_critic_batch_output():
-    value = CentralizedCritic(hidden_dim=32)(torch.randn(5, 26))
+    value = CentralizedCritic(hidden_dim=32)(torch.randn(5, 14))
     assert value.shape == (5, 2) and torch.isfinite(value).all()
-
