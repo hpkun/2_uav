@@ -1,5 +1,6 @@
 from pathlib import Path
 import numpy as np
+import pytest
 from uav_combat.environment import HomogeneousAirCombatEnv
 
 CONFIG = Path(__file__).parents[1] / "configs/homogeneous_1v1.yaml"
@@ -35,3 +36,29 @@ def test_truncation_and_altitude_termination():
     env.reset(); env.aircraft[0].state.z = -100
     assert env.step(actions())[2]
 
+
+def test_step_requires_active_episode_and_reset_restores_it():
+    env = HomogeneousAirCombatEnv(CONFIG)
+    with pytest.raises(RuntimeError):
+        env.step(actions())
+    _, info = env.reset()
+    assert info["termination_reason"] is None
+    env.config["simulation"]["max_steps"] = 1
+    env.step(actions())
+    with pytest.raises(RuntimeError):
+        env.step(actions())
+    env.reset()
+    env.config["simulation"]["max_steps"] = 600
+    assert env.step(actions())[2:4] == (False, False)
+
+
+def test_xy_boundary_and_collision_termination():
+    env = HomogeneousAirCombatEnv(CONFIG)
+    env.reset(); env.aircraft[0].state.x = env.config["battlefield"]["x_limit"] + 1
+    result = env.step(actions())
+    assert result[2] and result[4]["termination_reason"] == "xy_boundary"
+    env.reset()
+    env.aircraft[1].state.x = env.aircraft[0].state.x + 10
+    env.aircraft[1].state.psi = env.aircraft[0].state.psi
+    result = env.step(actions())
+    assert result[2] and result[4]["termination_reason"] == "collision"

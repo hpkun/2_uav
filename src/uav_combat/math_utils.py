@@ -19,7 +19,3 @@ def safe_clip(value: float, lower: float, upper: float) -> float:
     return float(np.clip(value, lower, upper))
 
 
-def safe_norm(vector: np.ndarray, eps: float = 1e-8) -> float:
-    """返回不小于 eps 的欧氏范数。"""
-    return max(float(np.linalg.norm(np.asarray(vector, dtype=float))), eps)
-

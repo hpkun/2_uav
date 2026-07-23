@@ -11,9 +11,9 @@ aircraft:
   v_max: 250.0
   theta_min: -0.7853981633974483
   theta_max: 0.7853981633974483
-  nx_min: -0.5
-  nx_max: 0.5
-  nz_min: 0.0
+  nx_min: -1.0
+  nx_max: 1.0
+  nz_min: -3.0
   nz_max: 3.0
   phi_min: -1.5707963267948966
   phi_max: 1.5707963267948966
@@ -32,4 +32,3 @@ battlefield:
 initial_state:
   red: {x: 0.0, y: 0.0, altitude: 3000.0, v: 150.0, theta: 0.0, psi: 0.0}
   blue: {x: 3000.0, y: 0.0, altitude: 3000.0, v: 150.0, theta: 0.0, psi: 3.141592653589793}
-
