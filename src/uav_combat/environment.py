@@ -10,8 +10,10 @@ from .controller import TargetStateController
 from .dynamics import PointMassDynamics
 from .geometry import PairwiseGeometry, compute_pairwise_geometry
 from .integrator import RK4Integrator
+from .math_utils import angle_difference
 from .models import Aircraft, ControlCommand, TargetCommand
 from .scenario import HomogeneousScenario
+from .rewards import coupled_difference_rewards, madsac_segmented_reward
 
 
 class HomogeneousAirCombatEnv:
@@ -31,9 +33,9 @@ class HomogeneousAirCombatEnv:
         self.step_count = 0
         self._running = False
 
-    def reset(self, seed: int | None = None, scenario_name: str | None = None) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+    def reset(self, seed: int | None = None, scenario_name: str | None = None, rear_team: str | None = None) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
         """重置确定性场景，并恢复可运行状态。"""
-        self.aircraft = self.scenario.reset(seed, scenario_name)
+        self.aircraft = self.scenario.reset(seed, scenario_name, rear_team)
         self.step_count = 0
         self._running = True
         geometries = self._geometries()
@@ -48,7 +50,8 @@ class HomogeneousAirCombatEnv:
             "attacks": {"red_0": False, "blue_0": False},
             "geometries": geometries,
             "situation_scores": scores,
-            "reward_terms": {aircraft_id: {"dense": 0.0, "terminal": 0.0} for aircraft_id in scores},
+            "reward_terms": {aircraft_id: ({key: 0.0 for key in ("reward_terminal", "reward_boundary", "reward_guide", "reward_position", "reward_threat", "reward_total")} if self.config["combat"].get("reward_mode")=="madsac_segmented" else {"dense": 0.0, "terminal": 0.0}) for aircraft_id in scores},
+            "control_diagnostics": {},
         }
         return self._observations(geometries), info
 
@@ -63,12 +66,17 @@ class HomogeneousAirCombatEnv:
 
         targets: dict[str, TargetCommand] = {}
         controls: dict[str, ControlCommand] = {}
+        control_diagnostics: dict[str, dict[str, float | bool]] = {}
         old_states = {aircraft.aircraft_id: aircraft.state.copy() for aircraft in alive}
         for aircraft in alive:
             target, control = self.controller.control_from_action(
                 old_states[aircraft.aircraft_id], actions[aircraft.aircraft_id], aircraft.spec
             )
             targets[aircraft.aircraft_id], controls[aircraft.aircraft_id] = target, control
+            diagnostics = self.controller.diagnostics(old_states[aircraft.aircraft_id], target, control, aircraft.spec)
+            clipped_action = np.clip(np.asarray(actions[aircraft.aircraft_id], dtype=float), -1.0, 1.0)
+            diagnostics.update({"action_yaw": float(clipped_action[0]), "action_pitch": float(clipped_action[1]), "action_speed": float(clipped_action[2]), "delta_yaw": float(angle_difference(target.desired_psi, old_states[aircraft.aircraft_id].psi)), "delta_pitch": float(target.desired_theta-old_states[aircraft.aircraft_id].theta), "delta_speed": float(target.desired_v-old_states[aircraft.aircraft_id].v)})
+            control_diagnostics[aircraft.aircraft_id] = diagnostics
         new_states = {
             aircraft.aircraft_id: self.integrator.step(
                 old_states[aircraft.aircraft_id], controls[aircraft.aircraft_id], self.dynamics, aircraft.spec
@@ -117,6 +125,7 @@ class HomogeneousAirCombatEnv:
             "geometries": geometries,
             "situation_scores": scores,
             "reward_terms": reward_terms,
+            "control_diagnostics": control_diagnostics,
         }
         return self._observations(geometries), rewards, terminated, truncated, info
 
@@ -140,18 +149,13 @@ class HomogeneousAirCombatEnv:
 
     def _rewards(self, scores: dict[str, float], reason: str | None, outcome: str | None) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
         combat = self.config["combat"]
-        red_dense = combat["situation_reward_scale"] * (scores["red_0"] - scores["blue_0"])
-        terminal = {"red_0": 0.0, "blue_0": 0.0}
-        if outcome == "red":
-            terminal = {"red_0": combat["terminal_reward"], "blue_0": -combat["terminal_reward"]}
-        elif outcome == "blue":
-            terminal = {"red_0": -combat["terminal_reward"], "blue_0": combat["terminal_reward"]}
-        elif reason in {"mutual_kill", "collision"}:
-            terminal = {"red_0": -combat["terminal_reward"], "blue_0": -combat["terminal_reward"]}
-        dense = {"red_0": float(red_dense), "blue_0": float(-red_dense)}
-        rewards = {aircraft_id: dense[aircraft_id] + terminal[aircraft_id] for aircraft_id in dense}
-        terms = {aircraft_id: {"dense": dense[aircraft_id], "terminal": terminal[aircraft_id]} for aircraft_id in dense}
-        return rewards, terms
+        if combat.get("reward_mode", "coupled_difference") == "madsac_segmented":
+            red, blue = self._aircraft_by_id("red_0"), self._aircraft_by_id("blue_0")
+            terms = {"red_0": madsac_segmented_reward(red.state, blue.state, "red", reason, outcome), "blue_0": madsac_segmented_reward(blue.state, red.state, "blue", reason, outcome)}
+            return {key: value["reward_total"] for key, value in terms.items()}, terms
+        old_terms = coupled_difference_rewards(scores["red_0"], scores["blue_0"], combat["situation_reward_scale"], combat["terminal_reward"], reason, outcome)
+        terms = {f"{team}_0": values for team, values in old_terms.items()}
+        return {key: value["dense"] + value["terminal"] for key, value in terms.items()}, terms
 
     def _observations(self, geometries: dict[str, PairwiseGeometry] | None = None) -> dict[str, np.ndarray]:
         geometries = geometries or self._geometries()

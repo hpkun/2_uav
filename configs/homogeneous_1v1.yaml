@@ -30,6 +30,7 @@ battlefield:
   altitude_max: 6000.0
   collision_distance: 30.0
 combat:
+  reward_mode: madsac_segmented
   attack_distance_min: 100.0
   attack_distance_max: 1000.0
   attack_ata_max: 0.5235987755982988

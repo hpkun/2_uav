@@ -12,7 +12,7 @@ def main() -> None:
     if checkpoint.get("checkpoint_version",0)<2: raise RuntimeError("旧共享Actor检查点不能用于双Actor评估")
     config=checkpoint["config"]; actor=GaussianActor(14,3,config["network"]["hidden_dim"],config["network"]["log_std_init"]).to(device); actor.load_state_dict(checkpoint[f"{args.actor}_actor"])
     result=evaluate_actor(actor,args.env_config,args.episodes,device,args.opponent,args.side,args.scenario,checkpoint["seed"]+200000)
-    output=Path(config["experiment"]["output_dir"])/f"evaluation_{args.actor}_{args.opponent}.json"; output.write_text(json.dumps(result,indent=2),encoding="utf-8"); print(json.dumps(result,indent=2)); print(f"saved: {output}")
+    stem=Path(args.checkpoint).stem; seedset="seedset0"; output=Path(config["experiment"]["output_dir"])/f"evaluation_{stem}_{args.actor}_vs_{args.opponent}_{args.scenario}_{seedset}.json"; output.write_text(json.dumps(result,indent=2),encoding="utf-8"); print(json.dumps(result,indent=2)); print(f"saved: {output}")
 
 
 if __name__=="__main__": main()

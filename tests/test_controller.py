@@ -12,6 +12,13 @@ def test_zero_action_is_level_trim(spec):
     assert np.allclose([control.nx, control.nz, control.phi], [0, 1, 0])
 
 
+def test_paper_action_ranges_are_unchanged():
+    controller=TargetStateController()
+    assert controller.delta_yaw_max==np.pi
+    assert controller.delta_pitch_max==np.pi/3
+    assert controller.delta_speed_max==50.0
+
+
 def test_yaw_sign_and_limits(spec):
     controller = TargetStateController()
     state = AircraftState(0, 0, -3000, 150, 0, 0)

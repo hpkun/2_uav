@@ -17,7 +17,7 @@ class HomogeneousScenario:
         self.aircraft: list[Aircraft] = []
         self.scenario_name = "fixed"
 
-    def reset(self, seed: int | None = None, scenario_name: str | None = None) -> list[Aircraft]:
+    def reset(self, seed: int | None = None, scenario_name: str | None = None, rear_team: str | None = None) -> list[Aircraft]:
         """按种子与模板生成可复现的 red_0 和 blue_0。"""
         rng = np.random.default_rng(seed)
         templates = self.config["scenario"]["templates"]
@@ -25,7 +25,7 @@ class HomogeneousScenario:
         if chosen == "fixed":
             states = self._fixed_states()
         elif chosen in templates:
-            states = self._random_states(chosen, rng)
+            states = self._random_states(chosen, rng, rear_team)
         else:
             raise ValueError(f"unknown scenario_name: {chosen}")
         self.scenario_name = chosen
@@ -39,16 +39,17 @@ class HomogeneousScenario:
             states[team] = AircraftState(item["x"], item["y"], -item["altitude"], item["v"], item["theta"], item["psi"])
         return states
 
-    def _random_states(self, name: str, rng: np.random.Generator) -> dict[str, AircraftState]:
+    def _random_states(self, name: str, rng: np.random.Generator, rear_team: str | None = None) -> dict[str, AircraftState]:
         settings = self.config["scenario"]
         separation = float(rng.uniform(settings["separation_min"], settings["separation_max"]))
         if name == "tail_chase":
             positions = {"red": np.array([-separation / 2, 0.0]), "blue": np.array([separation / 2, 0.0])}
             headings = {"red": 0.0, "blue": 0.0}
-            rear_team = "red"
-            if settings["randomize_roles"] and bool(rng.integers(0, 2)):
+            assigned_rear_team = rear_team or "red"
+            should_swap = rear_team == "blue" or (rear_team is None and settings["randomize_roles"] and bool(rng.integers(0, 2)))
+            if should_swap:
                 positions["red"], positions["blue"] = positions["blue"], positions["red"]
-                rear_team = "blue"
+                assigned_rear_team = "blue"
         elif name == "offset_head_on":
             offset = settings["lateral_offset"] / 2.0
             positions = {"red": np.array([-separation / 2, offset]), "blue": np.array([separation / 2, -offset])}
@@ -70,7 +71,7 @@ class HomogeneousScenario:
             ))
             speed_offset = 0.0
             if name == "tail_chase":
-                speed_offset = (0.5 if team == rear_team else -0.5) * settings["tail_chase_speed_advantage"]
+                speed_offset = (0.5 if team == assigned_rear_team else -0.5) * settings["tail_chase_speed_advantage"]
             speed = float(np.clip(
                 settings["speed_center"] + speed_offset + rng.uniform(-settings["speed_jitter"], settings["speed_jitter"]),
                 self.spec.v_min, self.spec.v_max,

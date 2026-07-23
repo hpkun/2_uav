@@ -35,6 +35,12 @@ def test_tail_chase_roles_are_randomized():
     assert rear_teams == {"red", "blue"}
 
 
+def test_fixed_tail_chase_forces_red_to_rear():
+    for seed in range(20):
+        env=HomogeneousAirCombatEnv(CONFIG); env.reset(seed,"tail_chase",rear_team="red"); red,blue=env.aircraft
+        assert np.dot(red.state.velocity_vector()[:2],blue.state.as_array()[:2]-red.state.as_array()[:2])>0
+
+
 def test_axis_specific_observation_normalization_does_not_saturate_early():
     env = HomogeneousAirCombatEnv(CONFIG); env.reset(scenario_name="fixed")
     red, blue = env.aircraft

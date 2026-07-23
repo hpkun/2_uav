@@ -51,3 +51,11 @@ class TargetStateController:
         """一次完成动作映射和低层控制计算。"""
         target = self.action_to_target(state, action, spec)
         return target, self.compute_control(state, target, spec)
+
+    def diagnostics(self, state: AircraftState, target: TargetCommand, control: ControlCommand, spec: AircraftSpec) -> dict[str, float | bool]:
+        """返回不改变控制行为的误差、限幅前后变化率和饱和诊断。"""
+        yaw_error = angle_difference(target.desired_psi, state.psi); pitch_error = target.desired_theta - state.theta; speed_error = target.desired_v - state.v
+        raw_yaw = spec.k_yaw * yaw_error; raw_pitch = spec.k_pitch * pitch_error; raw_accel = spec.k_speed * speed_error
+        clipped_yaw = float(np.clip(raw_yaw, -spec.yaw_rate_max, spec.yaw_rate_max)); clipped_pitch = float(np.clip(raw_pitch, -spec.pitch_rate_max, spec.pitch_rate_max)); clipped_accel = float(np.clip(raw_accel, -spec.acceleration_max, spec.acceleration_max))
+        tolerance = 1e-8
+        return {"yaw_error": yaw_error, "pitch_error": pitch_error, "speed_error": speed_error, "unclipped_yaw_rate": raw_yaw, "unclipped_pitch_rate": raw_pitch, "unclipped_acceleration": raw_accel, "clipped_yaw_rate": clipped_yaw, "clipped_pitch_rate": clipped_pitch, "clipped_acceleration": clipped_accel, "nx": control.nx, "nz": control.nz, "phi": control.phi, "yaw_rate_saturated": abs(raw_yaw-clipped_yaw)>tolerance, "pitch_rate_saturated": abs(raw_pitch-clipped_pitch)>tolerance, "acceleration_saturated": abs(raw_accel-clipped_accel)>tolerance, "nx_saturated": min(abs(control.nx-spec.nx_min),abs(control.nx-spec.nx_max))<tolerance, "nz_saturated": min(abs(control.nz-spec.nz_min),abs(control.nz-spec.nz_max))<tolerance, "phi_saturated": min(abs(control.phi-spec.phi_min),abs(control.phi-spec.phi_max))<tolerance}
