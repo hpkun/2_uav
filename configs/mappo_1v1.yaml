@@ -1,7 +1,7 @@
 experiment:
   seed: 42
   device: auto
-  output_dir: outputs/mappo
+  output_dir: outputs/mappo_v5
 network:
   hidden_dim: 128
   log_std_init: -0.5
@@ -22,6 +22,7 @@ training:
   max_grad_norm: 0.5
   eval_interval_updates: 5
   checkpoint_interval_updates: 10
+  opponent_history_latest_probability: 0.7
 evaluation:
   episodes: 90
   deterministic: true

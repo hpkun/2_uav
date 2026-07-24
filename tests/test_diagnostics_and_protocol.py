@@ -51,7 +51,7 @@ def test_rule_baseline_single_episode_per_scenario_runs():
 
 
 def test_competitive_best_score_and_finalizer_is_read_only():
-    result={"overall":{"decisive_rate":.5,"boundary_rate":.1,"collision_rate":.2,"mean_episode_length":100}}
+    result={"overall":{"combat_decisive_rate":.5,"boundary_rate":.1,"collision_rate":.2,"mean_episode_length":100}}
     assert np.allclose(score(result),(.5,-.3,-100))
     assert "torch.save" not in inspect.getsource(finalizer)
 

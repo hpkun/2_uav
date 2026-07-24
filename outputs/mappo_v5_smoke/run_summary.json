@@ -1,0 +1,135 @@
+{
+  "device": "cuda",
+  "gpu": "NVIDIA GeForce RTX 5060 Laptop GPU",
+  "torch": "2.11.0+cu128",
+  "torch_cuda": "12.8",
+  "actual_environment_steps": 8192,
+  "updates": 64,
+  "elapsed_seconds": 140.02880855700005,
+  "peak_gpu_memory_bytes": 23807488,
+  "blocks": [
+    {
+      "opponent_source_side": "blue",
+      "opponent_generation": 0,
+      "opponent_is_latest": true,
+      "opponent_history_size": 1,
+      "active_generation_before": 0,
+      "active_generation_after": 1,
+      "block_index": 0,
+      "active_side": "red",
+      "start_env_steps": 0,
+      "end_env_steps": 2048
+    },
+    {
+      "opponent_source_side": "red",
+      "opponent_generation": 0,
+      "opponent_is_latest": false,
+      "opponent_history_size": 2,
+      "active_generation_before": 0,
+      "active_generation_after": 1,
+      "block_index": 1,
+      "active_side": "blue",
+      "start_env_steps": 2048,
+      "end_env_steps": 4096
+    },
+    {
+      "opponent_source_side": "blue",
+      "opponent_generation": 1,
+      "opponent_is_latest": true,
+      "opponent_history_size": 2,
+      "active_generation_before": 1,
+      "active_generation_after": 2,
+      "block_index": 2,
+      "active_side": "red",
+      "start_env_steps": 4096,
+      "end_env_steps": 6144
+    },
+    {
+      "opponent_source_side": "red",
+      "opponent_generation": 0,
+      "opponent_is_latest": false,
+      "opponent_history_size": 3,
+      "active_generation_before": 1,
+      "active_generation_after": 2,
+      "block_index": 3,
+      "active_side": "blue",
+      "start_env_steps": 6144,
+      "end_env_steps": 8192
+    }
+  ],
+  "scenario_counts": {
+    "tail_chase": 11,
+    "offset_head_on": 11,
+    "crossing": 10
+  },
+  "tail_rear_counts": {
+    "red": 6,
+    "blue": 5
+  },
+  "best_score": [
+    0.08333333333333333,
+    -0.0,
+    -552.8333333333334
+  ],
+  "best_score_basis": [
+    "combat_decisive_rate",
+    "-(boundary_rate + collision_rate)",
+    "-mean_episode_length"
+  ],
+  "bilateral_kill_rate": 0.0,
+  "kill_imbalance": 0.08333333333333333,
+  "red_history_length": 3,
+  "blue_history_length": 3,
+  "history_selection_counts": {
+    "latest": 2,
+    "old": 2
+  },
+  "opponent_history_latest_probability": 0.7,
+  "smoke_v5_restore_ok": true,
+  "block_evaluations": [
+    {
+      "block": 0,
+      "active_side": "red",
+      "opponent_generation": 0,
+      "red_kill_rate": 0.0,
+      "blue_kill_rate": 0.0,
+      "combat_decisive_rate": 0.0,
+      "boundary_rate": 1.0,
+      "collision_rate": 0.0,
+      "mean_episode_length": 413.4166666666667
+    },
+    {
+      "block": 1,
+      "active_side": "blue",
+      "opponent_generation": 0,
+      "red_kill_rate": 0.0,
+      "blue_kill_rate": 0.0,
+      "combat_decisive_rate": 0.0,
+      "boundary_rate": 0.0,
+      "collision_rate": 0.0,
+      "mean_episode_length": 600.0
+    },
+    {
+      "block": 2,
+      "active_side": "red",
+      "opponent_generation": 1,
+      "red_kill_rate": 0.0,
+      "blue_kill_rate": 0.0,
+      "combat_decisive_rate": 0.0,
+      "boundary_rate": 0.0,
+      "collision_rate": 0.0,
+      "mean_episode_length": 600.0
+    },
+    {
+      "block": 3,
+      "active_side": "blue",
+      "opponent_generation": 0,
+      "red_kill_rate": 0.0,
+      "blue_kill_rate": 0.0,
+      "combat_decisive_rate": 0.0,
+      "boundary_rate": 1.0,
+      "collision_rate": 0.0,
+      "mean_episode_length": 397.1666666666667
+    }
+  ]
+}

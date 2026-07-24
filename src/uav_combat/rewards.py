@@ -9,14 +9,36 @@ def _empty() -> dict[str, float]:
     return {key: 0.0 for key in ("reward_terminal", "reward_boundary", "reward_guide", "reward_position", "reward_threat", "reward_total")}
 
 
+BOUNDARY_REASONS = {"altitude_boundary", "xy_boundary", "boundary"}
+
+
+def terminal_team_rewards(reason: str | None, outcome: str | None, magnitude: float = 10.0) -> dict[str, float]:
+    """Map terminal causes to team rewards without treating boundary survival as a kill."""
+    rewards = {"red": 0.0, "blue": 0.0}
+    if reason == "red_kill":
+        return {"red": magnitude, "blue": -magnitude}
+    if reason == "blue_kill":
+        return {"red": -magnitude, "blue": magnitude}
+    if reason in {"collision", "mutual_kill"}:
+        return {"red": -magnitude, "blue": -magnitude}
+    if reason in BOUNDARY_REASONS:
+        if outcome == "red":
+            rewards["blue"] = -magnitude
+        elif outcome == "blue":
+            rewards["red"] = -magnitude
+        else:
+            rewards = {"red": -magnitude, "blue": -magnitude}
+    return rewards
+
+
 def madsac_segmented_reward(own: AircraftState, target: AircraftState, own_team: str, reason: str | None, outcome: str | None) -> dict[str, float]:
     """计算 MADSAC 数值参考奖励；pitch_error 近似论文 HA 属项目适配。"""
     result = _empty(); geometry = compute_pairwise_geometry(own, target); reverse = compute_pairwise_geometry(target, own)
-    if reason == "collision": result["reward_terminal"] = -10.0
-    elif reason in {"red_kill", "blue_kill", "mutual_kill"}:
-        result["reward_terminal"] = 10.0 if outcome == own_team else -10.0
-    elif reason in {"altitude_boundary", "xy_boundary", "boundary"}:
-        result["reward_boundary"] = 10.0 if outcome == own_team else (-10.0 if outcome in {"red", "blue"} else -10.0)
+    terminal = terminal_team_rewards(reason, outcome)
+    if reason in BOUNDARY_REASONS:
+        result["reward_boundary"] = terminal[own_team]
+    else:
+        result["reward_terminal"] = terminal[own_team]
     degrees = np.pi / 180.0; tolerance = 1e-12; pitch = abs(geometry.pitch_error)
     within = lambda value, limit: value <= limit + tolerance
     if geometry.distance >= 4000.0 and within(geometry.ata, 30 * degrees) and within(pitch, 30 * degrees):
@@ -37,8 +59,6 @@ def madsac_segmented_reward(own: AircraftState, target: AircraftState, own_team:
 
 def coupled_difference_rewards(red_score: float, blue_score: float, scale: float, terminal_reward: float, reason: str | None, outcome: str | None) -> dict[str, dict[str, float]]:
     """保留项目原有零和耦合差奖励用于消融。"""
-    dense = scale * (red_score - blue_score); terminal = {"red": 0.0, "blue": 0.0}
-    if outcome == "red": terminal = {"red": terminal_reward, "blue": -terminal_reward}
-    elif outcome == "blue": terminal = {"red": -terminal_reward, "blue": terminal_reward}
-    elif reason in {"mutual_kill", "collision"}: terminal = {"red": -terminal_reward, "blue": -terminal_reward}
+    dense = scale * (red_score - blue_score)
+    terminal = terminal_team_rewards(reason, outcome, terminal_reward)
     return {team: {"dense": float(dense if team == "red" else -dense), "terminal": terminal[team]} for team in ("red", "blue")}

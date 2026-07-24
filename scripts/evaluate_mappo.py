@@ -1,13 +1,10 @@
-"""Evaluate a v4 competitive checkpoint in one requested matchup."""
+"""Evaluate a v5 competitive checkpoint in one requested matchup."""
 import argparse
 import json
 from pathlib import Path
-
 import torch
-
 from uav_combat.mappo.networks import GaussianActor
 from uav_combat.mappo.trainer import evaluate_matchup, resolve_device
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -20,7 +17,8 @@ def main():
     parser.add_argument("--seedset", default="seedset0")
     args = parser.parse_args(); device = resolve_device(args.device)
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
-    if checkpoint.get("checkpoint_version") != 4: raise RuntimeError("evaluate_mappo.py requires an alternating self-play v4 checkpoint; v3 is incompatible")
+    if checkpoint.get("checkpoint_version") != 5:
+        raise RuntimeError("evaluate_mappo.py requires a v5 checkpoint; v4 and earlier lack historical opponents and revised reward/evaluation semantics")
     config = checkpoint["config"]; n = config["network"]
     red = GaussianActor(14, 3, n["hidden_dim"], n["log_std_init"]).to(device); blue = GaussianActor(14, 3, n["hidden_dim"], n["log_std_init"]).to(device)
     red.load_state_dict(checkpoint["red_actor"]); blue.load_state_dict(checkpoint["blue_actor"])
@@ -28,6 +26,5 @@ def main():
     output = Path(config["experiment"]["output_dir"]) / f"evaluation_{Path(args.checkpoint).stem}_{args.matchup}_{args.scenario}_{args.seedset}.json"
     output.write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps(result, indent=2)); print(f"saved: {output}")
-
 
 if __name__ == "__main__": main()
