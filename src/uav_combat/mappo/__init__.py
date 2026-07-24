@@ -2,6 +2,6 @@
 
 from .buffer import MAPPOBuffer
 from .networks import CentralizedCritic, GaussianActor, SharedActor
-from .trainer import MAPPOTrainer, evaluate_actor
+from .trainer import MAPPOTrainer, evaluate_competitive_match, evaluate_matchup
 
-__all__ = ["MAPPOBuffer", "GaussianActor", "SharedActor", "CentralizedCritic", "MAPPOTrainer", "evaluate_actor"]
+__all__ = ["MAPPOBuffer", "GaussianActor", "SharedActor", "CentralizedCritic", "MAPPOTrainer", "evaluate_competitive_match", "evaluate_matchup"]

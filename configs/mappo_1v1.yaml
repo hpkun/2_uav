@@ -6,14 +6,10 @@ network:
   hidden_dim: 128
   log_std_init: -0.5
 training:
-  training_mode: paper_staged
-  total_env_steps: 2000000
+  training_mode: alternating_self_play
+  total_env_steps: 1000000
   num_envs: 32
   rollout_steps: 256
-  straight_tail_chase_env_steps: 300000
-  pursuit_tail_chase_env_steps: 1000000
-  fixed_training_env_steps: 2000000
-  fixed_opponent_gate_win_rate: 0.70
   alternating_block_env_steps: 100000
   ppo_epochs: 5
   minibatch_size: 2048

@@ -4,27 +4,43 @@
   "torch": "2.11.0+cu128",
   "torch_cuda": "12.8",
   "actual_environment_steps": 8192,
-  "fixed_elapsed_seconds": 53.98417866900127,
-  "total_elapsed_seconds": 88.69841907299997,
-  "peak_gpu_memory_bytes": 19391488,
-  "stages": {
-    "straight_tail_chase": {
-      "environment_steps": 2048,
-      "updates": 16,
-      "elapsed_seconds": 20.668023669997638
+  "updates": 64,
+  "elapsed_seconds": 86.29718151199995,
+  "peak_gpu_memory_bytes": 19519488,
+  "blocks": [
+    {
+      "block_index": 0,
+      "active_side": "red",
+      "end_env_steps": 2048
     },
-    "pursuit_tail_chase": {
-      "environment_steps": 2048,
-      "updates": 16,
-      "elapsed_seconds": 11.83645176799837
+    {
+      "block_index": 1,
+      "active_side": "blue",
+      "end_env_steps": 4096
     },
-    "pursuit_all_scenarios": {
-      "environment_steps": 4096,
-      "updates": 32,
-      "elapsed_seconds": 21.478262373999314
+    {
+      "block_index": 2,
+      "active_side": "red",
+      "end_env_steps": 6144
+    },
+    {
+      "block_index": 3,
+      "active_side": "blue",
+      "end_env_steps": 8192
     }
+  ],
+  "scenario_counts": {
+    "tail_chase": 12,
+    "offset_head_on": 12,
+    "crossing": 11
   },
-  "fixed_gate_win_rate": 0.0,
-  "fixed_gate_pass": false,
-  "competitive_executed": false
+  "tail_rear_counts": {
+    "red": 6,
+    "blue": 6
+  },
+  "best_score": [
+    1.0,
+    -0.9166666666666666,
+    -225.33333333333334
+  ]
 }

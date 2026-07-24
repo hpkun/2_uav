@@ -1,0 +1,30 @@
+{
+  "device": "cuda",
+  "gpu": "NVIDIA GeForce RTX 5060 Laptop GPU",
+  "torch": "2.11.0+cu128",
+  "torch_cuda": "12.8",
+  "actual_environment_steps": 2000000,
+  "fixed_elapsed_seconds": 4408.248527264001,
+  "total_elapsed_seconds": 5845.464273509999,
+  "peak_gpu_memory_bytes": 24802816,
+  "stages": {
+    "straight_tail_chase": {
+      "environment_steps": 300000,
+      "updates": 37,
+      "elapsed_seconds": 1304.5731477959998
+    },
+    "pursuit_tail_chase": {
+      "environment_steps": 700000,
+      "updates": 86,
+      "elapsed_seconds": 2076.5613966989986
+    },
+    "pursuit_all_scenarios": {
+      "environment_steps": 1000000,
+      "updates": 123,
+      "elapsed_seconds": 1027.0995598900008
+    }
+  },
+  "fixed_gate_win_rate": 0.11333333333333333,
+  "fixed_gate_pass": false,
+  "competitive_executed": false
+}

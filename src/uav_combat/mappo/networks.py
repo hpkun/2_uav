@@ -44,8 +44,8 @@ class CentralizedCritic(nn.Module):
 
     def __init__(self, observation_dim: int = 14, hidden_dim: int = 128) -> None:
         super().__init__()
-        self.network = nn.Sequential(nn.Linear(observation_dim, hidden_dim), nn.Tanh(), nn.Linear(hidden_dim, hidden_dim), nn.Tanh(), nn.Linear(hidden_dim, 2))
+        self.network = nn.Sequential(nn.Linear(observation_dim, hidden_dim), nn.Tanh(), nn.Linear(hidden_dim, hidden_dim), nn.Tanh(), nn.Linear(hidden_dim, 1))
 
     def forward(self, global_state: torch.Tensor) -> torch.Tensor:
         """计算双价值。"""
-        return self.network(global_state)
+        return self.network(global_state).squeeze(-1)

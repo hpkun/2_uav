@@ -1,0 +1,48 @@
+{
+  "overall": {
+    "episodes": 90,
+    "wins": 0,
+    "losses": 9,
+    "draws": 81,
+    "win_rate": 0.0,
+    "loss_rate": 0.1,
+    "draw_rate": 0.9,
+    "mean_return": -1.1982540021682286,
+    "mean_episode_length": 581.3666666666667
+  },
+  "by_scenario": {
+    "tail_chase": {
+      "episodes": 30,
+      "wins": 0,
+      "losses": 8,
+      "draws": 22,
+      "win_rate": 0.0,
+      "loss_rate": 0.26666666666666666,
+      "draw_rate": 0.7333333333333333,
+      "mean_return": -2.9354110267032003,
+      "mean_episode_length": 544.4333333333333
+    },
+    "offset_head_on": {
+      "episodes": 30,
+      "wins": 0,
+      "losses": 1,
+      "draws": 29,
+      "win_rate": 0.0,
+      "loss_rate": 0.03333333333333333,
+      "draw_rate": 0.9666666666666667,
+      "mean_return": -0.4795736742693306,
+      "mean_episode_length": 599.6666666666666
+    },
+    "crossing": {
+      "episodes": 30,
+      "wins": 0,
+      "losses": 0,
+      "draws": 30,
+      "win_rate": 0.0,
+      "loss_rate": 0.0,
+      "draw_rate": 1.0,
+      "mean_return": -0.1797773055321555,
+      "mean_episode_length": 600.0
+    }
+  }
+}

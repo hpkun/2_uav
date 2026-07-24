@@ -9,7 +9,7 @@ from uav_combat.integrator import RK4Integrator
 from uav_combat.models import AircraftState
 from uav_combat.mappo.trainer import new_funnel,update_funnel
 from scripts.evaluate_rule_baselines import run_matchup
-from scripts.train_mappo import phase_spec
+from scripts.train_mappo import score
 import scripts.finalize_fixed_diagnostics as finalizer
 
 CONFIG=Path(__file__).parents[1]/"configs/homogeneous_1v1.yaml"
@@ -50,10 +50,9 @@ def test_rule_baseline_single_episode_per_scenario_runs():
     result=run_matchup(CONFIG,"pursuit","zero",episodes_per_scenario=1,seed=1234); assert result["overall"]["episodes"]==3 and set(result["by_scenario"])=={"tail_chase","offset_head_on","crossing"}
 
 
-def test_stage_checkpoint_names_and_finalizer_is_read_only():
-    assert phase_spec("straight_tail_chase")[2:]==("straight_best.pt","straight_final.pt")
-    assert phase_spec("pursuit_tail_chase")[2:]==("pursuit_tail_best.pt","pursuit_tail_final.pt")
-    assert phase_spec("pursuit_all_scenarios")[2:]==("fixed_best.pt","fixed_final.pt")
+def test_competitive_best_score_and_finalizer_is_read_only():
+    result={"overall":{"decisive_rate":.5,"boundary_rate":.1,"collision_rate":.2,"mean_episode_length":100}}
+    assert np.allclose(score(result),(.5,-.3,-100))
     assert "torch.save" not in inspect.getsource(finalizer)
 
 

@@ -1,0 +1,117 @@
+{
+  "checkpoint": "fixed_best",
+  "actor": "red",
+  "opponent": "pursuit",
+  "scenario": "all",
+  "seed_set": "seedset0",
+  "episodes": 300,
+  "environment_steps_observed": 48301,
+  "gate_win_rate": 0.11333333333333333,
+  "gate_pass": false,
+  "reward_component_mean_per_step": {
+    "reward_terminal": -0.009730647398604584,
+    "reward_boundary": -0.038094449390281775,
+    "reward_guide": 0.0,
+    "reward_position": 0.0019332933065567962,
+    "reward_threat": 0.0,
+    "reward_total": -0.045891803482330226
+  },
+  "actions": {
+    "yaw": {
+      "mean": -0.127129704398552,
+      "std": 0.5539938068820622,
+      "min": -0.9890650510787964,
+      "max": 0.860012948513031
+    },
+    "pitch": {
+      "mean": -0.3232156673674945,
+      "std": 0.311653837025104,
+      "min": -0.9024469256401062,
+      "max": 0.5326433181762695
+    },
+    "speed": {
+      "mean": 0.8810446192603653,
+      "std": 0.1268196866584631,
+      "min": 0.01834077015519142,
+      "max": 0.9747517704963684
+    }
+  },
+  "mean_control_diagnostics": {
+    "delta_yaw": -0.39938961826182856,
+    "delta_pitch": -0.05387759215293167,
+    "delta_speed": 24.307687816184007,
+    "yaw_error": -0.39938961826182856,
+    "pitch_error": -0.05387759215293167,
+    "speed_error": 24.307687816184007,
+    "unclipped_yaw_rate": -0.39938961826182856,
+    "unclipped_pitch_rate": -0.05387759215293167,
+    "unclipped_acceleration": 12.153843908092004,
+    "clipped_yaw_rate": -0.06788205546678777,
+    "clipped_pitch_rate": -0.05158316059379933,
+    "clipped_acceleration": 5.018930676624757,
+    "actual_yaw_rate": -0.02154630874450466,
+    "actual_pitch_rate": -0.04340782064411673,
+    "actual_acceleration": 5.018930676624757,
+    "nx": 0.06781306403072714,
+    "nz": 0.6272552810346291,
+    "phi": 0.38358316883660504
+  },
+  "control_saturation_rates": {
+    "yaw_rate": 0.7338771454007164,
+    "pitch_rate": 0.11105360137471273,
+    "acceleration": 0.5422455021635163,
+    "nx": 0.0,
+    "nz": 0.8514523508830045,
+    "phi": 0.0
+  },
+  "tracking_absolute_errors": {
+    "acceleration": {
+      "mae": 9.11374278492078e-17,
+      "median": 0.0,
+      "p95": 4.440892098500626e-16,
+      "max": 1.7763568394002505e-15
+    },
+    "pitch_rate": {
+      "mae": 0.03896847734632623,
+      "median": 0.014654114155923244,
+      "p95": 0.13081240549703738,
+      "max": 0.21384406122414096
+    },
+    "yaw_rate": {
+      "mae": 0.14723379876558904,
+      "median": 0.18068584731464393,
+      "p95": 0.23239045245085282,
+      "max": 0.25894110753313526
+    }
+  },
+  "attack_funnel": {
+    "within_4000_rate": 1.0,
+    "attack_distance_entry_rate": 0.7966666666666666,
+    "ata_gate_rate": 0.99,
+    "aa_gate_rate": 0.73,
+    "distance_and_ata_entry_rate": 0.5466666666666666,
+    "distance_and_aa_entry_rate": 0.5266666666666666,
+    "ata_and_aa_entry_rate": 0.3333333333333333,
+    "full_attack_envelope_entry_rate": 0.11333333333333333,
+    "attack_to_kill_conversion_rate": 1.0,
+    "kill_rate": 0.11333333333333333,
+    "mean_minimum_distance_violation": 177.2509747153199,
+    "mean_minimum_ata_violation": 0.0001845292110203182,
+    "mean_minimum_aa_violation": 0.3193394171052892,
+    "mean_minimum_combined_violation": 0.5031015737409578
+  },
+  "termination_rates": {
+    "win_rate": 0.11333333333333333,
+    "loss_rate": 0.8833333333333333,
+    "draw_rate": 0.0033333333333333335,
+    "boundary_rate": 0.6133333333333333,
+    "max_steps_rate": 0.0033333333333333335,
+    "collision_rate": 0.0
+  },
+  "termination_reason_counts": {
+    "red_kill": 34,
+    "blue_kill": 81,
+    "altitude_boundary": 184,
+    "max_steps": 1
+  }
+}

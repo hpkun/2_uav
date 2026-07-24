@@ -22,4 +22,4 @@ def test_actor_shapes_probabilities_and_gradients():
 
 def test_centralized_critic_batch_output():
     value = CentralizedCritic(hidden_dim=32)(torch.randn(5, 14))
-    assert value.shape == (5, 2) and torch.isfinite(value).all()
+    assert value.shape == (5,) and torch.isfinite(value).all()

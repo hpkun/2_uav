@@ -1,0 +1,14 @@
+{
+  "episodes": 60,
+  "wins": 0,
+  "losses": 30,
+  "draws": 30,
+  "win_rate": 0.0,
+  "loss_rate": 0.5,
+  "draw_rate": 0.5,
+  "mean_return": -5.083582740926983,
+  "mean_episode_length": 541.6333333333333,
+  "mean_terminal_distance": 7116.724964679446,
+  "mean_ATA": 1.6502595036871033,
+  "mean_AA": 0.34869606901253725
+}
