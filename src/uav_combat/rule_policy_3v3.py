@@ -69,5 +69,8 @@ class NearestTargetPursuitPolicy3v3:
         return actions, targets
 
     def reset_counters(self) -> None:
-        """Reset per-episode tracking counters."""
+        """Reset all per-episode tracking counters."""
         self._prev_targets.clear()
+        self.target_switch_count.clear()
+        self.target_selection_count.clear()
+        self.focus_fire_count = 0

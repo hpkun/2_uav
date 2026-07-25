@@ -1,142 +1,247 @@
-"""Train 3v3 red MAPPO vs fixed-rule blue."""
+"""Train 3v3 red MAPPO vs fixed-rule blue with evaluation, best selection, plots."""
 import argparse, csv, json, time
 from pathlib import Path
 import numpy as np
-import torch
-import yaml
-from uav_combat.mappo.trainer_3v3 import FixedBlue3v3MAPPOTrainer
+import torch, yaml
+import os; os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+import matplotlib; matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from uav_combat.mappo.trainer_3v3 import (FixedBlue3v3MAPPOTrainer, compute_best_score,
+                                            CHECKPOINT_FAMILY, CHECKPOINT_VERSION_3V3)
+from uav_combat.mappo.evaluation_3v3 import evaluate_mappo_fixed_blue_3v3
 
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--env-config", default="configs/homogeneous_3v3.yaml")
     p.add_argument("--train-config", default="configs/mappo_3v3_fixed_blue.yaml")
     p.add_argument("--smoke", action="store_true")
-    p.add_argument("--total-env-steps", type=int)
-    p.add_argument("--num-envs", type=int)
+    p.add_argument("--total-env-steps", type=int); p.add_argument("--num-envs", type=int)
     p.add_argument("--env-workers", type=int, default=None)
-    p.add_argument("--seed", type=int)
-    p.add_argument("--device")
-    p.add_argument("--output-dir")
-    p.add_argument("--resume")
+    p.add_argument("--seed", type=int); p.add_argument("--device")
+    p.add_argument("--output-dir"); p.add_argument("--resume")
     return p.parse_args()
 
 def load_config(args):
-    with open(args.train_config, encoding="utf-8") as f:
-        config = yaml.safe_load(f)
+    with open(args.train_config, encoding="utf-8") as f: config = yaml.safe_load(f)
     if config["training"].get("training_mode") != "fixed_rule_blue_3v3":
-        raise ValueError("train_mappo_3v3.py requires fixed_rule_blue_3v3")
+        raise ValueError("requires fixed_rule_blue_3v3")
     config["experiment"]["output_dir"] = config["experiment"].get("output_dir", "outputs/mappo_3v3_fixed_blue")
     config["training"].setdefault("num_env_workers", 4)
+    config["training"].setdefault("evaluation_interval_env_steps", 100000)
+    config["training"].setdefault("quick_evaluation_episodes", 60)
     if args.smoke:
-        config["training"].update(total_env_steps=16384, num_envs=8, rollout_steps=128, ppo_epochs=2, minibatch_size=512)
-        config["experiment"]["output_dir"] = "outputs/mappo_3v3_fixed_blue_smoke"
-    for val, sec, key in (
-        (args.total_env_steps, "training", "total_env_steps"),
-        (args.num_envs, "training", "num_envs"),
-        (args.env_workers, "training", "num_env_workers"),
-        (args.seed, "experiment", "seed"),
-        (args.device, "experiment", "device"),
-        (args.output_dir, "experiment", "output_dir"),
-    ):
-        if val is not None:
-            config[sec][key] = val
+        config["training"].update(total_env_steps=16384, num_envs=8, rollout_steps=128, ppo_epochs=2, minibatch_size=512,
+                                   evaluation_interval_env_steps=8192, quick_evaluation_episodes=12)
+        config["experiment"]["output_dir"] = "outputs/mappo_3v3_fixed_blue_smoke_v2"
+    for val, sec, key in ((args.total_env_steps,"training","total_env_steps"),(args.num_envs,"training","num_envs"),
+                          (args.env_workers,"training","num_env_workers"),(args.seed,"experiment","seed"),
+                          (args.device,"experiment","device"),(args.output_dir,"experiment","output_dir")):
+        if val is not None: config[sec][key] = val
     return config
 
-def main():
-    args = parse_args()
-    config = load_config(args)
-    t_cfg = config["training"]
-    seed = config["experiment"]["seed"]
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+def _plot_curves(rows, output, prefix, title, ycols, ylabels):
+    if not rows: return
+    fig, axes = plt.subplots(len(ycols), 1, figsize=(10, 2.5*len(ycols)), sharex=True)
+    if len(ycols) == 1: axes = [axes]
+    for ax, col, lbl in zip(axes, ycols, ylabels):
+        vals = [r.get(col, np.nan) for r in rows]
+        ax.plot(vals, linewidth=0.8)
+        ax.set_ylabel(lbl); ax.grid(True, alpha=0.3)
+    axes[-1].set_xlabel("Update")
+    fig.suptitle(title, fontsize=11)
+    fig.tight_layout(); fig.savefig(output / f"{prefix}.png", dpi=100); plt.close(fig)
 
-    total = int(t_cfg["total_env_steps"])
-    num_envs = int(t_cfg["num_envs"])
-    num_workers = int(t_cfg.get("num_env_workers", 4))
-    print(f"num_envs={num_envs} num_env_workers={num_workers} envs_per_worker={num_envs // num_workers}", flush=True)
+def main():
+    args = parse_args(); config = load_config(args)
+    tc = config["training"]; seed = config["experiment"]["seed"]
+    np.random.seed(seed); torch.manual_seed(seed)
+    total, num_envs = int(tc["total_env_steps"]), int(tc["num_envs"])
+    num_workers = int(tc.get("num_env_workers", 4))
+    eval_interval = int(tc.get("evaluation_interval_env_steps", 100000))
+    quick_eps = int(tc.get("quick_evaluation_episodes", 60))
+    device_str = config["experiment"]["device"]
+    print(f"num_envs={num_envs} workers={num_workers} envs_per_worker={num_envs//num_workers}", flush=True)
 
     trainer = FixedBlue3v3MAPPOTrainer(args.env_config, config)
-    if args.resume:
-        trainer.load_checkpoint(args.resume)
-
     output = Path(config["experiment"]["output_dir"])
-    checkpoints = output / "checkpoints"
-    checkpoints.mkdir(parents=True, exist_ok=True)
-    trainer.save_checkpoint(checkpoints / "initial.pt")
+    ckpt_dir = output / "checkpoints"; eval_dir = output / "evaluations"
+    ckpt_dir.mkdir(parents=True, exist_ok=True); eval_dir.mkdir(parents=True, exist_ok=True)
+
+    # Resume or init
+    is_resume = bool(args.resume)
+    if is_resume:
+        trainer.load_checkpoint(args.resume)
+    else:
+        if not (ckpt_dir / "initial.pt").exists():
+            trainer.save_checkpoint(ckpt_dir / "initial.pt")
 
     print(f"device={trainer.device}", flush=True)
-    start = time.perf_counter()
-    rows = []
+    start = time.perf_counter(); rows = []; pure_train_start = time.perf_counter()
+    eval_accum = trainer.total_evaluation_seconds
+
+    # Initial evaluation (only if not resume or initial eval missing)
+    if not is_resume or not (eval_dir / "evaluation_initial.json").exists():
+        t_ev = time.perf_counter()
+        init_eval = evaluate_mappo_fixed_blue_3v3(trainer.red_actor, args.env_config, quick_eps,
+                                                    num_envs, num_workers, trainer.device, seed + 100000)
+        eval_accum += time.perf_counter() - t_ev
+        (eval_dir / "evaluation_initial.json").write_text(json.dumps(init_eval, indent=2, default=str))
+        if trainer.best_score is None:
+            trainer.best_score = compute_best_score(init_eval)
+            trainer.best_evaluation = init_eval
+            trainer.best_checkpoint_name = "initial.pt"
+            trainer.save_checkpoint(ckpt_dir / "best.pt")
+            (eval_dir / "evaluation_best.json").write_text(json.dumps(init_eval, indent=2, default=str))
+    trainer.total_evaluation_seconds = eval_accum
+
+    # Track last milestone evaluated
+    last_eval_milestone = (trainer.env_steps // eval_interval) * eval_interval
 
     try:
         while trainer.env_steps < total:
             remaining = total - trainer.env_steps
-            completed = trainer.collect_rollout(remaining)
+            trainer.collect_rollout(remaining)
             metrics = trainer.update()
-
-            if args.smoke:
-                finite_vals = [v for v in metrics.values() if isinstance(v, (int, float))]
-                if not np.isfinite(finite_vals).all():
-                    raise FloatingPointError("non-finite smoke metrics")
-
-            row = {
-                "update": trainer.update_count,
-                "env_steps": trainer.env_steps,
-                **metrics,
-            }
-            rows.append(row)
-
-            trainer.save_checkpoint(checkpoints / "latest.pt")
             elapsed = time.perf_counter() - start
             env_sps = trainer.env_steps / elapsed if elapsed > 0 else 0
+
+            row = {"update": trainer.update_count, "env_steps": trainer.env_steps,
+                   "policy_loss": metrics["policy_loss"], "value_loss": metrics["value_loss"],
+                   "entropy": metrics["entropy"], "approx_kl": metrics["approx_kl"],
+                   "clip_fraction": metrics["clip_fraction"],
+                   "actor_grad_norm": metrics["actor_grad_norm"],
+                   "advantage_mean": metrics["advantage_mean"],
+                   "advantage_std": metrics["advantage_std"],
+                   "alive_actor_sample_fraction": metrics["alive_actor_sample_fraction"],
+                   "env_steps_per_second": env_sps,
+                   "environment_step_seconds": trainer._timing["env_step"],
+                   "policy_inference_seconds": trainer._timing["policy_inference"],
+                   "ppo_update_seconds": trainer._timing["ppo_update"],
+                   "evaluation_seconds": trainer.total_evaluation_seconds,
+                   "completed_episodes": np.nan, "red_complete_elimination_success_rate": np.nan,
+                   "mean_red_attack_kills": np.nan, "mean_blue_attack_kills": np.nan,
+                   "mean_red_survivors": np.nan, "mean_blue_survivors": np.nan,
+                   "mean_red_boundary_deaths": np.nan, "mean_red_collision_deaths": np.nan,
+                   "max_steps_rate": np.nan, "mean_episode_length": np.nan,
+                   "mean_episode_return": np.nan}
+            rows.append(row)
+
+            # Evaluation at milestones
+            cur_milestone = (trainer.env_steps // eval_interval) * eval_interval
+            if cur_milestone > last_eval_milestone and cur_milestone > 0:
+                last_eval_milestone = cur_milestone
+                t_ev = time.perf_counter()
+                ev = evaluate_mappo_fixed_blue_3v3(trainer.red_actor, args.env_config, quick_eps,
+                                                     num_envs, num_workers, trainer.device, seed + 100000)
+                ev_elapsed = time.perf_counter() - t_ev
+                trainer.total_evaluation_seconds += ev_elapsed
+                (eval_dir / f"evaluation_step_{cur_milestone:06d}.json").write_text(json.dumps(ev, indent=2, default=str))
+                sc = compute_best_score(ev)
+                if trainer.best_score is None or sc > trainer.best_score:
+                    trainer.best_score = sc; trainer.best_evaluation = ev
+                    trainer.best_checkpoint_name = f"step_{cur_milestone:06d}.pt"
+                    trainer.save_checkpoint(ckpt_dir / "best.pt")
+                    (eval_dir / "evaluation_best.json").write_text(json.dumps(ev, indent=2, default=str))
+                trainer.evaluation_history.append({"env_steps": trainer.env_steps, "score": list(sc), **ev})
+                # Update training rows with eval results
+                for r in rows[-1:]:
+                    r.update({"completed_episodes": ev.get("episodes", 0),
+                              "red_complete_elimination_success_rate": ev.get("red_complete_elimination_success_rate", np.nan),
+                              "mean_red_attack_kills": ev.get("mean_red_attack_kills", np.nan),
+                              "mean_blue_attack_kills": ev.get("mean_blue_attack_kills", np.nan),
+                              "mean_red_survivors": ev.get("mean_red_survivors", np.nan),
+                              "mean_blue_survivors": ev.get("mean_blue_survivors", np.nan),
+                              "mean_red_boundary_deaths": ev.get("mean_red_boundary_deaths", np.nan),
+                              "mean_red_collision_deaths": ev.get("mean_red_collision_deaths", np.nan) if isinstance(ev.get("mean_red_collision_deaths"), (int, float)) else np.nan,
+                              "max_steps_rate": ev.get("max_steps_rate", np.nan),
+                              "mean_episode_length": ev.get("mean_episode_length", np.nan),
+                              "mean_episode_return": ev.get("mean_team_return", np.nan)})
+
+            trainer.save_checkpoint(ckpt_dir / "latest.pt")
             tmd = trainer._timing
             print(f"update={trainer.update_count} steps={trainer.env_steps} env_sps={env_sps:.1f} "
-                  f"env_step={tmd['env_step']:.1f}s policy={tmd['policy_inference']:.1f}s "
-                  f"ppo={tmd['ppo_update']:.1f}s loss={metrics['policy_loss']:.4f} "
-                  f"val_loss={metrics['value_loss']:.4f}", flush=True)
+                  f"loss={metrics['policy_loss']:.4f} val={metrics['value_loss']:.4f} "
+                  f"kl={metrics['approx_kl']:.5f}", flush=True)
 
-            # Checkpoint milestones
-            eval_interval = int(t_cfg.get("evaluation_interval_env_steps", 100000))
-            milestone = (trainer.env_steps // eval_interval) * eval_interval
-            if trainer.env_steps > 0 and trainer.env_steps % eval_interval < num_envs * trainer.rollout_steps:
-                ckpt_path = checkpoints / f"step_{milestone:06d}.pt"
-                if not ckpt_path.exists():
-                    trainer.save_checkpoint(ckpt_path)
+            # Write metrics CSV
+            if rows:
+                keys = list(dict.fromkeys(k for row in rows for k in row))
+                with (output / "training_metrics.csv").open("w", newline="", encoding="utf-8") as f:
+                    w = csv.DictWriter(f, fieldnames=keys); w.writeheader(); w.writerows(rows)
     finally:
         trainer.close()
 
-    trainer.save_checkpoint(checkpoints / "final.pt")
+    trainer.save_checkpoint(ckpt_dir / "final.pt")
+    # Final evaluation
+    t_ev = time.perf_counter()
+    final_eval = evaluate_mappo_fixed_blue_3v3(trainer.red_actor, args.env_config, quick_eps,
+                                                 num_envs, num_workers, trainer.device, seed + 100000)
+    trainer.total_evaluation_seconds += time.perf_counter() - t_ev
+    (eval_dir / "evaluation_final.json").write_text(json.dumps(final_eval, indent=2, default=str))
+    sc = compute_best_score(final_eval)
+    if trainer.best_score is None or sc > trainer.best_score:
+        trainer.best_score = sc; trainer.best_evaluation = final_eval
+        trainer.best_checkpoint_name = "final.pt"
+        trainer.save_checkpoint(ckpt_dir / "best.pt")
+        (eval_dir / "evaluation_best.json").write_text(json.dumps(final_eval, indent=2, default=str))
 
-    # Smoke restore test
+    # Smoke restore
     restored_ok = None
     if args.smoke:
         restored = FixedBlue3v3MAPPOTrainer(args.env_config, config)
-        restored.load_checkpoint(checkpoints / "final.pt")
+        restored.load_checkpoint(ckpt_dir / "final.pt")
         restored.collect_rollout()
         restored_ok = restored.env_steps == trainer.env_steps + restored.rollout_steps * restored.num_envs
         restored.close()
-        if not restored_ok:
-            raise AssertionError("3v3 smoke continuation failed")
+        if not restored_ok: raise AssertionError("smoke continuation failed")
 
     elapsed_total = time.perf_counter() - start
     tmd = trainer._timing
     summary = {
-        "checkpoint_family": "homogeneous_3v3_fixed_blue",
-        "checkpoint_version": 1,
-        "device": str(trainer.device),
-        "actual_environment_steps": trainer.env_steps,
-        "updates": trainer.update_count,
-        "num_envs": num_envs,
-        "num_env_workers": num_workers,
+        "checkpoint_family": CHECKPOINT_FAMILY, "checkpoint_version": CHECKPOINT_VERSION_3V3,
+        "device": str(trainer.device), "actual_environment_steps": trainer.env_steps,
+        "updates": trainer.update_count, "num_envs": num_envs, "num_env_workers": num_workers,
         "environments_per_worker": num_envs // num_workers,
-        "environment_step_seconds": tmd["env_step"],
-        "policy_inference_seconds": tmd["policy_inference"],
-        "ppo_update_seconds": tmd["ppo_update"],
         "total_training_seconds": elapsed_total,
+        "pure_training_seconds": elapsed_total - trainer.total_evaluation_seconds,
+        "evaluation_seconds": trainer.total_evaluation_seconds,
         "environment_steps_per_second": trainer.env_steps / elapsed_total if elapsed_total > 0 else 0,
+        "initial_evaluation": json.loads((eval_dir / "evaluation_initial.json").read_text()) if (eval_dir / "evaluation_initial.json").exists() else None,
+        "best_evaluation": trainer.best_evaluation,
+        "best_checkpoint": trainer.best_checkpoint_name,
+        "final_evaluation": final_eval,
+        "best_score": list(trainer.best_score) if trainer.best_score else None,
         "smoke_restore_and_continue_ok": restored_ok,
     }
     (output / "run_summary.json").write_text(json.dumps(summary, indent=2, default=str))
+
+    # Plots
+    if rows:
+        _plot_curves(rows, output, "training_curves", "Training Curves",
+                     ["policy_loss", "value_loss", "entropy", "approx_kl", "actor_grad_norm"],
+                     ["Policy Loss", "Value Loss", "Entropy", "Approx KL", "Grad Norm"])
+        _plot_curves(rows, output, "combat_learning_curves", "Combat Learning",
+                     ["red_complete_elimination_success_rate", "mean_red_attack_kills",
+                      "mean_blue_attack_kills", "mean_red_survivors", "mean_blue_survivors", "max_steps_rate"],
+                     ["Red Success Rate", "Red Attack Kills", "Blue Attack Kills",
+                      "Red Survivors", "Blue Survivors", "Max Steps Rate"])
+        _plot_curves(rows, output, "safety_curves", "Safety Metrics",
+                     ["mean_red_boundary_deaths", "mean_red_collision_deaths"],
+                     ["Red Boundary Deaths", "Red Collision Deaths"])
+        # evaluation_progress from eval history
+        if trainer.evaluation_history:
+            milestones = [e["env_steps"] for e in trainer.evaluation_history]
+            rcsr = [e.get("red_complete_elimination_success_rate", 0) for e in trainer.evaluation_history]
+            bs = [e.get("mean_blue_survivors", 3) for e in trainer.evaluation_history]
+            rs = [e.get("mean_red_survivors", 0) for e in trainer.evaluation_history]
+            fig, ax = plt.subplots(figsize=(8, 4))
+            ax.plot(milestones, rcsr, "o-", label="Red Complete Elim Success")
+            ax.plot(milestones, bs, "s-", label="Mean Blue Survivors")
+            ax.plot(milestones, rs, "^-", label="Mean Red Survivors")
+            ax.set_xlabel("Env Steps"); ax.legend(); ax.grid(True, alpha=0.3)
+            fig.suptitle("Evaluation Progress"); fig.tight_layout()
+            fig.savefig(output / "evaluation_progress.png", dpi=100); plt.close(fig)
+
     print(json.dumps(summary, indent=2, default=str), flush=True)
 
 if __name__ == "__main__":

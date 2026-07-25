@@ -1,0 +1,153 @@
+"""Parallel MAPPO and rule evaluation for 3v3."""
+from __future__ import annotations
+
+import time
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import torch
+
+from ..environment_3v3 import GS_DIM, OBS_DIM
+from .networks import GaussianActor
+from .vector_env_3v3 import VectorStepResult3v3, make_combat_vector_env_3v3
+
+
+def _summarize(summaries, elapsed):
+    n = len(summaries)
+    if n == 0: return {"episodes": 0}
+    rk = sum(s["red_attack_kills"] for s in summaries)
+    bk = sum(s["blue_attack_kills"] for s in summaries)
+    def r(key): return sum(1 for s in summaries if s.get(key)) / n
+    return {
+        "episodes": n,
+        "red_complete_elimination_success_rate": r("red_complete_elimination_success"),
+        "blue_complete_elimination_success_rate": r("blue_complete_elimination_success"),
+        "environment_red_outcome_rate": sum(1 for s in summaries if s.get("environment_outcome") == "red") / n,
+        "environment_blue_outcome_rate": sum(1 for s in summaries if s.get("environment_outcome") == "blue") / n,
+        "draw_rate": sum(1 for s in summaries if s.get("environment_outcome") == "draw") / n,
+        "mean_red_attack_kills": float(np.mean([s["red_attack_kills"] for s in summaries])),
+        "mean_blue_attack_kills": float(np.mean([s["blue_attack_kills"] for s in summaries])),
+        "mean_red_survivors": float(np.mean([s["red_survivors"] for s in summaries])),
+        "mean_blue_survivors": float(np.mean([s["blue_survivors"] for s in summaries])),
+        "red_kd_numerator": rk, "red_kd_denominator": bk,
+        "red_kd_ratio": rk / bk if bk > 0 else None,
+        "mean_red_boundary_deaths": float(np.mean([s["red_boundary_deaths"] for s in summaries])),
+        "mean_blue_boundary_deaths": float(np.mean([s["blue_boundary_deaths"] for s in summaries])),
+        "mean_red_friendly_collision_deaths": float(np.mean([s["red_friendly_collision_deaths"] for s in summaries])),
+        "mean_blue_friendly_collision_deaths": float(np.mean([s["blue_friendly_collision_deaths"] for s in summaries])),
+        "mean_red_cross_collision_deaths": float(np.mean([s["red_cross_collision_deaths"] for s in summaries])),
+        "mean_blue_cross_collision_deaths": float(np.mean([s["blue_cross_collision_deaths"] for s in summaries])),
+        "max_steps_rate": sum(1 for s in summaries if s.get("termination_reason") == "max_steps") / n,
+        "mean_episode_length": float(np.mean([s["episode_length"] for s in summaries])),
+        "evaluation_seconds": elapsed,
+    }
+
+
+def evaluate_mappo_fixed_blue_3v3(
+    actor: GaussianActor, env_config: str | Path, episodes: int,
+    num_envs: int = 8, num_env_workers: int = 4,
+    device: torch.device | None = None, seed_start: int = 100000,
+) -> dict[str, Any]:
+    device = device or torch.device("cpu")
+    was_training = actor.training
+    actor.eval()
+    vec_env = make_combat_vector_env_3v3(str(env_config), num_envs, num_env_workers)
+    try:
+        specs = [{"seed": seed_start + i} for i in range(num_envs)]
+        obs, gs, am = vec_env.reset(specs)
+        summaries = []
+        next_seed = seed_start + num_envs
+
+        t0 = time.perf_counter()
+        while len(summaries) < episodes:
+            red_obs = obs[:, :3, :].reshape(-1, OBS_DIM)
+            with torch.no_grad():
+                ra = actor.deterministic_action(torch.as_tensor(red_obs, device=device)).cpu().numpy().reshape(num_envs, 3, 3)
+            r = vec_env.step(ra)
+            obs, gs, am = r.observations, r.global_states, r.alive_masks
+            done_idx = [i for i in range(num_envs) if r.terminated[i] or r.truncated[i]]
+            for gi in done_idx:
+                if r.episode_valid[gi]:
+                    summaries.append({
+                        "red_complete_elimination_success": bool(r.red_complete_elimination_success[gi]),
+                        "blue_complete_elimination_success": bool(r.blue_complete_elimination_success[gi]),
+                        "red_attack_kills": int(r.episode_red_attack_kills[gi]),
+                        "blue_attack_kills": int(r.episode_blue_attack_kills[gi]),
+                        "red_survivors": int(r.episode_red_survivors[gi]),
+                        "blue_survivors": int(r.episode_blue_survivors[gi]),
+                        "red_attack_deaths": int(r.episode_red_attack_deaths[gi]),
+                        "blue_attack_deaths": int(r.episode_blue_attack_deaths[gi]),
+                        "red_boundary_deaths": int(r.episode_red_boundary_deaths[gi]),
+                        "blue_boundary_deaths": int(r.episode_blue_boundary_deaths[gi]),
+                        "red_friendly_collision_deaths": int(r.episode_red_friendly_collision_deaths[gi]),
+                        "blue_friendly_collision_deaths": int(r.episode_blue_friendly_collision_deaths[gi]),
+                        "red_cross_collision_deaths": int(r.episode_red_cross_collision_deaths[gi]),
+                        "blue_cross_collision_deaths": int(r.episode_blue_cross_collision_deaths[gi]),
+                        "episode_length": int(r.episode_length[gi]),
+                        "termination_reason": "done",
+                    })
+                # Always reset the slot to keep it alive for subsequent steps.
+                # Seeds cycle if we need more episodes; dummy seeds for extras.
+                use_seed = next_seed
+                next_seed += 1
+                no, ng, na = vec_env.reset_at(np.array([gi], dtype=np.int32), [{"seed": use_seed}])
+                obs[gi], gs[gi], am[gi] = no[0], ng[0], na[0]
+
+        elapsed = time.perf_counter() - t0
+        result = _summarize(summaries[:episodes], elapsed)
+        result["environment_steps_per_second"] = sum(s["episode_length"] for s in summaries[:episodes]) / elapsed if elapsed > 0 else 0.0
+    finally:
+        vec_env.close()
+    if was_training: actor.train()
+    return result
+
+
+def evaluate_rule_matchup_3v3(
+    env_config: str | Path, red_mode: str, blue_mode: str,
+    episodes: int, num_envs: int = 8, num_env_workers: int = 4,
+    seed_start: int = 1000,
+) -> dict[str, Any]:
+    mode_map = {"zero": 0, "pursuit": 1}
+    red_m, blue_m = mode_map[red_mode], mode_map[blue_mode]
+    vec_env = make_combat_vector_env_3v3(str(env_config), num_envs, num_env_workers)
+    try:
+        specs = [{"seed": seed_start + i} for i in range(num_envs)]
+        obs, gs, am = vec_env.reset(specs)
+        summaries = []
+        next_seed = seed_start + num_envs
+        modes_arr = np.full((num_envs, 2), [red_m, blue_m], dtype=np.int8)
+
+        t0 = time.perf_counter()
+        while len(summaries) < episodes:
+            r = vec_env.step_rules(modes_arr)
+            obs, gs, am = r.observations, r.global_states, r.alive_masks
+            done_idx = [i for i in range(num_envs) if r.terminated[i] or r.truncated[i]]
+            for gi in done_idx:
+                if r.episode_valid[gi]:
+                    summaries.append({
+                        "red_complete_elimination_success": bool(r.red_complete_elimination_success[gi]),
+                        "blue_complete_elimination_success": bool(r.blue_complete_elimination_success[gi]),
+                        "red_attack_kills": int(r.episode_red_attack_kills[gi]),
+                        "blue_attack_kills": int(r.episode_blue_attack_kills[gi]),
+                        "red_survivors": int(r.episode_red_survivors[gi]),
+                        "blue_survivors": int(r.episode_blue_survivors[gi]),
+                        "red_attack_deaths": int(r.episode_red_attack_deaths[gi]),
+                        "blue_attack_deaths": int(r.episode_blue_attack_deaths[gi]),
+                        "red_boundary_deaths": int(r.episode_red_boundary_deaths[gi]),
+                        "blue_boundary_deaths": int(r.episode_blue_boundary_deaths[gi]),
+                        "red_friendly_collision_deaths": int(r.episode_red_friendly_collision_deaths[gi]),
+                        "blue_friendly_collision_deaths": int(r.episode_blue_friendly_collision_deaths[gi]),
+                        "red_cross_collision_deaths": int(r.episode_red_cross_collision_deaths[gi]),
+                        "blue_cross_collision_deaths": int(r.episode_blue_cross_collision_deaths[gi]),
+                        "episode_length": int(r.episode_length[gi]),
+                        "termination_reason": "done",
+                    })
+                use_seed = next_seed; next_seed += 1
+                no, ng, na = vec_env.reset_at(np.array([gi], dtype=np.int32), [{"seed": use_seed}])
+                obs[gi], gs[gi], am[gi] = no[0], ng[0], na[0]
+        elapsed = time.perf_counter() - t0
+        result = _summarize(summaries[:episodes], elapsed)
+    finally:
+        vec_env.close()
+    return result
