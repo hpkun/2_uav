@@ -13,7 +13,7 @@ from .integrator import RK4Integrator
 from .math_utils import angle_difference
 from .models import Aircraft, ControlCommand, TargetCommand
 from .scenario import HomogeneousScenario
-from .rewards import coupled_difference_rewards, madsac_segmented_reward
+from .rewards import coupled_difference_rewards, crdrl_coupled_reward, madsac_segmented_reward
 
 
 class HomogeneousAirCombatEnv:
@@ -50,7 +50,7 @@ class HomogeneousAirCombatEnv:
             "attacks": {"red_0": False, "blue_0": False},
             "geometries": geometries,
             "situation_scores": scores,
-            "reward_terms": {aircraft_id: ({key: 0.0 for key in ("reward_terminal", "reward_boundary", "reward_guide", "reward_position", "reward_threat", "reward_total")} if self.config["combat"].get("reward_mode")=="madsac_segmented" else {"dense": 0.0, "terminal": 0.0}) for aircraft_id in scores},
+            "reward_terms": {aircraft_id: self._empty_reward_terms() for aircraft_id in scores},
             "control_diagnostics": {},
         }
         return self._observations(geometries), info
@@ -166,13 +166,28 @@ class HomogeneousAirCombatEnv:
 
     def _rewards(self, scores: dict[str, float], reason: str | None, outcome: str | None) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
         combat = self.config["combat"]
-        if combat.get("reward_mode", "coupled_difference") == "madsac_segmented":
+        mode = combat.get("reward_mode", "coupled_difference")
+        if mode == "madsac_segmented":
             red, blue = self._aircraft_by_id("red_0"), self._aircraft_by_id("blue_0")
             terms = {"red_0": madsac_segmented_reward(red.state, blue.state, "red", reason, outcome), "blue_0": madsac_segmented_reward(blue.state, red.state, "blue", reason, outcome)}
             return {key: value["reward_total"] for key, value in terms.items()}, terms
+        if mode == "crdrl_coupled":
+            red, blue = self._aircraft_by_id("red_0"), self._aircraft_by_id("blue_0")
+            terms = {"red_0": crdrl_coupled_reward(red.state, blue.state, "red", reason, outcome, combat.get("crdrl_dense_scale", 1.0), combat.get("crdrl_sparse_scale", 1.0)), "blue_0": crdrl_coupled_reward(blue.state, red.state, "blue", reason, outcome, combat.get("crdrl_dense_scale", 1.0), combat.get("crdrl_sparse_scale", 1.0))}
+            return {key: value["reward_total"] for key, value in terms.items()}, terms
+        if mode != "coupled_difference":
+            raise ValueError(f"unknown reward_mode: {mode}")
         old_terms = coupled_difference_rewards(scores["red_0"], scores["blue_0"], combat["situation_reward_scale"], combat["terminal_reward"], reason, outcome)
         terms = {f"{team}_0": values for team, values in old_terms.items()}
         return {key: value["dense"] + value["terminal"] for key, value in terms.items()}, terms
+
+    def _empty_reward_terms(self) -> dict[str, float]:
+        mode = self.config["combat"].get("reward_mode", "coupled_difference")
+        if mode == "madsac_segmented":
+            return {key: 0.0 for key in ("reward_terminal", "reward_boundary", "reward_guide", "reward_position", "reward_threat", "reward_total")}
+        if mode == "crdrl_coupled":
+            return {key: 0.0 for key in ("reward_coupled_dense_raw", "reward_coupled_dense", "reward_sparse", "reward_terminal", "reward_boundary", "reward_total")}
+        return {"dense": 0.0, "terminal": 0.0}
 
     def _observations(self, geometries: dict[str, PairwiseGeometry] | None = None) -> dict[str, np.ndarray]:
         geometries = geometries or self._geometries()
@@ -201,12 +216,15 @@ class HomogeneousAirCombatEnv:
             observations[own.aircraft_id] = np.clip(observation, -1.0, 1.0).astype(float)
         return observations
 
-    def global_state(self) -> np.ndarray:
-        """返回 red、blue 固定顺序的 14 维绝对集中式状态。"""
+    def global_state(self, perspective_team: str) -> np.ndarray:
+        """Return the normalized absolute state ordered own then opponent."""
+        if perspective_team not in {"red", "blue"}:
+            raise ValueError("perspective_team must be red or blue")
         battlefield = self.config["battlefield"]
         altitude_span = battlefield["altitude_max"] - battlefield["altitude_min"]
         values: list[float] = []
-        for aircraft_id in ("red_0", "blue_0"):
+        opponent_team = "blue" if perspective_team == "red" else "red"
+        for aircraft_id in (f"{perspective_team}_0", f"{opponent_team}_0"):
             aircraft = self._aircraft_by_id(aircraft_id)
             state, spec = aircraft.state, aircraft.spec
             altitude = 2.0 * (state.altitude - battlefield["altitude_min"]) / altitude_span - 1.0

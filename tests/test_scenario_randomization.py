@@ -65,7 +65,7 @@ def test_ego_observation_rotation_invariance_altitude_and_global_state():
     assert np.isclose(env._observations()["red_0"][2], -1)
     red.state.z = -env.config["battlefield"]["altitude_max"]
     assert np.isclose(env._observations()["red_0"][2], 1)
-    global_state = env.global_state()
+    global_state = env.global_state("red")
     assert global_state.shape == (14,) and np.all(np.isfinite(global_state)) and np.all(np.abs(global_state) <= 1)
 
 
@@ -81,3 +81,13 @@ def test_tail_chase_rear_aircraft_has_speed_advantage_on_average():
 def test_dense_reward_scale_is_below_terminal_event():
     env = HomogeneousAirCombatEnv(CONFIG)
     assert env.config["simulation"]["max_steps"] * env.config["combat"]["situation_reward_scale"] < env.config["combat"]["terminal_reward"]
+
+def test_global_state_is_own_opponent_ordered_and_label_swap_invariant():
+    env=HomogeneousAirCombatEnv(CONFIG);env.reset(17,"offset_head_on")
+    red_view=env.global_state("red");blue_view=env.global_state("blue")
+    assert np.allclose(red_view[:7],blue_view[7:]) and np.allclose(red_view[7:],blue_view[:7])
+    red,blue=env.aircraft
+    red.state,blue.state=blue.state,red.state
+    assert np.allclose(red_view,env.global_state("blue"))
+    for view in (red_view,blue_view):
+        assert view.shape==(14,) and np.isfinite(view).all() and np.all(np.abs(view)<=1)

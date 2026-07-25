@@ -59,3 +59,27 @@ def test_madsac_threat_and_total_are_finite():
     for result in (threatened,collision):
         assert np.isfinite(list(result.values())).all()
         assert np.isclose(result["reward_total"],sum(v for k,v in result.items() if k!="reward_total"))
+
+from uav_combat.rewards import crdrl_coupled_reward
+
+def test_crdrl_exact_equation_continuity_and_distance_peak():
+    own=state();target=state(x=1000)
+    at=crdrl_coupled_reward(own,target,"red",None,None)
+    expected=np.exp(-.1)*14-4
+    assert np.isclose(at["reward_coupled_dense_raw"],expected)
+    left=crdrl_coupled_reward(own,state(x=999.999),"red",None,None)["reward_coupled_dense_raw"]
+    right=crdrl_coupled_reward(own,state(x=1000.001),"red",None,None)["reward_coupled_dense_raw"]
+    assert np.isclose(left,right,atol=2e-5)
+    assert at["reward_coupled_dense_raw"]>crdrl_coupled_reward(own,state(x=900),"red",None,None)["reward_coupled_dense_raw"]
+    assert at["reward_coupled_dense_raw"]>crdrl_coupled_reward(own,state(x=1100),"red",None,None)["reward_coupled_dense_raw"]
+
+def test_crdrl_angles_sparse_strict_boundaries_and_terminal_adapter():
+    favorable=crdrl_coupled_reward(state(),state(x=100),"red",None,None)
+    poor=crdrl_coupled_reward(state(psi=np.pi),state(x=100),"red",None,None)
+    assert favorable["reward_coupled_dense_raw"]>poor["reward_coupled_dense_raw"] and favorable["reward_sparse"]==2
+    for target in (state(x=50),state(x=150),state(x=100,z=-3020)):
+        assert crdrl_coupled_reward(state(),target,"red",None,None)["reward_sparse"]==0
+    boundary=crdrl_coupled_reward(state(),state(x=100),"red","xy_boundary","blue")
+    kill=crdrl_coupled_reward(state(),state(x=100),"red","red_kill","red")
+    assert boundary["reward_boundary"]==-10 and boundary["reward_terminal"]==0
+    assert kill["reward_terminal"]==10 and np.isfinite(list(kill.values())).all()

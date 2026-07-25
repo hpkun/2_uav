@@ -30,7 +30,7 @@ battlefield:
   altitude_max: 6000.0
   collision_distance: 30.0
 combat:
-  reward_mode: madsac_segmented
+  reward_mode: crdrl_coupled
   crdrl_dense_scale: 1.0
   crdrl_sparse_scale: 1.0
   attack_distance_min: 100.0

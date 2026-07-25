@@ -8,3 +8,8 @@ outputs/mappo/*.json
 outputs/mappo/*.png
 outputs/mappo_smoke/
 outputs/baselines/
+outputs/mappo_v5/
+outputs/mappo_v5_smoke/
+outputs/mappo_v6/
+outputs/mappo_v6_smoke/
+outputs/mappo_v6_*/
