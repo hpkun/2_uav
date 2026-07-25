@@ -63,3 +63,120 @@ def crdrl_coupled_reward(own: AircraftState, target: AircraftState, own_team: st
     result["reward_total"] = float(sum(result[k] for k in ("reward_coupled_dense","reward_sparse","reward_terminal","reward_boundary")))
     if not np.isfinite(list(result.values())).all(): raise FloatingPointError("non-finite CR-DRL reward")
     return result
+
+
+# ===================================================================
+# Paper-coupled team v2 reward components (3v3)
+# ===================================================================
+
+
+def coupled_attack_advantage(
+    own: AircraftState, target: AircraftState,
+    preferred_distance: float, distance_sigma: float,
+    ata_sigma: float, aa_sigma: float,
+) -> float:
+    """Gaussian-weighted attack geometry score in [0, 1].
+
+    distance_factor = exp(-0.5 * ((d - preferred) / distance_sigma)^2)
+    ata_factor      = exp(-0.5 * (ATA / ata_sigma)^2)
+    aa_factor       = exp(-0.5 * (AA / aa_sigma)^2)
+    score = distance_factor * ata_factor * aa_factor
+    """
+    geo = compute_pairwise_geometry(own, target)
+    dist_factor = float(np.exp(-0.5 * ((geo.distance - preferred_distance) / distance_sigma) ** 2))
+    ata_factor = float(np.exp(-0.5 * (geo.ata / ata_sigma) ** 2))
+    aa_factor = float(np.exp(-0.5 * (geo.aa / aa_sigma) ** 2))
+    score = dist_factor * ata_factor * aa_factor
+    if not np.isfinite(score):
+        return 0.0
+    return float(np.clip(score, 0.0, 1.0))
+
+
+def approach_progress_reward(
+    prev_own: AircraftState, curr_own: AircraftState,
+    prev_target: AircraftState, curr_target: AircraftState,
+    distance_threshold: float, distance_normalizer: float,
+) -> float:
+    """Reward closing distance when beyond distance_threshold, weighted by heading.
+
+    Returns value in [-1, 1].  Zero if either distance <= distance_threshold.
+    """
+    prev_geo = compute_pairwise_geometry(prev_own, prev_target)
+    curr_geo = compute_pairwise_geometry(curr_own, curr_target)
+    if prev_geo.distance <= distance_threshold or curr_geo.distance <= distance_threshold:
+        return 0.0
+    closing = float(np.clip((prev_geo.distance - curr_geo.distance) / distance_normalizer, -1.0, 1.0))
+    heading = float(max(np.cos(curr_geo.ata), 0.0))
+    score = closing * heading
+    return float(np.clip(score, -1.0, 1.0))
+
+
+def soft_boundary_risk(
+    state: AircraftState,
+    x_limit: float, y_limit: float,
+    altitude_min: float, altitude_max: float,
+    horizontal_soft_ratio: float, altitude_soft_margin: float,
+) -> dict[str, float]:
+    """Soft boundary risk: 0 in safe zone, rising quadratically to 1 at physical limit.
+
+    Returns {xy_risk, altitude_risk, total_risk}.
+    """
+    rho_xy = float(max(abs(state.x) / x_limit, abs(state.y) / y_limit))
+    if rho_xy <= horizontal_soft_ratio:
+        xy_risk = 0.0
+    else:
+        xy_risk = float(np.clip((rho_xy - horizontal_soft_ratio) / (1.0 - horizontal_soft_ratio), 0.0, 1.0)) ** 2
+
+    alt = state.altitude
+    low_soft = altitude_min + altitude_soft_margin
+    high_soft = altitude_max - altitude_soft_margin
+    if alt <= low_soft:
+        alt_risk = float(np.clip((low_soft - alt) / altitude_soft_margin, 0.0, 1.0)) ** 2
+    elif alt >= high_soft:
+        alt_risk = float(np.clip((alt - high_soft) / altitude_soft_margin, 0.0, 1.0)) ** 2
+    else:
+        alt_risk = 0.0
+
+    total = float(np.clip(xy_risk + alt_risk, 0.0, 2.0))
+    return {"xy_risk": xy_risk, "altitude_risk": alt_risk, "total_risk": total}
+
+
+def friendly_separation_risk(
+    own: AircraftState, teammates: list[AircraftState],
+    friendly_safe_distance: float, collision_distance: float,
+) -> float:
+    """Penalty when nearest alive teammate is too close.
+
+    Returns 0 if nearest >= friendly_safe_distance, else quadratic risk in [0, 1].
+    """
+    alive_teammates = [t for t in teammates if t.alive]
+    if not alive_teammates:
+        return 0.0
+    min_dist = float(min(np.linalg.norm(own.as_array()[:3] - t.as_array()[:3]) for t in alive_teammates))
+    if min_dist >= friendly_safe_distance:
+        return 0.0
+    denom = friendly_safe_distance - collision_distance
+    if denom <= 0:
+        return 1.0
+    risk = float(np.clip((friendly_safe_distance - min_dist) / denom, 0.0, 1.0)) ** 2
+    return risk
+
+
+def head_on_collision_risk(
+    red_state: AircraftState, blue_state: AircraftState,
+    head_on_distance: float, head_on_angle: float,
+) -> float:
+    """Risk when red and blue are on a head-on collision course.
+
+    Only triggers when distance < head_on_distance AND
+    red->blue ATA < head_on_angle AND blue->red ATA < head_on_angle.
+    Returns quadratic risk in [0, 1].
+    """
+    dist = float(np.linalg.norm(red_state.as_array()[:3] - blue_state.as_array()[:3]))
+    if dist >= head_on_distance:
+        return 0.0
+    red_to_blue = compute_pairwise_geometry(red_state, blue_state)
+    blue_to_red = compute_pairwise_geometry(blue_state, red_state)
+    if red_to_blue.ata >= head_on_angle or blue_to_red.ata >= head_on_angle:
+        return 0.0
+    return float(np.clip(1.0 - dist / head_on_distance, 0.0, 1.0)) ** 2

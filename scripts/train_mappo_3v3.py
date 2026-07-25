@@ -157,6 +157,9 @@ def main():
                    "policy_inference_seconds": trainer._timing["policy_inference"],
                    "ppo_update_seconds": trainer._timing["ppo_update"],
                    "evaluation_seconds": trainer.total_evaluation_seconds,
+                   "mean_rollout_tactical_reward": np.mean([r["episode_return"] for r in completed]) if completed else np.nan,
+                   "mean_rollout_safety_penalty": np.nan,  # computed from reward_components if available
+                   "mean_rollout_event_terminal_reward": np.nan,
                    **ep_stats}
             rows.append(row)
 

@@ -11,8 +11,15 @@ from .dynamics import PointMassDynamics
 from .geometry import compute_pairwise_geometry
 from .integrator import RK4Integrator
 from .math_utils import angle_difference
-from .models import Aircraft, ControlCommand, TargetCommand
-from .rewards import madsac_segmented_reward
+from .models import Aircraft, AircraftState, ControlCommand, TargetCommand
+from .rewards import (
+    madsac_segmented_reward,
+    coupled_attack_advantage,
+    approach_progress_reward,
+    soft_boundary_risk,
+    friendly_separation_risk,
+    head_on_collision_risk,
+)
 from .scenario_3v3 import ALL_IDS, BLUE_IDS, RED_IDS, Homogeneous3v3Scenario
 
 DEATH_NONE = 0
@@ -328,11 +335,7 @@ class Homogeneous3v3AirCombatEnv:
         if terminated or truncated:
             self._running = False
 
-        # 13. Rewards (separate dense per team)
-        red_dense, red_per_dense = _team_dense(self._alive("red"), self._alive("blue"))
-        blue_dense, _ = _team_dense(self._alive("blue"), self._alive("red"))
-        T = self.config["combat"]["terminal_reward"]
-
+        # --- Per-step death tallies (unconditional, needed for info) ---
         red_atk_losses = sum(1 for a_id, c in step_death_causes.items()
                              if self._aircraft_by_id(a_id).team == "red" and c == DEATH_ATTACK)
         red_bdy_losses = sum(1 for a_id, c in step_death_causes.items()
@@ -349,31 +352,39 @@ class Homogeneous3v3AirCombatEnv:
         blue_col_losses = sum(1 for a_id, c in step_death_causes.items()
                               if self._aircraft_by_id(a_id).team == "blue"
                               and c in (DEATH_COLLISION_FRIENDLY, DEATH_COLLISION_CROSS))
-
-        red_total = red_dense + T * attack_kills["red"] - T * red_atk_losses - T * red_bdy_losses - T * red_col_losses
-        blue_total = blue_dense + T * attack_kills["blue"] - T * blue_atk_losses - T * blue_bdy_losses - T * blue_col_losses
-
-        rewards = {}
-        for aid in RED_IDS: rewards[aid] = float(red_total)
-        for aid in BLUE_IDS: rewards[aid] = float(blue_total)
-
-        reward_components = {
-            "red_team_dense_reward": red_dense, "blue_team_dense_reward": blue_dense,
-            "red_attack_kill_reward": T * attack_kills["red"],
-            "blue_attack_kill_reward": T * attack_kills["blue"],
-            "red_attack_loss_penalty": -T * red_atk_losses,
-            "blue_attack_loss_penalty": -T * blue_atk_losses,
-            "red_boundary_penalty": -T * red_bdy_losses,
-            "blue_boundary_penalty": -T * blue_bdy_losses,
-            "red_collision_penalty": -T * red_col_losses,
-            "blue_collision_penalty": -T * blue_col_losses,
-            "red_team_total_reward": red_total, "blue_team_total_reward": blue_total,
-        }
-
-        observations = self._all_observations()
-
         bdy_d = {"red": red_bdy_losses, "blue": blue_bdy_losses}
         col_d = {"red": red_col_losses, "blue": blue_col_losses}
+
+        # 13. Rewards
+        reward_mode = self.config["combat"].get("reward_mode", "madsac_segmented")
+        if reward_mode == "paper_coupled_team_v2":
+            rewards, reward_components = self._compute_v2_rewards(
+                old_states, attack_kills, step_death_causes, terminated, truncated,
+                outcome, reason, red_alive, blue_alive)
+        else:
+            # Legacy madsac_segmented (kept for baseline comparison)
+            red_dense, _ = _team_dense(self._alive("red"), self._alive("blue"))
+            blue_dense, _ = _team_dense(self._alive("blue"), self._alive("red"))
+            T = self.config["combat"]["terminal_reward"]
+            red_total = red_dense + T * attack_kills["red"] - T * red_atk_losses - T * red_bdy_losses - T * red_col_losses
+            blue_total = blue_dense + T * attack_kills["blue"] - T * blue_atk_losses - T * blue_bdy_losses - T * blue_col_losses
+            rewards = {}
+            for aid in RED_IDS: rewards[aid] = float(red_total)
+            for aid in BLUE_IDS: rewards[aid] = float(blue_total)
+            reward_components = {
+                "red_team_dense_reward": red_dense, "blue_team_dense_reward": blue_dense,
+                "red_attack_kill_reward": T * attack_kills["red"],
+                "blue_attack_kill_reward": T * attack_kills["blue"],
+                "red_attack_loss_penalty": -T * red_atk_losses,
+                "blue_attack_loss_penalty": -T * blue_atk_losses,
+                "red_boundary_penalty": -T * red_bdy_losses,
+                "blue_boundary_penalty": -T * blue_bdy_losses,
+                "red_collision_penalty": -T * red_col_losses,
+                "blue_collision_penalty": -T * blue_col_losses,
+                "red_team_total_reward": red_total, "blue_team_total_reward": blue_total,
+            }
+
+        observations = self._all_observations()
 
         episode_summary = None
         if terminated or truncated:
@@ -400,6 +411,246 @@ class Homogeneous3v3AirCombatEnv:
             "episode_summary": episode_summary,
         }
         return observations, rewards, terminated, truncated, info
+
+    # -- paper_coupled_team_v2 rewards -----------------------------------
+
+    def _compute_v2_rewards(
+        self, old_states: dict[str, AircraftState], attack_kills: dict[str, int],
+        step_death_causes: dict[str, int], terminated: bool, truncated: bool,
+        outcome: str | None, reason: str | None, red_alive: int, blue_alive: int,
+    ) -> tuple[dict[str, float], dict[str, Any]]:
+        cfg = self.config.get("reward_v2", {})
+        if not cfg:
+            cfg = {
+                "team_size": 3, "approach_weight": 0.01, "approach_distance_threshold": 1000.0,
+                "approach_distance_normalizer": 30.0, "attack_advantage_weight": 0.04,
+                "threat_weight": 0.05, "preferred_distance": 600.0, "distance_sigma": 450.0,
+                "ata_sigma": 0.5235987755982988, "aa_sigma": 1.0471975511965976,
+                "boundary_weight": 0.05, "horizontal_soft_ratio": 0.8, "altitude_soft_margin": 750.0,
+                "friendly_separation_weight": 0.02, "friendly_safe_distance": 200.0,
+                "head_on_risk_weight": 0.03, "head_on_distance": 300.0,
+                "head_on_angle": 0.5235987755982988, "time_penalty": 0.001,
+                "kill_reward": 20.0, "attack_death_penalty": 20.0,
+                "boundary_death_penalty": 30.0, "collision_death_penalty": 25.0,
+                "complete_elimination_bonus": 20.0, "team_eliminated_penalty": 20.0,
+                "mutual_elimination_penalty": 10.0, "max_steps_penalty": 5.0,
+                "dense_reward_min": -0.15, "dense_reward_max": 0.05,
+            }
+        bf = self.config["battlefield"]
+        team_size = int(cfg["team_size"])
+        alive_reds = [a for a in self.aircraft if a.team == "red" and a.state.alive]
+        alive_blues = [a for a in self.aircraft if a.team == "blue" and a.state.alive]
+
+        # --- Per-red-agent local dense ---
+        red_approach = 0.0; red_attack = 0.0; red_threat = 0.0
+        red_boundary = 0.0; red_friendly = 0.0; red_head_on = 0.0
+
+        for red_ac in self.aircraft:
+            if red_ac.team != "red":
+                continue
+            if not red_ac.state.alive:
+                continue  # dead red contributes 0
+
+            aid = red_ac.aircraft_id
+            red_state = red_ac.state
+            prev_red = old_states.get(aid, red_state)
+
+            # Approach: max over alive blues
+            app = 0.0
+            for blue_ac in alive_blues:
+                prev_blue = old_states.get(blue_ac.aircraft_id, blue_ac.state)
+                val = approach_progress_reward(
+                    prev_red, red_state, prev_blue, blue_ac.state,
+                    cfg["approach_distance_threshold"], cfg["approach_distance_normalizer"])
+                if val > app: app = val
+            red_approach += app
+
+            # Attack advantage: max over alive blues
+            atk_val = 0.0
+            for blue_ac in alive_blues:
+                val = coupled_attack_advantage(
+                    red_state, blue_ac.state, cfg["preferred_distance"],
+                    cfg["distance_sigma"], cfg["ata_sigma"], cfg["aa_sigma"])
+                if val > atk_val: atk_val = val
+            red_attack += atk_val
+
+            # Threat: max over alive blues (blue attacking red)
+            thr_val = 0.0
+            for blue_ac in alive_blues:
+                val = coupled_attack_advantage(
+                    blue_ac.state, red_state, cfg["preferred_distance"],
+                    cfg["distance_sigma"], cfg["ata_sigma"], cfg["aa_sigma"])
+                if val > thr_val: thr_val = val
+            red_threat += thr_val
+
+            # Boundary
+            bdr = soft_boundary_risk(
+                red_state, bf["x_limit"], bf["y_limit"],
+                bf["altitude_min"], bf["altitude_max"],
+                cfg["horizontal_soft_ratio"], cfg["altitude_soft_margin"])
+            red_boundary += bdr["total_risk"]
+
+            # Friendly separation
+            teammates = [a.state for a in self.aircraft if a.team == "red" and a.aircraft_id != aid]
+            red_friendly += friendly_separation_risk(
+                red_state, teammates, cfg["friendly_safe_distance"], bf["collision_distance"])
+
+            # Head-on risk
+            ho = 0.0
+            for blue_ac in alive_blues:
+                val = head_on_collision_risk(
+                    red_state, blue_ac.state, cfg["head_on_distance"], cfg["head_on_angle"])
+                if val > ho: ho = val
+            red_head_on += ho
+
+        # Team dense: sum of per-agent / fixed team_size (3), not alive count
+        red_dense_raw = (
+            cfg["approach_weight"] * red_approach
+            + cfg["attack_advantage_weight"] * red_attack
+            - cfg["threat_weight"] * red_threat
+            - cfg["boundary_weight"] * red_boundary
+            - cfg["friendly_separation_weight"] * red_friendly
+            - cfg["head_on_risk_weight"] * red_head_on
+        ) / team_size - cfg["time_penalty"]
+
+        red_dense = float(np.clip(red_dense_raw, cfg["dense_reward_min"], cfg["dense_reward_max"]))
+
+        # Blue symmetric dense (diagnostic only)
+        blue_approach = 0.0; blue_attack = 0.0; blue_threat = 0.0
+        blue_boundary = 0.0; blue_friendly = 0.0; blue_head_on = 0.0
+        for blue_ac in self.aircraft:
+            if blue_ac.team != "blue" or not blue_ac.state.alive:
+                continue
+            aid = blue_ac.aircraft_id; bs = blue_ac.state; pb = old_states.get(aid, bs)
+            app = 0.0
+            for red_ac in alive_reds:
+                pr = old_states.get(red_ac.aircraft_id, red_ac.state)
+                val = approach_progress_reward(pb, bs, pr, red_ac.state,
+                                               cfg["approach_distance_threshold"], cfg["approach_distance_normalizer"])
+                if val > app: app = val
+            blue_approach += app
+            atk_val = 0.0
+            for red_ac in alive_reds:
+                val = coupled_attack_advantage(bs, red_ac.state, cfg["preferred_distance"],
+                                               cfg["distance_sigma"], cfg["ata_sigma"], cfg["aa_sigma"])
+                if val > atk_val: atk_val = val
+            blue_attack += atk_val
+            thr_val = 0.0
+            for red_ac in alive_reds:
+                val = coupled_attack_advantage(red_ac.state, bs, cfg["preferred_distance"],
+                                               cfg["distance_sigma"], cfg["ata_sigma"], cfg["aa_sigma"])
+                if val > thr_val: thr_val = val
+            blue_threat += thr_val
+            bdr = soft_boundary_risk(bs, bf["x_limit"], bf["y_limit"], bf["altitude_min"], bf["altitude_max"],
+                                     cfg["horizontal_soft_ratio"], cfg["altitude_soft_margin"])
+            blue_boundary += bdr["total_risk"]
+            mates = [a.state for a in self.aircraft if a.team == "blue" and a.aircraft_id != aid]
+            blue_friendly += friendly_separation_risk(bs, mates, cfg["friendly_safe_distance"], bf["collision_distance"])
+            ho = 0.0
+            for red_ac in alive_reds:
+                val = head_on_collision_risk(red_ac.state, bs, cfg["head_on_distance"], cfg["head_on_angle"])
+                if val > ho: ho = val
+            blue_head_on += ho
+        blue_dense_raw = (
+            cfg["approach_weight"] * blue_approach
+            + cfg["attack_advantage_weight"] * blue_attack
+            - cfg["threat_weight"] * blue_threat
+            - cfg["boundary_weight"] * blue_boundary
+            - cfg["friendly_separation_weight"] * blue_friendly
+            - cfg["head_on_risk_weight"] * blue_head_on
+        ) / team_size - cfg["time_penalty"]
+        blue_dense = float(np.clip(blue_dense_raw, cfg["dense_reward_min"], cfg["dense_reward_max"]))
+
+        # --- Step event tally ---
+        red_atk_losses = sum(1 for a_id, c in step_death_causes.items()
+                             if self._aircraft_by_id(a_id).team == "red" and c == DEATH_ATTACK)
+        red_bdy_losses = sum(1 for a_id, c in step_death_causes.items()
+                             if self._aircraft_by_id(a_id).team == "red"
+                             and c in (DEATH_BOUNDARY_ALTITUDE, DEATH_BOUNDARY_XY))
+        red_col_losses = sum(1 for a_id, c in step_death_causes.items()
+                             if self._aircraft_by_id(a_id).team == "red"
+                             and c in (DEATH_COLLISION_FRIENDLY, DEATH_COLLISION_CROSS))
+        blue_atk_losses = sum(1 for a_id, c in step_death_causes.items()
+                              if self._aircraft_by_id(a_id).team == "blue" and c == DEATH_ATTACK)
+        blue_bdy_losses = sum(1 for a_id, c in step_death_causes.items()
+                              if self._aircraft_by_id(a_id).team == "blue"
+                              and c in (DEATH_BOUNDARY_ALTITUDE, DEATH_BOUNDARY_XY))
+        blue_col_losses = sum(1 for a_id, c in step_death_causes.items()
+                              if self._aircraft_by_id(a_id).team == "blue"
+                              and c in (DEATH_COLLISION_FRIENDLY, DEATH_COLLISION_CROSS))
+
+        red_event = (
+            cfg["kill_reward"] * attack_kills["red"]
+            - cfg["attack_death_penalty"] * red_atk_losses
+            - cfg["boundary_death_penalty"] * red_bdy_losses
+            - cfg["collision_death_penalty"] * red_col_losses
+        )
+        blue_event = (
+            cfg["kill_reward"] * attack_kills["blue"]
+            - cfg["attack_death_penalty"] * blue_atk_losses
+            - cfg["boundary_death_penalty"] * blue_bdy_losses
+            - cfg["collision_death_penalty"] * blue_col_losses
+        )
+
+        # --- Terminal reward ---
+        red_terminal = 0.0; blue_terminal = 0.0
+        if terminated or truncated:
+            red_succ = (self._episode_attack_kills["red"] == 3 and red_alive > 0)
+            blue_succ = (self._episode_attack_kills["blue"] == 3 and blue_alive > 0)
+            if red_succ:
+                red_terminal += cfg["complete_elimination_bonus"]
+            if blue_succ:
+                blue_terminal += cfg["complete_elimination_bonus"]
+            if reason == "max_steps":
+                red_terminal -= cfg["max_steps_penalty"]
+                blue_terminal -= cfg["max_steps_penalty"]
+            elif red_alive == 0 and blue_alive == 0:
+                red_terminal -= cfg["mutual_elimination_penalty"]
+                blue_terminal -= cfg["mutual_elimination_penalty"]
+            elif red_alive == 0:
+                red_terminal -= cfg["team_eliminated_penalty"]
+            elif blue_alive == 0:
+                blue_terminal -= cfg["team_eliminated_penalty"]
+
+        red_total = red_dense + red_event + red_terminal
+        blue_total = blue_dense + blue_event + blue_terminal
+
+        rewards = {}
+        for aid in RED_IDS: rewards[aid] = float(red_total)
+        for aid in BLUE_IDS: rewards[aid] = float(blue_total)
+
+        reward_components = {
+            "red_approach_reward": cfg["approach_weight"] * red_approach / team_size,
+            "red_attack_advantage_reward": cfg["attack_advantage_weight"] * red_attack / team_size,
+            "red_threat_penalty": cfg["threat_weight"] * red_threat / team_size,
+            "red_soft_boundary_penalty": cfg["boundary_weight"] * red_boundary / team_size,
+            "red_friendly_separation_penalty": cfg["friendly_separation_weight"] * red_friendly / team_size,
+            "red_head_on_risk_penalty": cfg["head_on_risk_weight"] * red_head_on / team_size,
+            "red_time_penalty": cfg["time_penalty"],
+            "red_dense_reward": red_dense,
+            "red_kill_reward": cfg["kill_reward"] * attack_kills["red"],
+            "red_attack_death_penalty": cfg["attack_death_penalty"] * red_atk_losses,
+            "red_boundary_death_penalty": cfg["boundary_death_penalty"] * red_bdy_losses,
+            "red_collision_death_penalty": cfg["collision_death_penalty"] * red_col_losses,
+            "red_terminal_reward": red_terminal,
+            "red_team_total_reward": red_total,
+            # Blue symmetric
+            "blue_approach_reward": cfg["approach_weight"] * blue_approach / team_size,
+            "blue_attack_advantage_reward": cfg["attack_advantage_weight"] * blue_attack / team_size,
+            "blue_threat_penalty": cfg["threat_weight"] * blue_threat / team_size,
+            "blue_soft_boundary_penalty": cfg["boundary_weight"] * blue_boundary / team_size,
+            "blue_friendly_separation_penalty": cfg["friendly_separation_weight"] * blue_friendly / team_size,
+            "blue_head_on_risk_penalty": cfg["head_on_risk_weight"] * blue_head_on / team_size,
+            "blue_time_penalty": cfg["time_penalty"],
+            "blue_dense_reward": blue_dense,
+            "blue_kill_reward": cfg["kill_reward"] * attack_kills["blue"],
+            "blue_attack_death_penalty": cfg["attack_death_penalty"] * blue_atk_losses,
+            "blue_boundary_death_penalty": cfg["boundary_death_penalty"] * blue_bdy_losses,
+            "blue_collision_death_penalty": cfg["collision_death_penalty"] * blue_col_losses,
+            "blue_terminal_reward": blue_terminal,
+            "blue_team_total_reward": blue_total,
+        }
+        return rewards, reward_components
 
     # -- observations ---------------------------------------------------
 
