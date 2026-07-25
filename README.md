@@ -44,6 +44,28 @@ The default `madsac_segmented` mode adapts segmented geometric shaping and actua
 
 `configs/homogeneous_1v1_crdrl.yaml` enables the independent `crdrl_coupled` ablation. Its distance/ATA/AA dense formula, parameters, strict sparse thresholds, and sparse value 2 follow CR-DRL. Reusing this project's unified kill/boundary/collision terminal semantics is the project adaptation. The paper emphasizes maintaining advantageous tail-attack position, while this project measures actual kills; the ablation must be compared experimentally before it can be considered as a default.
 
+## Parallel environment
+
+Training throughput can be improved by running CPU environment steps across multiple persistent worker processes. This is a **runtime performance optimisation only**; it does not change the training algorithm, PPO targets, reward formula, or any other research behaviour.
+
+- `num_envs` (default 32) is the total number of environment slots in the rollout.
+- `num_env_workers` (default 4) is the number of CPU worker processes that advance those environments in parallel. Each worker manages `num_envs / num_env_workers` environments.
+- Setting `num_env_workers = 1` runs a **sequential** `LocalCombatVectorEnv` in the main process — this is the correctness baseline and a fallback when a single process is preferred.
+- Setting `num_env_workers > 1` spawns persistent worker processes via `SubprocessCombatVectorEnv`. Workers are long-lived, so process creation cost is paid once at startup, not per step.
+- The Actor, Critic, and PPO update stay exclusively on the **main process / GPU**. Workers only run CPU dynamics, attack logic, and reward computation.
+- `multiprocessing.get_context("spawn")` is used to avoid `fork`-related CUDA errors in the main process.
+- Checkpoints **do not store** worker process state, pipes, or in-flight environments. On resume the workers are re-created fresh. Old v6 checkpoints remain fully compatible.
+- Whether the parallel backend actually accelerates training depends on the machine's CPU core count and load. Run `python scripts/benchmark_parallel_env.py` to measure throughput and speedup honestly.
+
+CLI examples:
+
+```bash
+python scripts/train_mappo.py --device cuda --env-workers 4
+python scripts/train_mappo.py --device cuda --env-workers 1   # sequential baseline
+python scripts/select_competitive_best.py --env-workers 4 --episodes 12 --device cuda
+python scripts/benchmark_parallel_env.py --num-envs 32 --env-workers 4 --vector-steps 256
+```
+
 ## Commands
 
 Run in the `uav` Conda environment:
@@ -55,4 +77,4 @@ python scripts/train_mappo.py --smoke --device cuda
 python scripts/select_competitive_best.py --output-dir outputs/mappo_v6_smoke --episodes 12 --device cuda
 ```
 
-A resume may change only total environment steps, device, and output directory. All other training-signature changes are rejected. Resume starts a new episode batch because physical simulator state is not checkpointed, while model, optimizer, opponent, scheduler counters, candidates, best score, and RNG states are restored. v5 and earlier checkpoints are explicitly rejected.
+A resume may change only total environment steps, device, output directory, and `num_env_workers`. All other training-signature changes are rejected. Resume starts a new episode batch because physical simulator and worker-process state are not checkpointed, while model, optimizer, opponent, scheduler counters, candidates, best score, and RNG states are restored. v5 and earlier checkpoints are explicitly rejected. `num_env_workers` can be changed on resume (e.g. from 1 to 4 or vice-versa) without upgrading the checkpoint version.

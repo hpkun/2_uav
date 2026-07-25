@@ -8,7 +8,7 @@ from uav_combat.mappo.trainer import MAPPOTrainer,POLICIES,SCENARIOS
 ENV_CONFIG=Path(__file__).parents[1]/"configs/homogeneous_1v1.yaml"
 
 def tiny_config(tmp_path):
-    return {"experiment":{"seed":3,"device":"cpu","output_dir":str(tmp_path)},"network":{"hidden_dim":32,"log_std_init":-.5},"training":{"training_mode":"alternating_self_play","total_env_steps":256,"num_envs":2,"rollout_steps":16,"alternating_block_env_steps":64,"ppo_epochs":1,"minibatch_size":32,"gamma":.99,"gae_lambda":.95,"clip_coef":.2,"learning_rate":3e-4,"value_loss_coef":.5,"entropy_coef":.01,"max_grad_norm":.5,"eval_interval_updates":10,"checkpoint_interval_updates":10,"opponent_history_latest_probability":.7},"evaluation":{"episodes":2,"deterministic":True}}
+    return {"experiment":{"seed":3,"device":"cpu","output_dir":str(tmp_path)},"network":{"hidden_dim":32,"log_std_init":-.5},"training":{"training_mode":"alternating_self_play","total_env_steps":256,"num_envs":2,"num_env_workers":2,"rollout_steps":16,"alternating_block_env_steps":64,"ppo_epochs":1,"minibatch_size":32,"gamma":.99,"gae_lambda":.95,"clip_coef":.2,"learning_rate":3e-4,"value_loss_coef":.5,"entropy_coef":.01,"max_grad_norm":.5,"eval_interval_updates":10,"checkpoint_interval_updates":10,"opponent_history_latest_probability":.7},"evaluation":{"episodes":2,"deterministic":True}}
 
 def same(left,right):return all(torch.equal(v,right[k]) for k,v in left.items())
 def changed(before,module):return any(not torch.equal(v,module.state_dict()[k]) for k,v in before.items())
@@ -43,7 +43,7 @@ def test_rollout_is_policy_centric_and_contains_both_colors(tmp_path):
 
 def test_scenario_and_role_scheduler_is_balanced(tmp_path):
     t=MAPPOTrainer(ENV_CONFIG,tiny_config(tmp_path));t.configure_block_opponent(0,"a",force=True);t.reset_environments()
-    for _ in range(48):t._next_reset(t.envs[0])
+    for _ in range(48):t._next_reset_spec()
     assert abs(t.active_team_counts["red"]-t.active_team_counts["blue"])<=1
     assert max(t.tail_combo_counts.values())-min(t.tail_combo_counts.values())<=1
 
@@ -95,7 +95,7 @@ def test_four_blocks_append_active_histories(tmp_path):
 def test_train_cli_output_dir_override(tmp_path):
     from argparse import Namespace
     from scripts.train_mappo import load_config
-    args=Namespace(train_config=str(Path(__file__).parents[1]/"configs/mappo_1v1.yaml"),smoke=False,total_env_steps=2_000_000,num_envs=None,seed=None,device="cuda",output_dir=str(tmp_path/"v6"),resume=None,env_config=str(ENV_CONFIG))
+    args=Namespace(train_config=str(Path(__file__).parents[1]/"configs/mappo_1v1.yaml"),smoke=False,total_env_steps=2_000_000,num_envs=None,env_workers=None,seed=None,device="cuda",output_dir=str(tmp_path/"v6"),resume=None,env_config=str(ENV_CONFIG))
     config=load_config(args)
     assert config["training"]["total_env_steps"]==2_000_000
     assert config["experiment"]["device"]=="cuda"

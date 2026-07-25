@@ -1,10 +1,12 @@
 """Policy-centric alternating-freeze competitive PPO utilities (v6)."""
 from __future__ import annotations
 
+import time
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable
 import random
+import types
 
 import numpy as np
 import torch
@@ -14,6 +16,12 @@ from ..environment import HomogeneousAirCombatEnv
 from ..rule_policy import PurePursuitPolicy
 from .buffer import MAPPOBuffer
 from .networks import CentralizedCritic, GaussianActor
+from .vector_env import (
+    CONTROL_DIAGNOSTIC_KEYS,
+    decode_outcome,
+    decode_termination_reason,
+    make_combat_vector_env,
+)
 
 AGENT_IDS = ("red_0", "blue_0")
 TEAMS = ("red", "blue")
@@ -184,6 +192,7 @@ class MAPPOTrainer:
         random.seed(e["seed"]); torch.manual_seed(e["seed"])
         self.device = resolve_device(e["device"])
         self.num_envs, self.rollout_steps = int(t["num_envs"]), int(t["rollout_steps"])
+        self.num_env_workers = int(t.get("num_env_workers", 4))
         if t["minibatch_size"] > self.num_envs * self.rollout_steps:
             raise ValueError("minibatch_size exceeds active transitions")
         self.policy_a_actor = GaussianActor(14, 3, n["hidden_dim"], n["log_std_init"]).to(self.device)
@@ -211,7 +220,12 @@ class MAPPOTrainer:
         self.active_generation_before: int | None = None
         self.active_generation_after: int | None = None
         self._finished_blocks: set[int] = set()
-        self.envs = [HomogeneousAirCombatEnv(self.env_config) for _ in range(self.num_envs)]
+        self.vector_env = make_combat_vector_env(self.env_config, self.num_envs, self.num_env_workers)
+        # Cache combat config from a single env for funnel updates (all envs share the same config).
+        _ref_env = HomogeneousAirCombatEnv(self.env_config)
+        self.combat_config = _ref_env.config["combat"]
+        self.env_full_config = deepcopy(_ref_env.config)
+        del _ref_env
         self.buffer = MAPPOBuffer(self.rollout_steps, self.num_envs)
         self.rng = np.random.default_rng(e["seed"])
         self.opponent_rng = np.random.default_rng(e["seed"] + 1)
@@ -224,7 +238,9 @@ class MAPPOTrainer:
         self.block_episode_counter = 0
         self.tail_combo_counter = 0
         self.non_tail_tie_counter = 0
-        self.current_observations: list[dict[str, np.ndarray]] = []
+        # Compact array state (replaces list-of-dicts observations and live env.global_state calls).
+        self.current_observations: np.ndarray = np.empty((self.num_envs, 2, 14), dtype=np.float32)
+        self.current_global_states: np.ndarray = np.empty((self.num_envs, 2, 14), dtype=np.float32)
         self.current_scenarios: list[str] = []
         self.current_rear_teams: list[str | None] = []
         self.current_active_teams: list[str] = []
@@ -232,10 +248,12 @@ class MAPPOTrainer:
         self.current_policy_b_teams: list[str] = []
         self.episode_returns = np.zeros((self.num_envs, 2), dtype=np.float64)
         self.episode_lengths = np.zeros(self.num_envs, dtype=int)
-        self.funnels = [{team: new_funnel() for team in TEAMS} for _ in self.envs]
-        self.last_control_diagnostics = {team: [] for team in TEAMS}
+        self.funnels = [{team: new_funnel() for team in TEAMS} for _ in range(self.num_envs)]
+        self.last_control_diagnostics: dict[str, list[dict[str, Any]]] = {team: [] for team in TEAMS}
         self.quick_best_score: tuple[float, ...] | None = None
         self.candidate_checkpoints: list[str] = []
+        # Timing accumulators (seconds).
+        self._timing: dict[str, float] = {"env_step": 0.0, "policy_inference": 0.0, "ppo_update": 0.0, "reset": 0.0, "evaluation": 0.0}
         self.reset_environments()
 
     def _new_behavior_actor(self) -> GaussianActor:
@@ -287,7 +305,7 @@ class MAPPOTrainer:
         active_policy = self.active_policy() if active_policy is None else active_policy
         if active_policy not in POLICIES: raise ValueError("active_policy must be a or b")
         if self.current_block_index == block_index and not force: return self.current_opponent_info()
-        preserve_initial_roles = self.env_steps == 0 and self.current_block_index is None and bool(self.current_observations)
+        preserve_initial_roles = self.env_steps == 0 and self.current_block_index is None and self.current_observations.size > 0 and len(self.current_scenarios) > 0
         opponent = other(active_policy, POLICIES)
         generation, latest = self._select_opponent_generation(opponent)
         behavior = self._actor(opponent, behavior=True)
@@ -321,7 +339,12 @@ class MAPPOTrainer:
             self.block_history[-1].update({"end_env_steps": self.env_steps, "active_generation_after": generation, "active_team_counts": deepcopy(self.block_active_team_counts), "tail_combo_counts": deepcopy(self.block_tail_combo_counts)})
         return self.current_opponent_info()
 
-    def _next_reset(self, env: HomogeneousAirCombatEnv) -> tuple[dict[str, np.ndarray], str, str | None, str]:
+    def _next_reset_spec(self) -> dict[str, Any]:
+        """Generate deterministic (seed, scenario, rear_team, active_team) for the next episode.
+
+        The worker only needs *seed*, *scenario* and *rear_team*; *active_team* is
+        a master-level scheduling decision.
+        """
         scenario = SCENARIOS[self.scenario_counter % len(SCENARIOS)]
         self.scenario_counter += 1; self.scenario_counts[scenario] += 1
         rear = None
@@ -343,25 +366,29 @@ class MAPPOTrainer:
                 else:
                     active_team = TEAMS[self.non_tail_tie_counter % 2]; self.non_tail_tie_counter += 1
         self.block_episode_counter += 1; self.active_team_counts[active_team] += 1; self.block_active_team_counts[active_team] += 1
-        observation, _ = env.reset(int(self.rng.integers(2**31 - 1)), scenario, rear)
-        return observation, scenario, rear, active_team
+        return {"seed": int(self.rng.integers(2**31 - 1)), "scenario": scenario, "rear_team": rear, "active_team": active_team}
 
     def reset_environments(self) -> None:
-        self.current_observations, self.current_scenarios, self.current_rear_teams = [], [], []
+        """Generate all reset specs deterministically and call vector_env.reset()."""
+        specs: list[dict[str, Any]] = []
+        self.current_scenarios, self.current_rear_teams = [], []
         self.current_active_teams, self.current_policy_a_teams, self.current_policy_b_teams = [], [], []
-        for env in self.envs:
-            observation, scenario, rear, active_team = self._next_reset(env)
+        for _ in range(self.num_envs):
+            rspec = self._next_reset_spec()
+            specs.append({"seed": rspec["seed"], "scenario": rspec["scenario"], "rear_team": rspec["rear_team"]})
+            active_team = rspec["active_team"]
             a_team = active_team if self.current_active_policy != "b" else other(active_team, TEAMS)
-            self.current_observations.append(observation); self.current_scenarios.append(scenario); self.current_rear_teams.append(rear)
+            self.current_scenarios.append(rspec["scenario"]); self.current_rear_teams.append(rspec["rear_team"])
             self.current_active_teams.append(active_team); self.current_policy_a_teams.append(a_team); self.current_policy_b_teams.append(other(a_team, TEAMS))
+        self.current_observations, self.current_global_states = self.vector_env.reset(specs)
         self.episode_returns.fill(0); self.episode_lengths.fill(0)
-        self.funnels = [{team: new_funnel() for team in TEAMS} for _ in self.envs]
+        self.funnels = [{team: new_funnel() for team in TEAMS} for _ in range(self.num_envs)]
 
-    def _episode_record(self, index: int, info: dict[str, Any]) -> dict[str, Any]:
+    def _episode_record(self, index: int, reason: str | None, outcome: str | None) -> dict[str, Any]:
         a_team, b_team = self.current_policy_a_teams[index], self.current_policy_b_teams[index]
-        winner_policy = "a" if info["outcome"] == a_team else "b" if info["outcome"] == b_team else None
+        winner_policy = "a" if outcome == a_team else "b" if outcome == b_team else None
         loser_policy = other(winner_policy, POLICIES) if winner_policy in POLICIES else None
-        return {"returns": self.episode_returns[index].copy(), "length": int(self.episode_lengths[index]), "outcome": info["outcome"], "reason": info["termination_reason"], "termination_reason": info["termination_reason"], "scenario": self.current_scenarios[index], "rear_team": self.current_rear_teams[index], "funnels": deepcopy(self.funnels[index]), "policy_a_team": a_team, "policy_b_team": b_team, "red_policy_id": "a" if a_team == "red" else "b", "blue_policy_id": "a" if a_team == "blue" else "b", "active_policy": self.current_active_policy, "active_policy_team": self.current_active_teams[index], "opponent_policy": self.current_opponent_policy, "opponent_generation": self.current_opponent_generation, "winner_policy": winner_policy, "loser_policy": loser_policy}
+        return {"returns": self.episode_returns[index].copy(), "length": int(self.episode_lengths[index]), "outcome": outcome, "reason": reason, "termination_reason": reason, "scenario": self.current_scenarios[index], "rear_team": self.current_rear_teams[index], "funnels": deepcopy(self.funnels[index]), "policy_a_team": a_team, "policy_b_team": b_team, "red_policy_id": "a" if a_team == "red" else "b", "blue_policy_id": "a" if a_team == "blue" else "b", "active_policy": self.current_active_policy, "active_policy_team": self.current_active_teams[index], "opponent_policy": self.current_opponent_policy, "opponent_generation": self.current_opponent_generation, "winner_policy": winner_policy, "loser_policy": loser_policy}
 
     def collect_rollout(self, remaining_env_steps: int | None = None) -> list[dict[str, Any]]:
         self.configure_block_opponent()
@@ -373,45 +400,114 @@ class MAPPOTrainer:
         active = self.current_active_policy
         assert active in POLICIES
         active_actor, opponent_actor, critic = self._actor(active), self._actor(other(active, POLICIES), behavior=True), self._critic(active)
+        N = self.num_envs
+        active_team_idx = np.asarray([TEAMS.index(t) for t in self.current_active_teams], np.int8)
+        opponent_team_idx = 1 - active_team_idx
+
         for _ in range(steps):
-            active_obs = np.asarray([row[f"{team}_0"] for row, team in zip(self.current_observations, self.current_active_teams)], np.float32)
-            opponent_obs = np.asarray([row[f"{other(team, TEAMS)}_0"] for row, team in zip(self.current_observations, self.current_active_teams)], np.float32)
-            states = np.asarray([env.global_state(team) for env, team in zip(self.envs, self.current_active_teams)], np.float32)
+            # --- policy inference (GPU) ---
+            t0 = time.perf_counter()
+            active_obs = self.current_observations[np.arange(N), active_team_idx]
+            opponent_obs = self.current_observations[np.arange(N), opponent_team_idx]
+            states = self.current_global_states[np.arange(N), active_team_idx]
             with torch.no_grad():
                 active_actions, logs = active_actor.sample_action(torch.as_tensor(active_obs, device=self.device))
                 opponent_actions, _ = opponent_actor.sample_action(torch.as_tensor(opponent_obs, device=self.device))
                 values = critic(torch.as_tensor(states, device=self.device))
             aa, oa = active_actions.cpu().numpy(), opponent_actions.cpu().numpy()
-            rewards = np.zeros(self.num_envs, np.float32); dones = np.zeros(self.num_envs, bool); next_obs = []
-            active_team_codes = np.asarray([TEAMS.index(team) for team in self.current_active_teams], np.int8)
-            for index, env in enumerate(self.envs):
-                active_team = self.current_active_teams[index]; opponent_team = other(active_team, TEAMS)
-                actions = {f"{active_team}_0": aa[index], f"{opponent_team}_0": oa[index]}
-                observation, reward, terminated, truncated, info = env.step(actions)
-                color_rewards = np.asarray([reward[a] for a in AGENT_IDS])
-                rewards[index] = reward[f"{active_team}_0"]
-                self.episode_returns[index] += color_rewards; self.episode_lengths[index] += 1
-                for team, agent in zip(TEAMS, AGENT_IDS):
-                    update_funnel(self.funnels[index][team], info["geometries"][agent], env.config["combat"], info["attacks"][agent])
-                    self.last_control_diagnostics[team].append(info["control_diagnostics"][agent])
-                done = terminated or truncated; dones[index] = done
-                if done:
-                    for team in TEAMS: finish_funnel(self.funnels[index][team], info["termination_reason"], team)
-                    completed.append(self._episode_record(index, info))
-                    self.episode_returns[index] = 0; self.episode_lengths[index] = 0
-                    self.funnels[index] = {team: new_funnel() for team in TEAMS}
-                    observation, scenario, rear, active_team = self._next_reset(env)
-                    a_team = active_team if active == "a" else other(active_team, TEAMS)
-                    self.current_scenarios[index], self.current_rear_teams[index], self.current_active_teams[index] = scenario, rear, active_team
-                    self.current_policy_a_teams[index], self.current_policy_b_teams[index] = a_team, other(a_team, TEAMS)
-                next_obs.append(observation)
-            self.buffer.add(active_obs, states, aa, logs.cpu().numpy(), rewards, values.cpu().numpy(), dones, active_team_codes)
-            self.current_observations = next_obs; self.env_steps += self.num_envs
+            t1 = time.perf_counter()
+            self._timing["policy_inference"] += t1 - t0
+
+            # --- assemble red/blue action array [N, 2, 3] ---
+            actions_array = np.zeros((N, 2, 3), dtype=np.float32)
+            for idx in range(N):
+                at = self.current_active_teams[idx]
+                ot = other(at, TEAMS)
+                red_idx = 0 if at == "red" else 1  # active team's red/blue slot
+                blue_idx = 0 if ot == "red" else 1
+                actions_array[idx, 0] = aa[idx] if at == "red" else oa[idx]
+                actions_array[idx, 1] = aa[idx] if at == "blue" else oa[idx]
+
+            # --- environment step (CPU, possibly parallel) ---
+            t2 = time.perf_counter()
+            (next_obs, next_gs, rewards_array, terminated, truncated,
+             step_counts, attacks, geometry, control_diag,
+             reason_codes, outcome_codes) = self.vector_env.step(actions_array)
+            t3 = time.perf_counter()
+            self._timing["env_step"] += t3 - t2
+
+            # --- update per-env returns, funnels, diagnostics ---
+            active_rewards = np.zeros(N, dtype=np.float32)
+            for idx in range(N):
+                color_rewards = np.asarray([rewards_array[idx, 0], rewards_array[idx, 1]])  # red, blue
+                at = self.current_active_teams[idx]
+                if at == "red":
+                    active_rewards[idx] = rewards_array[idx, 0]
+                else:
+                    active_rewards[idx] = rewards_array[idx, 1]
+                self.episode_returns[idx] += color_rewards
+                self.episode_lengths[idx] += 1
+
+                for team_i, team in enumerate(TEAMS):
+                    geo = types.SimpleNamespace(
+                        distance=float(geometry[idx, team_i, 0]),
+                        ata=float(geometry[idx, team_i, 1]),
+                        aa=float(geometry[idx, team_i, 2]),
+                    )
+                    update_funnel(self.funnels[idx][team], geo, self.combat_config, bool(attacks[idx, team_i]))
+                    # Reconstruct control diagnostics dict from compact array
+                    diag = {key: float(control_diag[idx, team_i, ki]) for ki, key in enumerate(CONTROL_DIAGNOSTIC_KEYS)}
+                    self.last_control_diagnostics[team].append(diag)
+
+            dones = terminated | truncated
+
+            # --- handle completed episodes ---
+            done_indices = np.where(dones)[0]
+            if len(done_indices) > 0:
+                t_reset = time.perf_counter()
+                # Sort by global env index for deterministic ordering.
+                sorted_done = np.sort(done_indices)
+                reset_specs: list[dict[str, Any]] = []
+                for idx in sorted_done:
+                    reason = decode_termination_reason(int(reason_codes[idx]))
+                    outcome = decode_outcome(int(outcome_codes[idx]))
+                    for team in TEAMS:
+                        finish_funnel(self.funnels[idx][team], reason, team)
+                    completed.append(self._episode_record(int(idx), reason, outcome))
+                    self.episode_returns[idx] = 0
+                    self.episode_lengths[idx] = 0
+                    self.funnels[idx] = {team: new_funnel() for team in TEAMS}
+                    # Generate next reset spec
+                    rspec = self._next_reset_spec()
+                    reset_specs.append({"seed": rspec["seed"], "scenario": rspec["scenario"], "rear_team": rspec["rear_team"]})
+                    new_active_team = rspec["active_team"]
+                    a_team = new_active_team if active == "a" else other(new_active_team, TEAMS)
+                    self.current_scenarios[idx] = rspec["scenario"]
+                    self.current_rear_teams[idx] = rspec["rear_team"]
+                    self.current_active_teams[idx] = new_active_team
+                    self.current_policy_a_teams[idx] = a_team
+                    self.current_policy_b_teams[idx] = other(a_team, TEAMS)
+
+                new_obs, new_gs = self.vector_env.reset_at(sorted_done, reset_specs)
+                next_obs[sorted_done] = new_obs
+                next_gs[sorted_done] = new_gs
+                # Update active_team_idx and opponent_team_idx after resets
+                active_team_idx = np.asarray([TEAMS.index(t) for t in self.current_active_teams], np.int8)
+                opponent_team_idx = 1 - active_team_idx
+                self._timing["reset"] += time.perf_counter() - t_reset
+
+            # --- buffer add ---
+            self.buffer.add(active_obs, states, aa, logs.cpu().numpy(), active_rewards, values.cpu().numpy(), dones, active_team_idx.astype(np.int8))
+            self.current_observations = next_obs
+            self.current_global_states = next_gs
+            self.env_steps += N
+
+        # --- final value bootstrap ---
         with torch.no_grad():
-            states = np.asarray([env.global_state(team) for env, team in zip(self.envs, self.current_active_teams)], np.float32)
+            states = self.current_global_states[np.arange(N), active_team_idx]
             last_values = critic(torch.as_tensor(states, device=self.device)).cpu().numpy()
-        t = self.config["training"]
-        self.buffer.compute_returns_and_advantages(last_values, t["gamma"], t["gae_lambda"])
+        t_cfg = self.config["training"]
+        self.buffer.compute_returns_and_advantages(last_values, t_cfg["gamma"], t_cfg["gae_lambda"])
         return completed
 
     @staticmethod
@@ -452,25 +548,32 @@ class MAPPOTrainer:
         return {"value_loss":float(np.mean(losses)),"critic_grad_norm":float(np.mean(grads))}
 
     def update(self, active_override: str | None = None) -> dict[str, Any]:
+        t0 = time.perf_counter()
         active = active_override or self.current_active_policy or self.active_policy()
         if active not in POLICIES: raise ValueError("active policy must be a or b")
         values = self._update_actor(active) | self._update_critic(active)
         metrics: dict[str, Any] = {"active_policy": active}
         for policy in POLICIES:
             for key, value in values.items(): metrics[f"policy_{policy}_{key}"] = value if policy == active else np.nan
-        self.update_count += 1; metrics.update(self.current_opponent_info()); return metrics
+        self.update_count += 1; metrics.update(self.current_opponent_info()); self._timing["ppo_update"] += time.perf_counter() - t0
+        return metrics
+
+    def close(self) -> None:
+        """Shut down the vector environment and release worker processes."""
+        self.vector_env.close()
 
     def training_signature(self) -> dict[str, Any]:
-        t, n, env = self.config["training"], self.config["network"], self.envs[0].config
+        t, n = self.config["training"], self.config["network"]
         signature_config = deepcopy(self.config)
         signature_config["training"].pop("total_env_steps", None)
+        signature_config["training"].pop("num_env_workers", None)  # runtime-only, not part of training signature
         signature_config["experiment"].pop("device", None)
         signature_config["experiment"].pop("output_dir", None)
-        return {"network": deepcopy(n), "ppo": {k: t[k] for k in ("learning_rate","gamma","gae_lambda","clip_coef","entropy_coef","value_loss_coef","max_grad_norm","ppo_epochs","minibatch_size")}, "num_envs": self.num_envs, "rollout_steps": self.rollout_steps, "alternating_block_env_steps": self.block_env_steps, "opponent_history_latest_probability": self.opponent_history_latest_probability, "reward_mode": env["combat"].get("reward_mode","coupled_difference"), "environment": deepcopy(env), "config": signature_config}
+        return {"network": deepcopy(n), "ppo": {k: t[k] for k in ("learning_rate","gamma","gae_lambda","clip_coef","entropy_coef","value_loss_coef","max_grad_norm","ppo_epochs","minibatch_size")}, "num_envs": self.num_envs, "rollout_steps": self.rollout_steps, "alternating_block_env_steps": self.block_env_steps, "opponent_history_latest_probability": self.opponent_history_latest_probability, "reward_mode": self.env_full_config["combat"].get("reward_mode","coupled_difference"), "environment": deepcopy(self.env_full_config), "config": signature_config}
 
     def save_checkpoint(self, path: str | Path) -> None:
         path=Path(path); path.parent.mkdir(parents=True,exist_ok=True)
-        data: dict[str,Any]={"checkpoint_version":CHECKPOINT_VERSION,"config":self.config,"training_signature":self.training_signature(),"environment_steps":self.env_steps,"env_steps":self.env_steps,"update":self.update_count,"training_mode":"alternating_self_play","active_policy":self.active_policy(),"current_active_policy":self.current_active_policy,"current_opponent_policy":self.current_opponent_policy,"current_opponent_generation":self.current_opponent_generation,"current_opponent_is_latest":self.current_opponent_is_latest,"current_opponent_history_size":self.current_opponent_history_size,"active_generation_before":self.active_generation_before,"active_generation_after":self.active_generation_after,"current_block_index":self.current_block_index,"finished_blocks":sorted(self._finished_blocks),"history_selection_counts":self.history_selection_counts,"block_history":self.block_history,"scenario_counter":self.scenario_counter,"scenario_counts":self.scenario_counts,"active_team_counts":self.active_team_counts,"tail_combo_counts":self.tail_combo_counts,"block_episode_counter":self.block_episode_counter,"tail_combo_counter":self.tail_combo_counter,"non_tail_tie_counter":self.non_tail_tie_counter,"block_active_team_counts":self.block_active_team_counts,"block_tail_combo_counts":self.block_tail_combo_counts,"current_active_teams":self.current_active_teams,"current_policy_a_teams":self.current_policy_a_teams,"current_policy_b_teams":self.current_policy_b_teams,"current_scenarios":self.current_scenarios,"current_rear_teams":self.current_rear_teams,"quick_best_score":self.quick_best_score,"candidate_checkpoints":self.candidate_checkpoints,"python_random_state":random.getstate(),"numpy_rng_state":self.rng.bit_generator.state,"opponent_numpy_rng_state":self.opponent_rng.bit_generator.state,"torch_cpu_rng_state":torch.get_rng_state(),"torch_cuda_rng_state":torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None}
+        data: dict[str,Any]={"checkpoint_version":CHECKPOINT_VERSION,"config":self.config,"training_signature":self.training_signature(),"environment_steps":self.env_steps,"env_steps":self.env_steps,"update":self.update_count,"training_mode":"alternating_self_play","active_policy":self.active_policy(),"current_active_policy":self.current_active_policy,"current_opponent_policy":self.current_opponent_policy,"current_opponent_generation":self.current_opponent_generation,"current_opponent_is_latest":self.current_opponent_is_latest,"current_opponent_history_size":self.current_opponent_history_size,"active_generation_before":self.active_generation_before,"active_generation_after":self.active_generation_after,"current_block_index":self.current_block_index,"finished_blocks":sorted(self._finished_blocks),"history_selection_counts":self.history_selection_counts,"block_history":self.block_history,"scenario_counter":self.scenario_counter,"scenario_counts":self.scenario_counts,"active_team_counts":self.active_team_counts,"tail_combo_counts":self.tail_combo_counts,"block_episode_counter":self.block_episode_counter,"tail_combo_counter":self.tail_combo_counter,"non_tail_tie_counter":self.non_tail_tie_counter,"block_active_team_counts":self.block_active_team_counts,"block_tail_combo_counts":self.block_tail_combo_counts,"current_active_teams":self.current_active_teams,"current_policy_a_teams":self.current_policy_a_teams,"current_policy_b_teams":self.current_policy_b_teams,"current_scenarios":self.current_scenarios,"current_rear_teams":self.current_rear_teams,"num_env_workers":self.num_env_workers,"quick_best_score":self.quick_best_score,"candidate_checkpoints":self.candidate_checkpoints,"python_random_state":random.getstate(),"numpy_rng_state":self.rng.bit_generator.state,"opponent_numpy_rng_state":self.opponent_rng.bit_generator.state,"torch_cpu_rng_state":torch.get_rng_state(),"torch_cuda_rng_state":torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None}
         for policy in POLICIES:
             for kind in ("actor","critic"): data[f"policy_{policy}_{kind}"]=getattr(self,f"policy_{policy}_{kind}").state_dict()
             for kind in ("actor_optimizer","critic_optimizer"): data[f"policy_{policy}_{kind}"]=getattr(self,f"policy_{policy}_{kind}").state_dict()
@@ -569,8 +672,316 @@ def evaluate_matchup(policy_a_actor: GaussianActor, policy_b_actor: GaussianActo
     return result
 
 
-def competitive_score(evaluation: dict[str,Any]) -> tuple[float,...]:
-    o=evaluation["overall"]
-    worst=o.get("worst_scenario_combat_decisive_rate")
-    if worst is None: worst=min(v["combat_decisive_rate"] for v in evaluation["by_scenario"].values())
-    return (float(worst),float(o["min_policy_kill_rate"]),float(o["paired_combat_decisive_rate"]),-float(max(o["policy_a_boundary_loss_rate"],o["policy_b_boundary_loss_rate"])),-float(max(o["policy_a_role_kill_gap"],o["policy_b_role_kill_gap"])),-float(o["collision_rate"]))
+def _actor_policy_deterministic(actor: GaussianActor, device: torch.device) -> Callable:
+    """Return a function that acts on a batch of observations (no env ref needed)."""
+    def act_batch(observations: np.ndarray) -> np.ndarray:
+        """observations [B, 14] -> actions [B, 3]"""
+        with torch.no_grad():
+            return actor.deterministic_action(
+                torch.as_tensor(observations, dtype=torch.float32, device=device)
+            ).cpu().numpy()
+    return act_batch
+
+
+def _run_episodes_parallel(
+    red_policy_batch: Callable[[np.ndarray], np.ndarray],
+    blue_policy_batch: Callable[[np.ndarray], np.ndarray],
+    env_config: str | Path,
+    specs: list[dict[str, Any]],
+    num_workers: int = 4,
+) -> list[dict[str, Any]]:
+    """Run *specs* episodes in parallel using a vector env.
+
+    Each spec is a dict with keys: seed, scenario, rear_team, red_id, blue_id.
+    Returns one episode record per spec in the original order.
+    """
+    from .vector_env import (
+        CONTROL_DIAGNOSTIC_KEYS,
+        decode_outcome,
+        decode_termination_reason,
+        make_combat_vector_env,
+    )
+
+    n_total = len(specs)
+    if n_total == 0:
+        return []
+
+    # Create enough slots: at least n_total, at least num_workers,
+    # and divisible by num_workers.
+    num_slots = max(n_total, num_workers)
+    while num_slots % num_workers != 0:
+        num_slots += 1
+
+    # Pad specs with dummy entries so every slot has an episode.
+    dummy_spec = {"seed": 0, "scenario": "tail_chase", "rear_team": "red",
+                  "red_id": "a", "blue_id": "b"}
+    padded_specs = specs + [dict(dummy_spec) for _ in range(num_slots - n_total)]
+
+    vec_env = make_combat_vector_env(env_config, num_slots, num_workers)
+
+    # State per slot
+    slot_returns = [np.zeros(2, dtype=np.float64) for _ in range(num_slots)]
+    slot_funnels = [{t: new_funnel() for t in TEAMS} for _ in range(num_slots)]
+    slot_red_id = [""] * num_slots
+    slot_blue_id = [""] * num_slots
+    slot_seed = [0] * num_slots
+    slot_scenario = [""] * num_slots
+    slot_rear = [None] * num_slots
+    slot_episode_lengths = [0] * num_slots
+
+    # Combat config
+    _ref = HomogeneousAirCombatEnv(env_config)
+    combat_cfg = _ref.config["combat"]
+    del _ref
+
+    try:
+        # Initialise all slots at once
+        init_specs = [{"seed": s["seed"], "scenario": s["scenario"], "rear_team": s["rear_team"]}
+                      for s in padded_specs]
+        for i, s in enumerate(padded_specs):
+            slot_returns[i] = np.zeros(2, dtype=np.float64)
+            slot_funnels[i] = {t: new_funnel() for t in TEAMS}
+            slot_red_id[i] = s["red_id"]
+            slot_blue_id[i] = s["blue_id"]
+            slot_seed[i] = s["seed"]
+            slot_scenario[i] = s["scenario"]
+            slot_rear[i] = s["rear_team"]
+            slot_episode_lengths[i] = 0
+
+        observations, global_states = vec_env.reset(init_specs)
+
+        records: list[dict[str, Any] | None] = [None] * n_total  # only track real episodes
+        completed_slots: set[int] = set()  # tracks which real-spec slots have finished
+
+        while len(completed_slots) < n_total:
+            # Build action arrays for all slots
+            red_obs = observations[:, 0, :]  # [S, 14]
+            blue_obs = observations[:, 1, :]  # [S, 14]
+            red_actions = red_policy_batch(red_obs)
+            blue_actions = blue_policy_batch(blue_obs)
+
+            actions_array = np.zeros((num_slots, 2, 3), dtype=np.float32)
+            actions_array[:, 0] = red_actions
+            actions_array[:, 1] = blue_actions
+
+            # Step all slots
+            (
+                next_obs,
+                next_gs,
+                rewards_arr,
+                terminated,
+                truncated,
+                _step_counts,
+                attacks,
+                geometry,
+                _control_diag,
+                reason_codes,
+                outcome_codes,
+            ) = vec_env.step(actions_array)
+
+            observations = next_obs
+            global_states = next_gs
+
+            # Process results
+            reset_indices = []
+            reset_specs_list = []
+            for slot in range(num_slots):
+                slot_returns[slot] += rewards_arr[slot]
+                slot_episode_lengths[slot] += 1
+
+                for team_i, team in enumerate(TEAMS):
+                    geo = types.SimpleNamespace(
+                        distance=float(geometry[slot, team_i, 0]),
+                        ata=float(geometry[slot, team_i, 1]),
+                        aa=float(geometry[slot, team_i, 2]),
+                    )
+                    update_funnel(
+                        slot_funnels[slot][team],
+                        geo,
+                        combat_cfg,
+                        bool(attacks[slot, team_i]),
+                    )
+
+                done = terminated[slot] or truncated[slot]
+                if done:
+                    reason = decode_termination_reason(int(reason_codes[slot]))
+                    outcome = decode_outcome(int(outcome_codes[slot]))
+                    for team in TEAMS:
+                        finish_funnel(slot_funnels[slot][team], reason, team)
+
+                    rid = slot_red_id[slot]
+                    bid = slot_blue_id[slot]
+                    winner = (
+                        rid if outcome == "red" else
+                        bid if outcome == "blue" else None
+                    )
+                    loser = (
+                        bid if winner == rid else
+                        rid if winner == bid else None
+                    )
+
+                    # Only record if this is a real episode (not a dummy padding slot)
+                    if slot < n_total:
+                        records[slot] = {
+                            "scenario": slot_scenario[slot],
+                            "rear_team": slot_rear[slot],
+                            "seed": slot_seed[slot],
+                            "outcome": outcome,
+                            "reason": reason,
+                            "termination_reason": reason,
+                            "returns": slot_returns[slot].copy(),
+                            "length": slot_episode_lengths[slot],
+                            "funnels": deepcopy(slot_funnels[slot]),
+                            "red_policy_id": rid,
+                            "blue_policy_id": bid,
+                            "policy_a_team": (
+                                "red" if rid == "a" else "blue" if bid == "a" else None
+                            ),
+                            "policy_b_team": (
+                                "red" if rid == "b" else "blue" if bid == "b" else None
+                            ),
+                            "winner_policy": winner,
+                            "loser_policy": loser,
+                        }
+                        completed_slots.add(slot)
+
+                    # Reset this slot with a fresh dummy spec (or the next real spec from queue)
+                    # We re-use the same padded_specs; since all real episodes finish
+                    # independently, we just need any valid spec to keep the slot alive.
+                    s = padded_specs[slot]  # reuse original spec for slot
+                    slot_returns[slot] = np.zeros(2, dtype=np.float64)
+                    slot_funnels[slot] = {t: new_funnel() for t in TEAMS}
+                    slot_red_id[slot] = s["red_id"]
+                    slot_blue_id[slot] = s["blue_id"]
+                    slot_seed[slot] = s["seed"]
+                    slot_scenario[slot] = s["scenario"]
+                    slot_rear[slot] = s["rear_team"]
+                    slot_episode_lengths[slot] = 0
+                    reset_indices.append(slot)
+                    reset_specs_list.append(
+                        {"seed": s["seed"], "scenario": s["scenario"], "rear_team": s["rear_team"]}
+                    )
+
+            if reset_indices:
+                new_obs, new_gs = vec_env.reset_at(
+                    np.array(reset_indices, dtype=np.int32), reset_specs_list
+                )
+                for j, slot in enumerate(reset_indices):
+                    observations[slot] = new_obs[j]
+                    global_states[slot] = new_gs[j]
+    finally:
+        vec_env.close()
+
+    assert all(r is not None for r in records), "some episodes did not complete"
+    return records  # type: ignore[return-value]
+
+
+def evaluate_paired_policies_parallel(
+    policy_a_batch: Callable[[np.ndarray], np.ndarray],
+    policy_b_batch: Callable[[np.ndarray], np.ndarray],
+    env_config: str | Path,
+    episodes: int,
+    num_workers: int = 4,
+    scenario: str = "all",
+    seed: int = 10000,
+    policy_a_id: str = "a",
+    policy_b_id: str = "b",
+) -> dict[str, Any]:
+    """Paired evaluation using a persistent vector env (parallel episodes)."""
+    if episodes <= 0 or episodes % 2:
+        raise ValueError("paired evaluation --episodes must be a positive even number")
+    specs = []
+    tail_index = 0
+    for pair in range(episodes // 2):
+        name = SCENARIOS[pair % 3] if scenario == "all" else scenario
+        rear = None
+        if name == "tail_chase":
+            rear = TEAMS[tail_index % 2]
+            tail_index += 1
+        episode_seed = seed + pair
+        specs.append(
+            {
+                "seed": episode_seed,
+                "scenario": name,
+                "rear_team": rear,
+                "red_id": policy_a_id,
+                "blue_id": policy_b_id,
+            }
+        )
+        specs.append(
+            {
+                "seed": episode_seed,
+                "scenario": name,
+                "rear_team": rear,
+                "red_id": policy_b_id,
+                "blue_id": policy_a_id,
+            }
+        )
+
+    records = _run_episodes_parallel(
+        policy_a_batch,
+        policy_b_batch,
+        env_config,
+        specs,
+        num_workers,
+    )
+
+    overall = summarize_competitive_records(records)
+    by = {
+        name: summarize_competitive_records(
+            [r for r in records if r["scenario"] == name]
+        )
+        for name in SCENARIOS
+        if any(r["scenario"] == name for r in records)
+    }
+    overall["worst_scenario_combat_decisive_rate"] = min(
+        v["combat_decisive_rate"] for v in by.values()
+    )
+    return {
+        "overall": overall,
+        "by_scenario": by,
+        "tail_rear_counts": {t: sum(r["rear_team"] == t for r in records) for t in TEAMS},
+        "records": records,
+    }
+
+
+def evaluate_competitive_match_parallel(
+    policy_a_actor: GaussianActor,
+    policy_b_actor: GaussianActor,
+    env_config: str | Path,
+    episodes: int,
+    device: torch.device,
+    num_env_workers: int = 4,
+    scenario: str = "all",
+    seed: int = 10000,
+) -> dict[str, Any]:
+    """Parallel paired evaluation using a persistent vector env."""
+    policy_a_actor.eval()
+    policy_b_actor.eval()
+    result = evaluate_paired_policies_parallel(
+        _actor_policy_deterministic(policy_a_actor, device),
+        _actor_policy_deterministic(policy_b_actor, device),
+        env_config,
+        episodes,
+        num_env_workers,
+        scenario,
+        seed,
+    )
+    policy_a_actor.train()
+    policy_b_actor.train()
+    return result
+
+
+def competitive_score(evaluation: dict[str, Any]) -> tuple[float, ...]:
+    o = evaluation["overall"]
+    worst = o.get("worst_scenario_combat_decisive_rate")
+    if worst is None:
+        worst = min(v["combat_decisive_rate"] for v in evaluation["by_scenario"].values())
+    return (
+        float(worst),
+        float(o["min_policy_kill_rate"]),
+        float(o["paired_combat_decisive_rate"]),
+        -float(max(o["policy_a_boundary_loss_rate"], o["policy_b_boundary_loss_rate"])),
+        -float(max(o["policy_a_role_kill_gap"], o["policy_b_role_kill_gap"])),
+        -float(o["collision_rate"]),
+    )

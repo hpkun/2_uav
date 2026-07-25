@@ -20,6 +20,7 @@ def parse_args():
     parser.add_argument("--train-config",default="configs/mappo_1v1.yaml")
     parser.add_argument("--smoke",action="store_true")
     parser.add_argument("--total-env-steps",type=int); parser.add_argument("--num-envs",type=int)
+    parser.add_argument("--env-workers",type=int,default=None,help="Number of persistent CPU worker processes (default: from config or 4)")
     parser.add_argument("--seed",type=int); parser.add_argument("--device"); parser.add_argument("--output-dir"); parser.add_argument("--resume")
     return parser.parse_args()
 
@@ -29,10 +30,11 @@ def load_config(args):
     if config["training"].get("training_mode")!="alternating_self_play": raise ValueError("train_mappo.py requires alternating_self_play")
     config["experiment"]["output_dir"]=config["experiment"].get("output_dir","outputs/mappo_v6")
     config["training"].setdefault("opponent_history_latest_probability",.7)
+    config["training"].setdefault("num_env_workers",4)
     if args.smoke:
         config["training"].update(total_env_steps=8192,num_envs=2,rollout_steps=64,alternating_block_env_steps=2048,ppo_epochs=2,minibatch_size=128)
         config["evaluation"]["episodes"]=12; config["experiment"]["output_dir"]="outputs/mappo_v6_smoke"
-    for value,section,key in ((args.total_env_steps,"training","total_env_steps"),(args.num_envs,"training","num_envs"),(args.seed,"experiment","seed"),(args.device,"experiment","device"),(args.output_dir,"experiment","output_dir")):
+    for value,section,key in ((args.total_env_steps,"training","total_env_steps"),(args.num_envs,"training","num_envs"),(args.env_workers,"training","num_env_workers"),(args.seed,"experiment","seed"),(args.device,"experiment","device"),(args.output_dir,"experiment","output_dir")):
         if value is not None: config[section][key]=value
     return config
 
@@ -80,6 +82,9 @@ def main():
     random.seed(seed);np.random.seed(seed);torch.manual_seed(seed);torch.cuda.manual_seed_all(seed)
     total,num_envs,block_size=int(t["total_env_steps"]),int(t["num_envs"]),int(t["alternating_block_env_steps"])
     if total%num_envs or block_size%num_envs: raise ValueError("step counts must be divisible by num_envs")
+    num_workers = int(t.get("num_env_workers", 4))
+    envs_per_worker = num_envs // num_workers
+    print(f"num_envs={num_envs} num_env_workers={num_workers} envs_per_worker={envs_per_worker}", flush=True)
     trainer=MAPPOTrainer(args.env_config,config)
     if args.resume: trainer.load_checkpoint(args.resume)
     else:
@@ -89,48 +94,60 @@ def main():
     if not args.resume: trainer.save_checkpoint(checkpoints/"initial.pt")
     print(f"device={trainer.device} gpu={torch.cuda.get_device_name(0) if trainer.device.type=='cuda' else None}",flush=True)
     start=time.perf_counter();rows=[];blocks=[]
+    t_eval = time.perf_counter()
     evaluation=evaluate_competitive_match(trainer.policy_a_actor,trainer.policy_b_actor,args.env_config,config["evaluation"]["episodes"],trainer.device,seed=seed+100000)
+    trainer._timing["evaluation"] += time.perf_counter() - t_eval
     if trainer.quick_best_score is None: trainer.quick_best_score=competitive_score(evaluation)
     initial_quick=evaluation
-    while trainer.env_steps<total:
-        block=trainer.block_index();active=trainer.active_policy();end=min(total,(block+1)*block_size)
-        if trainer.current_block_index!=block:
-            trainer.configure_block_opponent(block,active);trainer.reset_environments()
-        if args.smoke:
-            frozen=next(p for p in POLICIES if p!=active)
-            frozen_bytes=_state_bytes({"actor":trainer._actor(frozen).state_dict(),"critic":trainer._critic(frozen).state_dict(),"ao":getattr(trainer,f"policy_{frozen}_actor_optimizer").state_dict(),"co":getattr(trainer,f"policy_{frozen}_critic_optimizer").state_dict(),"behavior":trainer._actor(frozen,True).state_dict()})
-            active_actor_before=_state_bytes(trainer._actor(active).state_dict());active_critic_before=_state_bytes(trainer._critic(active).state_dict())
-        completed=trainer.collect_rollout(end-trainer.env_steps)
-        if not np.isfinite(trainer.buffer.rewards).all():raise FloatingPointError("non-finite rollout reward")
-        metrics=trainer.update(active)
-        if args.smoke:
-            now=_state_bytes({"actor":trainer._actor(frozen).state_dict(),"critic":trainer._critic(frozen).state_dict(),"ao":getattr(trainer,f"policy_{frozen}_actor_optimizer").state_dict(),"co":getattr(trainer,f"policy_{frozen}_critic_optimizer").state_dict(),"behavior":trainer._actor(frozen,True).state_dict()})
-            if now!=frozen_bytes:raise AssertionError("frozen policy state changed")
-            if _state_bytes(trainer._actor(active).state_dict())==active_actor_before or _state_bytes(trainer._critic(active).state_dict())==active_critic_before:raise AssertionError("active policy failed to update")
-        finished=trainer.env_steps==end
-        if finished:metrics.update(trainer.finish_block(active,block))
-        if trainer.update_count%t["eval_interval_updates"]==0 or finished:
-            evaluation=evaluate_competitive_match(trainer.policy_a_actor,trainer.policy_b_actor,args.env_config,config["evaluation"]["episodes"],trainer.device,seed=seed+100000)
-            candidate=competitive_score(evaluation)
-            if candidate>tuple(trainer.quick_best_score):
-                trainer.quick_best_score=candidate
-                path=candidates/f"candidate_update_{trainer.update_count:04d}.pt"
-                trainer.candidate_checkpoints.append(str(path.relative_to(output)));trainer.save_checkpoint(path)
-        row=diagnostic_row(trainer,completed,metrics,evaluation,active,block);rows.append(row)
-        finite=[v for k,v in row.items() if isinstance(v,(int,float,np.number)) and not (isinstance(v,float) and np.isnan(v))]
-        if args.smoke and not np.isfinite(finite).all():raise FloatingPointError("non-finite smoke diagnostics")
-        trainer.save_checkpoint(checkpoints/"latest.pt");write_metrics(rows,output/"training_metrics.csv")
-        print(f"update={trainer.update_count} steps={trainer.env_steps} block={block} active_policy={active} min_policy_kill={row['eval_min_policy_kill_rate']:.3f} opponent={trainer.current_opponent_policy}:{trainer.current_opponent_generation}",flush=True)
-        if finished:
-            trainer.save_checkpoint(checkpoints/f"block_{block:03d}.pt");blocks.append(deepcopy_safe(trainer.block_history[-1]))
+    try:
+        while trainer.env_steps<total:
+            block=trainer.block_index();active=trainer.active_policy();end=min(total,(block+1)*block_size)
+            if trainer.current_block_index!=block:
+                trainer.configure_block_opponent(block,active);trainer.reset_environments()
+            if args.smoke:
+                frozen=next(p for p in POLICIES if p!=active)
+                frozen_bytes=_state_bytes({"actor":trainer._actor(frozen).state_dict(),"critic":trainer._critic(frozen).state_dict(),"ao":getattr(trainer,f"policy_{frozen}_actor_optimizer").state_dict(),"co":getattr(trainer,f"policy_{frozen}_critic_optimizer").state_dict(),"behavior":trainer._actor(frozen,True).state_dict()})
+                active_actor_before=_state_bytes(trainer._actor(active).state_dict());active_critic_before=_state_bytes(trainer._critic(active).state_dict())
+            completed=trainer.collect_rollout(end-trainer.env_steps)
+            if not np.isfinite(trainer.buffer.rewards).all():raise FloatingPointError("non-finite rollout reward")
+            metrics=trainer.update(active)
+            if args.smoke:
+                now=_state_bytes({"actor":trainer._actor(frozen).state_dict(),"critic":trainer._critic(frozen).state_dict(),"ao":getattr(trainer,f"policy_{frozen}_actor_optimizer").state_dict(),"co":getattr(trainer,f"policy_{frozen}_critic_optimizer").state_dict(),"behavior":trainer._actor(frozen,True).state_dict()})
+                if now!=frozen_bytes:raise AssertionError("frozen policy state changed")
+                if _state_bytes(trainer._actor(active).state_dict())==active_actor_before or _state_bytes(trainer._critic(active).state_dict())==active_critic_before:raise AssertionError("active policy failed to update")
+            finished=trainer.env_steps==end
+            if finished:metrics.update(trainer.finish_block(active,block))
+            t_ev = time.perf_counter()
+            if trainer.update_count%t["eval_interval_updates"]==0 or finished:
+                evaluation=evaluate_competitive_match(trainer.policy_a_actor,trainer.policy_b_actor,args.env_config,config["evaluation"]["episodes"],trainer.device,seed=seed+100000)
+                candidate=competitive_score(evaluation)
+                if candidate>tuple(trainer.quick_best_score):
+                    trainer.quick_best_score=candidate
+                    path=candidates/f"candidate_update_{trainer.update_count:04d}.pt"
+                    trainer.candidate_checkpoints.append(str(path.relative_to(output)));trainer.save_checkpoint(path)
+            trainer._timing["evaluation"] += time.perf_counter() - t_ev
+            row=diagnostic_row(trainer,completed,metrics,evaluation,active,block);rows.append(row)
+            finite=[v for k,v in row.items() if isinstance(v,(int,float,np.number)) and not (isinstance(v,float) and np.isnan(v))]
+            if args.smoke and not np.isfinite(finite).all():raise FloatingPointError("non-finite smoke diagnostics")
+            trainer.save_checkpoint(checkpoints/"latest.pt");write_metrics(rows,output/"training_metrics.csv")
+            elapsed = time.perf_counter() - start
+            env_sps = trainer.env_steps / elapsed if elapsed > 0 else 0.0
+            tmd = trainer._timing
+            print(f"update={trainer.update_count} steps={trainer.env_steps} workers={num_workers} env_sps={env_sps:.1f} env_step={tmd['env_step']:.1f}s policy_infer={tmd['policy_inference']:.1f}s ppo_update={tmd['ppo_update']:.1f}s block={block} active_policy={active} min_policy_kill={row['eval_min_policy_kill_rate']:.3f} opponent={trainer.current_opponent_policy}:{trainer.current_opponent_generation}",flush=True)
+            if finished:
+                trainer.save_checkpoint(checkpoints/f"block_{block:03d}.pt");blocks.append(deepcopy_safe(trainer.block_history[-1]))
+    finally:
+        trainer.close()
     trainer.save_checkpoint(checkpoints/"final.pt")
     restored_ok=None
     if args.smoke:
         restored=MAPPOTrainer(args.env_config,config);restored.load_checkpoint(checkpoints/"final.pt");restored.collect_rollout()
         restored_ok=restored.env_steps==trainer.env_steps+restored.rollout_steps*restored.num_envs
         if not restored_ok:raise AssertionError("v6 smoke continuation failed")
+    elapsed_total = time.perf_counter() - start
+    tmd = trainer._timing
     final_eval=evaluate_competitive_match(trainer.policy_a_actor,trainer.policy_b_actor,args.env_config,config["evaluation"]["episodes"],trainer.device,seed=seed+100000)
-    summary={"version":6,"device":str(trainer.device),"actual_environment_steps":trainer.env_steps,"updates":trainer.update_count,"elapsed_seconds":time.perf_counter()-start,"block_order":[r["active_policy"] for r in trainer.block_history],"blocks":trainer.block_history,"scenario_counts":trainer.scenario_counts,"active_team_counts":trainer.active_team_counts,"tail_combo_counts":trainer.tail_combo_counts,"history_selection_counts":trainer.history_selection_counts,"quick_best_score":list(trainer.quick_best_score),"candidate_checkpoints":trainer.candidate_checkpoints,"initial_quick_evaluation":initial_quick,"final_quick_evaluation":final_eval,"smoke_v6_restore_and_continue_ok":restored_ok}
+    summary={"version":6,"device":str(trainer.device),"actual_environment_steps":trainer.env_steps,"updates":trainer.update_count,"num_envs":num_envs,"num_env_workers":num_workers,"environments_per_worker":envs_per_worker,"environment_step_seconds":tmd["env_step"],"policy_inference_seconds":tmd["policy_inference"],"ppo_update_seconds":tmd["ppo_update"],"evaluation_seconds":tmd["evaluation"],"reset_seconds":tmd["reset"],"total_training_seconds":elapsed_total,"environment_steps_per_second":trainer.env_steps/elapsed_total if elapsed_total>0 else 0,"block_order":[r["active_policy"] for r in trainer.block_history],"blocks":trainer.block_history,"scenario_counts":trainer.scenario_counts,"active_team_counts":trainer.active_team_counts,"tail_combo_counts":trainer.tail_combo_counts,"history_selection_counts":trainer.history_selection_counts,"quick_best_score":list(trainer.quick_best_score),"candidate_checkpoints":trainer.candidate_checkpoints,"initial_quick_evaluation":initial_quick,"final_quick_evaluation":final_eval,"smoke_v6_restore_and_continue_ok":restored_ok}
     (output/"run_summary.json").write_text(json.dumps(summary,indent=2,default=json_default),encoding="utf-8")
     print(json.dumps(summary,indent=2,default=json_default),flush=True)
 

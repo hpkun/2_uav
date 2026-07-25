@@ -1,5 +1,5 @@
 """Evaluate a v6 policy checkpoint with paired color swaps."""
-import argparse,json
+import argparse,json,time
 from pathlib import Path
 import torch
 from uav_combat.mappo.networks import GaussianActor
@@ -17,9 +17,13 @@ def main():
     p=argparse.ArgumentParser();p.add_argument("--checkpoint",required=True);p.add_argument("--env-config",default="configs/homogeneous_1v1.yaml")
     p.add_argument("--matchup",required=True,choices=("a_vs_b","a_vs_zero","a_vs_pursuit","b_vs_zero","b_vs_pursuit"))
     p.add_argument("--episodes",type=int,default=300);p.add_argument("--scenario",choices=("all","tail_chase","offset_head_on","crossing"),default="all")
-    p.add_argument("--device",default="auto");p.add_argument("--seedset",default="seedset0");args=p.parse_args()
+    p.add_argument("--device",default="auto");p.add_argument("--env-workers",type=int,default=None);p.add_argument("--seedset",default="seedset0");args=p.parse_args()
     device=resolve_device(args.device);a,b,checkpoint=load_actors(args.checkpoint,device)
+    t0=time.perf_counter()
     result=evaluate_matchup(a,b,args.env_config,args.episodes,device,args.matchup,args.scenario,checkpoint["config"]["experiment"]["seed"]+200000)
+    elapsed=time.perf_counter()-t0
+    nw=args.env_workers or 1
+    result["timing"]={"total_seconds":elapsed,"env_workers":nw,"episodes_per_second":args.episodes/elapsed if elapsed>0 else 0}
     output=Path(checkpoint["config"]["experiment"]["output_dir"])/f"evaluation_{Path(args.checkpoint).stem}_{args.matchup}_{args.scenario}_{args.seedset}.json"
     output.write_text(json.dumps(result,indent=2,default=lambda x:x.tolist()),encoding="utf-8");print(json.dumps(result,indent=2,default=lambda x:x.tolist()));print(f"saved: {output}")
 if __name__=="__main__":main()

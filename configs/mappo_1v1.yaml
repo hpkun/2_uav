@@ -9,6 +9,7 @@ training:
   training_mode: alternating_self_play
   total_env_steps: 1000000
   num_envs: 32
+  num_env_workers: 4
   rollout_steps: 256
   alternating_block_env_steps: 100000
   ppo_epochs: 5
