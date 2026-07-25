@@ -1,0 +1,16 @@
+{
+  "checkpoint_family": "homogeneous_3v3_fixed_blue",
+  "checkpoint_version": 1,
+  "device": "cpu",
+  "actual_environment_steps": 16384,
+  "updates": 32,
+  "num_envs": 4,
+  "num_env_workers": 1,
+  "environments_per_worker": 4,
+  "environment_step_seconds": 98.08594850002191,
+  "policy_inference_seconds": 2.4504088999710802,
+  "ppo_update_seconds": 0.5483228000048257,
+  "total_training_seconds": 104.88177459999861,
+  "environment_steps_per_second": 156.21398534193202,
+  "smoke_restore_and_continue_ok": true
+}

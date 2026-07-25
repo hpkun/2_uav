@@ -1,6 +1,84 @@
-# Homogeneous 1v1 UAV Combat v6
+# UAV Combat Environment and MAPPO Training
 
-This project is a deliberately small, symmetric 1v1 competitive baseline. The physical red and blue teams are episode roles; the learned model identities are policy A and policy B. Neither policy is permanently tied to a color.
+**Current main experiment: Homogeneous 3v3 Red MAPPO vs Fixed-Rule Blue**
+
+The primary goal is to validate a learnable homogeneous 3v3 air combat environment. Red uses three identical UAVs with a shared-actor MAPPO (centralised training, decentralised execution). Blue uses a paper-grounded nearest-target fixed pursuit policy and never learns.
+
+Success is defined as red eliminating all three blue aircraft through deterministic geometric attacks. Opponent boundary or collision deaths do not count as attack success. The 3v3 scale is the project-validated verification size; it is not presented as a strict reproduction of the MADSAC paper.
+
+The 1v1 self-play experiment is retained as an **auxiliary experiment**. It is no longer the default main experiment.
+
+---
+
+## Homogeneous 3v3 Red MAPPO vs Fixed-Rule Blue
+
+### Paper grounding
+
+- Multi-UAV cooperative Dec-POMDP with CTDE.
+- Shared-policy idea: three homogeneous red UAVs share one Actor.
+- Red learns against a fixed-rule blue; blue uses step-by-step nearest-alive-red selection with pure-pursuit actions (MADSAC fixed-policy design).
+- Success = complete elimination of blue by red attack kills.
+- MADSAC segmented reward structure adapted to team reward with alive-red mean dense term.
+
+### Project adaptations
+
+- 3v3 scale (not 4v4 or 5v5); a verification scale before further scaling.
+- MAPPO algorithm (not MADDPG).
+- Deterministic geometric kill (not missile/radar models).
+- Automatic nearest-in-envelope target selection per aircraft per step.
+- 68-dim fixed per-agent observation (including own x/y for boundary awareness).
+- 48-dim centralised critic state (6 aircraft × 8 features).
+- Team dense reward computed as the mean over alive red agents (not sum), to avoid scaling with team size.
+- 8 parallel environments, 4 persistent CPU workers.
+- Best checkpoint ordered by red complete elimination success rate.
+
+### Architecture
+
+| Component | Dim | Notes |
+|---|---|---|
+| Actor observation | 68 | Self (8) + 2 teammates (12 each) + 3 enemies (12 each) |
+| Critic state | 48 | red_0..2 then blue_0..2, each 8 features |
+| Action | 3 | yaw, pitch, speed (same as 1v1) |
+| Team size | 3 | Three red agents share one Actor |
+
+### Reward
+
+```
+red_team_reward = team_dense_reward
+    + 10 × blue_destroyed_by_red_attack
+    - 10 × red_destroyed_by_blue_attack
+    - 10 × red_boundary_deaths
+    - 10 × red_collision_deaths
+```
+
+Blue receives a symmetric diagnostic reward only (not used for training).
+
+### Commands (3v3)
+
+```bash
+# Environment audit
+python scripts/audit_3v3_combat_logic.py
+
+# Rule baselines
+python scripts/evaluate_rule_3v3.py --episodes 30
+
+# Smoke training (16384 env steps)
+python scripts/train_mappo_3v3.py --smoke --device cpu --num-envs 4 --env-workers 1
+
+# Formal training (500k env steps — do not run for smoke validation)
+# python scripts/train_mappo_3v3.py --device cuda
+
+# Evaluate checkpoint
+python scripts/evaluate_mappo_3v3.py --checkpoint outputs/mappo_3v3_fixed_blue_smoke/checkpoints/final.pt --episodes 60
+```
+
+---
+
+## 1v1 Self-Play (auxiliary experiment)
+
+The original 1v1 alternating-freeze competitive baseline is retained as an auxiliary experiment. The physical red and blue teams are episode roles; the learned model identities are policy A and policy B. Neither policy is permanently tied to a color.
+
+The original 1v1 README content follows below.
 
 ## Training structure
 
