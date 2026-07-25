@@ -113,7 +113,9 @@ class FixedBlue3v3MAPPOTrainer:
             # Step: only send red actions; workers compute blue actions
             t2 = time.perf_counter()
             (next_obs, next_gs, team_rewards, terminated, truncated,
-             alive_masks, _atg, _dc, _tac, _geom, _cd, _rc, _oc) = self.vector_env.step(red_actions)
+             alive_masks, _atg, _dc, _tac,
+             _atk_r, _atk_b, _bdy_r, _bdy_b, _col_r, _col_b,
+             _red_succ, _blue_succ, _geom, _cd, _rc, _oc) = self.vector_env.step(red_actions)
             t3 = time.perf_counter()
             self._timing["env_step"] += t3 - t2
 

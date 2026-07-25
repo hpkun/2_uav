@@ -87,6 +87,14 @@ def _worker_step(envs, red_actions, blue_policy):
     atg = np.zeros((L, 6), dtype=np.int8)
     dc = np.zeros((L, 6), dtype=np.int8)
     tac = np.empty((L, 2), dtype=np.int8)
+    atk_red = np.zeros(L, dtype=np.int8)
+    atk_blue = np.zeros(L, dtype=np.int8)
+    bdy_red = np.zeros(L, dtype=np.int8)
+    bdy_blue = np.zeros(L, dtype=np.int8)
+    col_red = np.zeros(L, dtype=np.int8)
+    col_blue = np.zeros(L, dtype=np.int8)
+    red_succ = np.zeros(L, dtype=bool)
+    blue_succ = np.zeros(L, dtype=bool)
     geom = np.zeros((L, 6, 3), dtype=np.float32)
     cd = np.zeros((L, 6, K), dtype=np.float32)
     rc = np.empty(L, dtype=np.int8)
@@ -95,9 +103,7 @@ def _worker_step(envs, red_actions, blue_policy):
     for i, (env, ra) in enumerate(zip(envs, red_actions)):
         reds = [a for a in env.aircraft if a.team == "red"]
         blues = [a for a in env.aircraft if a.team == "blue"]
-        # Generate blue actions
         blue_acts, _ = blue_policy.select_actions(blues, reds)
-        # Assemble full action dict
         actions = {}
         for j, aid in enumerate(RED_IDS):
             actions[aid] = np.asarray(ra[j], dtype=np.float32)
@@ -119,10 +125,20 @@ def _worker_step(envs, red_actions, blue_policy):
         team_rew[i] = rewards["red_0"]
         term[i] = t; trunc[i] = tr
         tac[i, 0] = info["red_alive_count"]; tac[i, 1] = info["blue_alive_count"]
+        atk_red[i] = info["attack_kills"]["red"]
+        atk_blue[i] = info["attack_kills"]["blue"]
+        bdy_red[i] = info["boundary_deaths"]["red"]
+        bdy_blue[i] = info["boundary_deaths"]["blue"]
+        col_red[i] = info["collision_deaths"]["red"]
+        col_blue[i] = info["collision_deaths"]["blue"]
+        red_succ[i] = info["red_complete_elimination_success"]
+        blue_succ[i] = info["blue_complete_elimination_success"]
         rc[i] = encode_termination_reason(info["termination_reason"])
         oc[i] = encode_outcome(info["outcome"])
 
-    return (obs, gs, team_rew, term, trunc, am, atg, dc, tac, geom, cd, rc, oc)
+    return (obs, gs, team_rew, term, trunc, am, atg, dc, tac,
+            atk_red, atk_blue, bdy_red, bdy_blue, col_red, col_blue,
+            red_succ, blue_succ, geom, cd, rc, oc)
 
 
 def _worker_reset_at(envs, payload):
@@ -223,7 +239,7 @@ class SubprocessCombatVectorEnv3v3:
             self._conns[w].send(("step", red_actions[self._sl(w)]))
         ps = [self._conns[w].recv() for w in range(self.num_env_workers)]
         for w, r in enumerate(ps): self._cerr(r, w)
-        return tuple(np.concatenate([p[i] for p in ps], axis=0) for i in range(13))
+        return tuple(np.concatenate([p[i] for p in ps], axis=0) for i in range(21))
 
     def reset_at(self, gi, specs):
         self._check()

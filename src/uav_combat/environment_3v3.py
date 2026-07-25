@@ -24,20 +24,49 @@ DEATH_COLLISION_CROSS = 4
 DEATH_ATTACK = 5
 
 DEATH_CAUSE_NAMES: dict[int, str] = {
-    0: "none",
-    1: "altitude_boundary",
-    2: "xy_boundary",
-    3: "friendly_collision",
-    4: "cross_team_collision",
-    5: "attack",
+    0: "NONE",
+    1: "BOUNDARY_ALTITUDE",
+    2: "BOUNDARY_XY",
+    3: "COLLISION_FRIENDLY",
+    4: "COLLISION_CROSS_TEAM",
+    5: "ATTACK",
 }
 
-OBS_DIM = 68   # 8 (self) + 2*12 (teammates) + 3*12 (enemies)
-GS_DIM = 48    # 6 aircraft × 8 features
+OBS_DIM = 68
+GS_DIM = 48
 
 
 def _normalize_obs(vec: np.ndarray) -> np.ndarray:
     return np.clip(vec, -1.0, 1.0).astype(np.float32)
+
+
+def _death_summary(death_causes: dict[str, int], team: str, team_ids: tuple[str, ...]) -> dict[str, int]:
+    """Return {attack_deaths, boundary_deaths, collision_deaths, survivors} for *team*."""
+    attack = 0
+    boundary = 0
+    collision = 0
+    alive = 0
+    for aid in team_ids:
+        cause = death_causes.get(aid, DEATH_NONE)
+        if cause == DEATH_NONE:
+            alive += 1
+        elif cause == DEATH_ATTACK:
+            attack += 1
+        elif cause in (DEATH_BOUNDARY_ALTITUDE, DEATH_BOUNDARY_XY):
+            boundary += 1
+        elif cause in (DEATH_COLLISION_FRIENDLY, DEATH_COLLISION_CROSS):
+            collision += 1
+    return {"attack_deaths": attack, "boundary_deaths": boundary, "collision_deaths": collision, "survivors": alive}
+
+
+def _validate_death_ledger(team: str, summary: dict[str, int]) -> None:
+    total = summary["survivors"] + summary["attack_deaths"] + summary["boundary_deaths"] + summary["collision_deaths"]
+    if total != 3:
+        raise RuntimeError(
+            f"Death ledger mismatch for {team}: "
+            f"survivors={summary['survivors']} + attack={summary['attack_deaths']} + "
+            f"boundary={summary['boundary_deaths']} + collision={summary['collision_deaths']} = {total} != 3"
+        )
 
 
 class Homogeneous3v3AirCombatEnv:
@@ -57,6 +86,9 @@ class Homogeneous3v3AirCombatEnv:
         self.aircraft: list[Aircraft] = []
         self.step_count = 0
         self._running = False
+        # Accumulated death causes and attack kills across all steps in this episode
+        self._episode_death_causes: dict[str, int] = {}
+        self._episode_attack_kills: dict[str, int] = {}
 
     # -- helpers --------------------------------------------------------
 
@@ -75,6 +107,8 @@ class Homogeneous3v3AirCombatEnv:
         self.aircraft = self.scenario.reset(seed)
         self.step_count = 0
         self._running = True
+        self._episode_death_causes = {aid: DEATH_NONE for aid in ALL_IDS}
+        self._episode_attack_kills = {"red": 0, "blue": 0}
         observations = self._all_observations()
         info = self._empty_info()
         info["global_state"] = self.global_state()
@@ -98,13 +132,13 @@ class Homogeneous3v3AirCombatEnv:
             "control_diagnostics": {},
             "reward_components": {},
             "blue_targets": {},
+            "episode_summary": None,
         }
 
     # -- step (synchronous) ---------------------------------------------
 
     def step(
         self, actions: dict[str, np.ndarray],
-        blue_policy=None, blue_aircraft_for_policy=None, red_aircraft_for_policy=None,
     ) -> tuple[dict[str, np.ndarray], dict[str, float], bool, bool, dict[str, Any]]:
         """Synchronous 3v3 step."""
         if not self._running:
@@ -161,17 +195,17 @@ class Homogeneous3v3AirCombatEnv:
 
         # --- 6. Boundary check ---
         limits = self.config["battlefield"]
-        death_causes: dict[str, int] = {}
+        step_death_causes: dict[str, int] = {}
         for aircraft in self.aircraft:
             if not aircraft.state.alive:
                 continue
             s = aircraft.state
             if not (limits["altitude_min"] <= s.altitude <= limits["altitude_max"]):
                 s.alive = False
-                death_causes[aircraft.aircraft_id] = DEATH_BOUNDARY_ALTITUDE
+                step_death_causes[aircraft.aircraft_id] = DEATH_BOUNDARY_ALTITUDE
             elif abs(s.x) > limits["x_limit"] or abs(s.y) > limits["y_limit"]:
                 s.alive = False
-                death_causes[aircraft.aircraft_id] = DEATH_BOUNDARY_XY
+                step_death_causes[aircraft.aircraft_id] = DEATH_BOUNDARY_XY
 
         # --- 7-8. Collision check (collect first, then apply) ---
         collision_pairs: list[tuple[str, str]] = []
@@ -187,12 +221,12 @@ class Homogeneous3v3AirCombatEnv:
             a1, a2 = self._aircraft_by_id(aid1), self._aircraft_by_id(aid2)
             if a1.state.alive:
                 a1.state.alive = False
-                if aid1 not in death_causes:
-                    death_causes[aid1] = (DEATH_COLLISION_FRIENDLY if a1.team == a2.team else DEATH_COLLISION_CROSS)
+                if aid1 not in step_death_causes:
+                    step_death_causes[aid1] = (DEATH_COLLISION_FRIENDLY if a1.team == a2.team else DEATH_COLLISION_CROSS)
             if a2.state.alive:
                 a2.state.alive = False
-                if aid2 not in death_causes:
-                    death_causes[aid2] = (DEATH_COLLISION_FRIENDLY if a1.team == a2.team else DEATH_COLLISION_CROSS)
+                if aid2 not in step_death_causes:
+                    step_death_causes[aid2] = (DEATH_COLLISION_FRIENDLY if a1.team == a2.team else DEATH_COLLISION_CROSS)
 
         # --- 9-11. Attack (only still-alive aircraft can attack) ---
         attack_intents: dict[str, str | None] = {}
@@ -205,13 +239,11 @@ class Homogeneous3v3AirCombatEnv:
             if not alive_enemies:
                 attack_intents[aircraft.aircraft_id] = None
                 continue
-            # Find all attackable enemies
             attackable: list[Aircraft] = []
             for enemy in alive_enemies:
                 if self.attack_model.can_attack(aircraft.state, enemy.state):
                     attackable.append(enemy)
             if attackable:
-                # Nearest, ties by aircraft_id
                 best = min(attackable, key=lambda e: (
                     float(np.linalg.norm(aircraft.state.as_array()[:3] - e.state.as_array()[:3])),
                     e.aircraft_id,
@@ -220,7 +252,7 @@ class Homogeneous3v3AirCombatEnv:
             else:
                 attack_intents[aircraft.aircraft_id] = None
 
-        # Collect attackers per target, then apply kills
+        # Collect attackers per target, then apply kills (each target dies at most once)
         attackers_by_target: dict[str, list[str]] = {}
         for attacker_id, target_id in attack_intents.items():
             if target_id is not None:
@@ -231,11 +263,20 @@ class Homogeneous3v3AirCombatEnv:
             target = self._aircraft_by_id(target_id)
             if target.state.alive:
                 target.state.alive = False
-                death_causes[target_id] = DEATH_ATTACK
+                # Attack death only if not already killed by boundary/collision this step
+                if target_id not in step_death_causes:
+                    step_death_causes[target_id] = DEATH_ATTACK
                 if target.team == "blue":
                     attack_kills["red"] += 1
                 else:
                     attack_kills["blue"] += 1
+
+        # --- Accumulate episode-level stats ---
+        for aid, cause in step_death_causes.items():
+            if self._episode_death_causes.get(aid, DEATH_NONE) == DEATH_NONE:
+                self._episode_death_causes[aid] = cause
+        self._episode_attack_kills["red"] += attack_kills["red"]
+        self._episode_attack_kills["blue"] += attack_kills["blue"]
 
         # --- 12. Team elimination ---
         red_alive = self._alive_count("red")
@@ -259,24 +300,59 @@ class Homogeneous3v3AirCombatEnv:
             self._running = False
 
         # --- 13. Rewards ---
-        rewards, reward_components = self._compute_rewards(attack_kills, death_causes, outcome, reason)
+        rewards, reward_components = self._compute_rewards(attack_kills, step_death_causes)
 
         # --- 14. Observations ---
         observations = self._all_observations()
 
-        # Tally death causes
+        # --- Per-step death tallies ---
         bdy_d = {"red": 0, "blue": 0}
         col_d = {"red": 0, "blue": 0}
-        for aid, cause in death_causes.items():
+        for aid, cause in step_death_causes.items():
             a = self._aircraft_by_id(aid)
             if cause in (DEATH_BOUNDARY_ALTITUDE, DEATH_BOUNDARY_XY):
                 bdy_d[a.team] += 1
             elif cause in (DEATH_COLLISION_FRIENDLY, DEATH_COLLISION_CROSS):
                 col_d[a.team] += 1
 
-        # Paper success
-        red_success = (attack_kills["red"] == 3 and red_alive > 0)
-        blue_success = (attack_kills["blue"] == 3 and blue_alive > 0)
+        # --- Episode summary (only at episode end) ---
+        episode_summary = None
+        if terminated or truncated:
+            # Build final per-team death ledger
+            red_summary = _death_summary(self._episode_death_causes, "red", RED_IDS)
+            blue_summary = _death_summary(self._episode_death_causes, "blue", BLUE_IDS)
+            _validate_death_ledger("red", red_summary)
+            _validate_death_ledger("blue", blue_summary)
+
+            # Paper success (use accumulated attack kills over whole episode, must have survivors)
+            red_success = (self._episode_attack_kills["red"] == 3 and red_alive > 0)
+            blue_success = (self._episode_attack_kills["blue"] == 3 and blue_alive > 0)
+
+            episode_summary = {
+                "red_attack_kills": self._episode_attack_kills["red"],
+                "blue_attack_kills": self._episode_attack_kills["blue"],
+                "red_survivors": red_alive,
+                "blue_survivors": blue_alive,
+                "red_death_causes": {
+                    "attack_deaths": red_summary["attack_deaths"],
+                    "boundary_deaths": red_summary["boundary_deaths"],
+                    "collision_deaths": red_summary["collision_deaths"],
+                },
+                "blue_death_causes": {
+                    "attack_deaths": blue_summary["attack_deaths"],
+                    "boundary_deaths": blue_summary["boundary_deaths"],
+                    "collision_deaths": blue_summary["collision_deaths"],
+                },
+                "environment_outcome": outcome,
+                "red_complete_elimination_success": red_success,
+                "blue_complete_elimination_success": blue_success,
+                "episode_length": self.step_count,
+                "termination_reason": reason,
+            }
+        else:
+            # Per-step success flags (episode_summary has authoritative ones at end)
+            red_success = (self._episode_attack_kills["red"] == 3 and red_alive > 0) if (terminated or truncated) else False
+            blue_success = (self._episode_attack_kills["blue"] == 3 and blue_alive > 0) if (terminated or truncated) else False
 
         info = {
             "step_count": self.step_count,
@@ -286,8 +362,8 @@ class Homogeneous3v3AirCombatEnv:
             "red_alive_count": red_alive,
             "blue_alive_count": blue_alive,
             "attacks": attack_intents,
-            "death_causes": death_causes,
-            "attack_kills": attack_kills,
+            "death_causes": step_death_causes,   # only this step's deaths
+            "attack_kills": attack_kills,         # only this step's kills
             "boundary_deaths": bdy_d,
             "collision_deaths": col_d,
             "red_complete_elimination_success": red_success,
@@ -300,6 +376,7 @@ class Homogeneous3v3AirCombatEnv:
             "reward_components": reward_components,
             "blue_targets": {},
             "global_state": self.global_state(),
+            "episode_summary": episode_summary,
         }
         return observations, rewards, terminated, truncated, info
 
@@ -307,17 +384,11 @@ class Homogeneous3v3AirCombatEnv:
 
     def _compute_rewards(
         self, attack_kills: dict[str, int], death_causes: dict[str, int],
-        outcome: str | None, reason: str | None,
     ) -> tuple[dict[str, float], dict[str, Any]]:
-        """Red shared team reward: dense mean + sparse events."""
         red_alive_list = self._alive("red")
         blue_alive_list = self._alive("blue")
 
-        # Per-red-agent dense reward
         per_red_dense = {}
-        for red in ([a for a in self.aircraft if a.team == "red"]):
-            # Include dead reds with zero contribution
-            pass
         for red in red_alive_list:
             if blue_alive_list:
                 nearest_blue = min(blue_alive_list, key=lambda b: float(
@@ -328,13 +399,11 @@ class Homogeneous3v3AirCombatEnv:
             else:
                 per_red_dense[red.aircraft_id] = 0.0
 
-        # Team dense = mean over alive reds
         if red_alive_list:
             team_dense = float(np.mean(list(per_red_dense.values())))
         else:
             team_dense = 0.0
 
-        # Tally red deaths by category
         red_attack_losses = 0
         red_boundary_losses = 0
         red_collision_losses = 0
@@ -351,28 +420,26 @@ class Homogeneous3v3AirCombatEnv:
         T = self.config["combat"]["terminal_reward"]
         team_total = (
             team_dense
-            + T * attack_kills["red"]    # +10 per blue destroyed by red
-            - T * red_attack_losses       # -10 per red destroyed by blue
-            - T * red_boundary_losses     # -10 per red boundary death
-            - T * red_collision_losses    # -10 per red collision death
+            + T * attack_kills["red"]
+            - T * red_attack_losses
+            - T * red_boundary_losses
+            - T * red_collision_losses
         )
 
-        # Red agents share the team reward; blue gets symmetric diagnostic only
         rewards = {}
         for aid in RED_IDS:
             rewards[aid] = float(team_total)
         for aid in BLUE_IDS:
-            # Diagnostic symmetric reward for blue
-            blue_sym = (
-                team_dense  # same dense
-                + T * attack_kills["blue"]
-                - T * (sum(1 for a_id, c in death_causes.items()
-                          if self._aircraft_by_id(a_id).team == "blue" and c == DEATH_ATTACK))
-                - T * sum(1 for a_id, c in death_causes.items()
-                          if self._aircraft_by_id(a_id).team == "blue" and c in (DEATH_BOUNDARY_ALTITUDE, DEATH_BOUNDARY_XY))
-                - T * sum(1 for a_id, c in death_causes.items()
-                          if self._aircraft_by_id(a_id).team == "blue" and c in (DEATH_COLLISION_FRIENDLY, DEATH_COLLISION_CROSS))
-            )
+            blue_attack_losses = sum(1 for a_id, c in death_causes.items()
+                                     if self._aircraft_by_id(a_id).team == "blue" and c == DEATH_ATTACK)
+            blue_bdy_losses = sum(1 for a_id, c in death_causes.items()
+                                  if self._aircraft_by_id(a_id).team == "blue"
+                                  and c in (DEATH_BOUNDARY_ALTITUDE, DEATH_BOUNDARY_XY))
+            blue_col_losses = sum(1 for a_id, c in death_causes.items()
+                                  if self._aircraft_by_id(a_id).team == "blue"
+                                  and c in (DEATH_COLLISION_FRIENDLY, DEATH_COLLISION_CROSS))
+            blue_sym = (team_dense + T * attack_kills["blue"]
+                        - T * blue_attack_losses - T * blue_bdy_losses - T * blue_col_losses)
             rewards[aid] = float(blue_sym)
 
         components = {
@@ -414,17 +481,15 @@ class Homogeneous3v3AirCombatEnv:
             x_norm, y_norm, alt_norm, speed_norm,
             own.state.theta / pitch_scale,
             np.sin(own.state.psi), np.cos(own.state.psi),
-            1.0,  # alive
+            1.0,
         ], dtype=np.float32)
 
-        # Teammates: 2 closest alive first, then dead; sorted by distance
         teammates = [a for a in self.aircraft if a.team == own.team and a.aircraft_id != own.aircraft_id]
         teammates.sort(key=lambda a: (
             float(np.linalg.norm(own.state.as_array()[:3] - a.state.as_array()[:3])) if a.state.alive else np.inf,
             a.aircraft_id,
         ))
 
-        # Enemies: 3 closest alive first, then dead; sorted by distance
         enemy_team = "blue" if own.team == "red" else "red"
         enemies = [a for a in self.aircraft if a.team == enemy_team]
         enemies.sort(key=lambda a: (
@@ -432,16 +497,6 @@ class Homogeneous3v3AirCombatEnv:
             a.aircraft_id,
         ))
 
-        blocks = [self_block]
-        for lst in (teammates[:2], enemies[:3]):
-            for a in lst:
-                blocks.append(self._entity_block(own, a, x_scale, y_scale, z_scale, dist_scale))
-            # Pad to fixed count
-            needed = 2 if lst is teammates[:2] else 3
-            while len([b for b in (blocks[-needed:] if needed else [])]) < needed:
-                pass  # handled below by iterating index
-            # More precise: add zero pads
-        # Build explicitly to avoid off-by-one
         mate_blocks = []
         for a in teammates[:2]:
             mate_blocks.append(self._entity_block(own, a, x_scale, y_scale, z_scale, dist_scale))
@@ -460,7 +515,6 @@ class Homogeneous3v3AirCombatEnv:
         self, own: Aircraft, other: Aircraft,
         x_scale: float, y_scale: float, z_scale: float, dist_scale: float,
     ) -> np.ndarray:
-        """12-dim entity block for one teammate/enemy."""
         if not other.state.alive:
             return np.zeros(12, dtype=np.float32)
 
@@ -483,17 +537,12 @@ class Homogeneous3v3AirCombatEnv:
             geo.pitch_error / (np.pi / 2.0),
             geo.ata / np.pi,
             geo.aa / np.pi,
-            1.0,  # alive
+            1.0,
         ], dtype=np.float32)
 
     # -- global state (48-dim) ------------------------------------------
 
     def global_state(self) -> np.ndarray:
-        """48-dim: 6 aircraft in fixed order red_0, red_1, red_2, blue_0, blue_1, blue_2.
-
-        Each aircraft contributes 8 features: x, y, alt, speed, theta, sin_psi, cos_psi, alive.
-        Dead aircraft retain last physical state with alive_mask = 0.
-        """
         battlefield = self.config["battlefield"]
         x_scale = battlefield["x_limit"]
         y_scale = battlefield["y_limit"]
@@ -504,9 +553,6 @@ class Homogeneous3v3AirCombatEnv:
             a = self._aircraft_by_id(aid)
             pitch_scale = max(abs(a.spec.theta_min), abs(a.spec.theta_max))
             alive = 1.0 if a.state.alive else 0.0
-            if not a.state.alive:
-                # Keep last physical state (frozen) but mark not alive
-                pass
             x_norm = a.state.x / x_scale
             y_norm = a.state.y / y_scale
             alt_norm = 2.0 * (a.state.altitude - battlefield["altitude_min"]) / z_scale - 1.0

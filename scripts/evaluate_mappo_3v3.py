@@ -4,8 +4,8 @@ from pathlib import Path
 import numpy as np
 import torch
 from uav_combat.mappo.networks import GaussianActor
-from uav_combat.mappo.trainer_3v3 import CHECKPOINT_FAMILY, CHECKPOINT_VERSION_3V3, OBS_DIM, resolve_device
-from uav_combat.environment_3v3 import Homogeneous3v3AirCombatEnv, RED_IDS, BLUE_IDS, DEATH_ATTACK
+from uav_combat.mappo.trainer_3v3 import CHECKPOINT_FAMILY, OBS_DIM, resolve_device
+from uav_combat.environment_3v3 import Homogeneous3v3AirCombatEnv, RED_IDS, BLUE_IDS
 from uav_combat.rule_policy_3v3 import NearestTargetPursuitPolicy3v3
 
 def main():
@@ -31,26 +31,19 @@ def main():
     blue_policy = NearestTargetPursuitPolicy3v3(
         act_cfg["delta_yaw_max"], act_cfg["delta_pitch_max"], act_cfg["delta_speed_max"])
 
-    records = []
+    episode_summaries = []
     for ep in range(args.episodes):
         env.reset(seed=10000 + ep)
-        ep_returns = 0.0
+        ep_return = 0.0
         while True:
             reds = [a for a in env.aircraft if a.team == "red"]
             blues = [a for a in env.aircraft if a.team == "blue"]
-            blue_refs = blues
-            red_refs = reds
-            alive_reds = [r for r in reds if r.state.alive]
-            alive_blues = [b for b in blues if b.state.alive]
 
-            # Red actions
             red_obs_list = [env._agent_observation(r) for r in reds]
             red_obs = np.stack(red_obs_list, axis=0)
             with torch.no_grad():
                 red_actions = actor.deterministic_action(
                     torch.as_tensor(red_obs, device=device)).cpu().numpy()
-
-            # Blue actions
             blue_actions_dict, _ = blue_policy.select_actions(blues, reds)
 
             actions = {}
@@ -60,42 +53,51 @@ def main():
                 actions[aid] = blue_actions_dict.get(aid, np.zeros(3, dtype=np.float32))
 
             obs, rewards, term, trunc, info = env.step(actions)
-            ep_returns += rewards["red_0"]
+            ep_return += rewards["red_0"]
             if term or trunc:
-                records.append({
-                    **info,
-                    "episode_return": float(ep_returns),
-                    "episode_length": info["step_count"],
-                })
+                es = info.get("episode_summary")
+                if es is None:
+                    raise RuntimeError("episode_summary missing")
+                # Validate
+                for team in ("red", "blue"):
+                    dc = es[f"{team}_death_causes"]
+                    total = es[f"{team}_survivors"] + dc["attack_deaths"] + dc["boundary_deaths"] + dc["collision_deaths"]
+                    if total != 3:
+                        raise RuntimeError(f"Death ledger mismatch ep={ep} {team}: {total} != 3")
+                es["episode_return"] = float(ep_return)
+                episode_summaries.append(es)
                 break
 
-    n = len(records)
+    n = len(episode_summaries)
     def rate(key):
-        return sum(1 for r in records if r.get(key)) / n if n else 0.0
+        return sum(1 for s in episode_summaries if s.get(key)) / n if n else 0.0
+
+    red_kills = sum(s["red_attack_kills"] for s in episode_summaries)
+    blue_kills = sum(s["blue_attack_kills"] for s in episode_summaries)
 
     results = {
         "episodes": n,
         "red_complete_elimination_success_rate": rate("red_complete_elimination_success"),
         "blue_complete_elimination_success_rate": rate("blue_complete_elimination_success"),
-        "environment_red_outcome_rate": sum(1 for r in records if r["outcome"] == "red") / n,
-        "environment_blue_outcome_rate": sum(1 for r in records if r["outcome"] == "blue") / n,
-        "draw_rate": sum(1 for r in records if r["outcome"] == "draw") / n,
-        "mean_red_attack_kills": np.mean([r["attack_kills"]["red"] for r in records]),
-        "mean_blue_attack_kills": np.mean([r["attack_kills"]["blue"] for r in records]),
-        "mean_red_survivors": np.mean([r["red_survivors"] for r in records]),
-        "mean_blue_survivors": np.mean([r["blue_survivors"] for r in records]),
-        "red_kd_numerator": sum(r["attack_kills"]["red"] for r in records),
-        "red_kd_denominator": sum(r["attack_kills"]["blue"] for r in records),
-        "red_kd_ratio": (sum(r["attack_kills"]["red"] for r in records) / sum(r["attack_kills"]["blue"] for r in records)) if sum(r["attack_kills"]["blue"] for r in records) > 0 else None,
-        "red_boundary_death_rate": np.mean([r["boundary_deaths"]["red"] for r in records]) / 3,
-        "blue_boundary_death_rate": np.mean([r["boundary_deaths"]["blue"] for r in records]) / 3,
-        "friendly_collision_rate": sum(1 for r in records for a1, a2 in r.get("collision_pairs", []) if a1.split("_")[0] == a2.split("_")[0]) / n if n else 0,
-        "cross_team_collision_rate": sum(1 for r in records for a1, a2 in r.get("collision_pairs", []) if a1.split("_")[0] != a2.split("_")[0]) / n if n else 0,
-        "max_steps_rate": sum(1 for r in records if r["termination_reason"] == "max_steps") / n,
-        "mean_episode_length": np.mean([r["episode_length"] for r in records]),
-        "mean_team_return": np.mean([r["episode_return"] for r in records]),
+        "environment_red_outcome_rate": sum(1 for s in episode_summaries if s["environment_outcome"] == "red") / n,
+        "environment_blue_outcome_rate": sum(1 for s in episode_summaries if s["environment_outcome"] == "blue") / n,
+        "draw_rate": sum(1 for s in episode_summaries if s["environment_outcome"] == "draw") / n,
+        "mean_red_attack_kills": float(np.mean([s["red_attack_kills"] for s in episode_summaries])),
+        "mean_blue_attack_kills": float(np.mean([s["blue_attack_kills"] for s in episode_summaries])),
+        "mean_red_survivors": float(np.mean([s["red_survivors"] for s in episode_summaries])),
+        "mean_blue_survivors": float(np.mean([s["blue_survivors"] for s in episode_summaries])),
+        "red_kd_numerator": red_kills,
+        "red_kd_denominator": blue_kills,
+        "red_kd_ratio": red_kills / blue_kills if blue_kills > 0 else None,
+        "mean_red_boundary_deaths": float(np.mean([s["red_death_causes"]["boundary_deaths"] for s in episode_summaries])),
+        "mean_blue_boundary_deaths": float(np.mean([s["blue_death_causes"]["boundary_deaths"] for s in episode_summaries])),
+        "mean_red_collision_deaths": float(np.mean([s["red_death_causes"]["collision_deaths"] for s in episode_summaries])),
+        "mean_blue_collision_deaths": float(np.mean([s["blue_death_causes"]["collision_deaths"] for s in episode_summaries])),
+        "max_steps_rate": sum(1 for s in episode_summaries if s["termination_reason"] == "max_steps") / n,
+        "mean_episode_length": float(np.mean([s["episode_length"] for s in episode_summaries])),
+        "mean_team_return": float(np.mean([s["episode_return"] for s in episode_summaries])),
     }
-    print(json.dumps(results, indent=2, default=lambda x: float(x) if isinstance(x, (np.floating,)) else x))
+    print(json.dumps(results, indent=2, default=str))
 
 if __name__ == "__main__":
     main()
