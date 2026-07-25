@@ -13,7 +13,10 @@ from torch import nn
 from ..environment_3v3 import GS_DIM, OBS_DIM
 from .buffer_3v3 import MAPPOBuffer3v3
 from .networks import CentralizedCritic, GaussianActor
-from .vector_env_3v3 import VectorStepResult3v3, make_combat_vector_env_3v3
+from .vector_env_3v3 import (
+    VectorStepResult3v3, make_combat_vector_env_3v3,
+    decode_3v3_outcome, decode_3v3_termination_reason,
+)
 
 CHECKPOINT_VERSION_3V3 = 1
 CHECKPOINT_FAMILY = "homogeneous_3v3_fixed_blue"
@@ -89,6 +92,7 @@ class FixedBlue3v3MAPPOTrainer:
         if self.buffer.rollout_steps != steps:
             self.buffer = MAPPOBuffer3v3(steps, self.num_envs)
         self.buffer.clear()
+        completed: list[dict[str, Any]] = []
         N = self.num_envs
 
         for _ in range(steps):
@@ -116,6 +120,49 @@ class FixedBlue3v3MAPPOTrainer:
                 t_reset = time.perf_counter()
                 sd = np.sort(done_idx)
                 for idx in sd:
+                    if not r.episode_valid[idx]:
+                        self.episode_returns[idx] = 0.0; self.episode_lengths[idx] = 0
+                        continue
+                    outcome = decode_3v3_outcome(int(r.outcome_codes[idx]))
+                    reason = decode_3v3_termination_reason(int(r.termination_reason_codes[idx]))
+                    rec = {
+                        "episode_return": float(self.episode_returns[idx]),
+                        "episode_length": int(self.episode_lengths[idx]),
+                        "red_complete_elimination_success": bool(r.red_complete_elimination_success[idx]),
+                        "blue_complete_elimination_success": bool(r.blue_complete_elimination_success[idx]),
+                        "environment_outcome": outcome,
+                        "termination_reason": reason,
+                        "red_attack_kills": int(r.episode_red_attack_kills[idx]),
+                        "blue_attack_kills": int(r.episode_blue_attack_kills[idx]),
+                        "red_survivors": int(r.episode_red_survivors[idx]),
+                        "blue_survivors": int(r.episode_blue_survivors[idx]),
+                        "red_attack_deaths": int(r.episode_red_attack_deaths[idx]),
+                        "blue_attack_deaths": int(r.episode_blue_attack_deaths[idx]),
+                        "red_boundary_deaths": int(r.episode_red_boundary_deaths[idx]),
+                        "blue_boundary_deaths": int(r.episode_blue_boundary_deaths[idx]),
+                        "red_friendly_collision_deaths": int(r.episode_red_friendly_collision_deaths[idx]),
+                        "blue_friendly_collision_deaths": int(r.episode_blue_friendly_collision_deaths[idx]),
+                        "red_cross_collision_deaths": int(r.episode_red_cross_collision_deaths[idx]),
+                        "blue_cross_collision_deaths": int(r.episode_blue_cross_collision_deaths[idx]),
+                    }
+                    # Validate death ledger
+                    for team, surv, atk_d, bdy_d, fr_c, cr_c in [
+                        ("red", rec["red_survivors"], rec["red_attack_deaths"],
+                         rec["red_boundary_deaths"], rec["red_friendly_collision_deaths"],
+                         rec["red_cross_collision_deaths"]),
+                        ("blue", rec["blue_survivors"], rec["blue_attack_deaths"],
+                         rec["blue_boundary_deaths"], rec["blue_friendly_collision_deaths"],
+                         rec["blue_cross_collision_deaths"]),
+                    ]:
+                        total = surv + atk_d + bdy_d + fr_c + cr_c
+                        if total != 3:
+                            raise RuntimeError(f"Death ledger mismatch for {team}: {total} != 3 in env {idx}")
+                    # Validate attack kill symmetry
+                    if rec["red_attack_kills"] != rec["blue_attack_deaths"]:
+                        raise RuntimeError(f"red_attack_kills={rec['red_attack_kills']} != blue_attack_deaths={rec['blue_attack_deaths']}")
+                    if rec["blue_attack_kills"] != rec["red_attack_deaths"]:
+                        raise RuntimeError(f"blue_attack_kills={rec['blue_attack_kills']} != red_attack_deaths={rec['red_attack_deaths']}")
+                    completed.append(rec)
                     self.episode_returns[idx] = 0.0; self.episode_lengths[idx] = 0
                 specs = [{"seed": int(self.rng.integers(0, 2**31 - 1))} for _ in sd]
                 no, ng, na = self.vector_env.reset_at(sd, specs)
@@ -133,15 +180,6 @@ class FixedBlue3v3MAPPOTrainer:
             lv = self.team_critic(torch.as_tensor(self.current_global_states, device=self.device)).cpu().numpy()
         self.buffer.compute_returns_and_advantages(lv, self.config["training"]["gamma"],
                                                     self.config["training"]["gae_lambda"])
-        # Build completed records from episode fields
-        completed = []
-        ep_valid = self.buffer.dones  # [T, N] – episode ended at this step
-        # We need the episode fields from the LAST time each env finished during this rollout
-        # But the NamedTuple gives per-step fields. We'll accumulate from the last step (before reset).
-        # For now, use a simplified accumulation: if any env had a done step, count it.
-        for env_i in range(N):
-            if ep_valid[:, env_i].any():
-                completed.append({"completed": True})
         return completed
 
     def update(self) -> dict[str, Any]:

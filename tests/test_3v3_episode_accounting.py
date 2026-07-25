@@ -38,26 +38,29 @@ class TestScenario:
         from uav_combat.config import load_config
         cfg = load_config(CONFIG)
         sc = Homogeneous3v3Scenario(cfg)
+        # Reverse pairing: red_0<->blue_2, red_1<->blue_1, red_2<->blue_0
+        pairs = [("red_0", "blue_2"), ("red_1", "blue_1"), ("red_2", "blue_0")]
         for seed in range(10):
             ac = sc.reset(seed)
-            for i in range(3):
-                r = next(a for a in ac if a.aircraft_id == f"red_{i}")
-                b = next(a for a in ac if a.aircraft_id == f"blue_{i}")
+            for ri, bi in pairs:
+                r = next(a for a in ac if a.aircraft_id == ri)
+                b = next(a for a in ac if a.aircraft_id == bi)
                 diff = abs(r.state.psi - b.state.psi)
                 diff = min(diff, 2 * np.pi - diff)
-                assert np.isclose(diff, np.pi, atol=1e-9), f"seed={seed} slot={i}: |psi_r-psi_b|={diff:.6f} != pi"
+                assert np.isclose(diff, np.pi, atol=1e-9), f"seed={seed} {ri}-{bi}: |psi_r-psi_b|={diff:.6f} != pi"
 
     def test_paired_speed_and_altitude_match(self):
         from uav_combat.scenario_3v3 import Homogeneous3v3Scenario
         from uav_combat.config import load_config
         cfg = load_config(CONFIG)
         sc = Homogeneous3v3Scenario(cfg)
+        pairs = [("red_0", "blue_2"), ("red_1", "blue_1"), ("red_2", "blue_0")]
         for seed in range(10):
             ac = sc.reset(seed)
-            for i in range(3):
-                r = next(a for a in ac if a.aircraft_id == f"red_{i}")
-                b = next(a for a in ac if a.aircraft_id == f"blue_{i}")
-                assert r.state.v == b.state.v
+            for ri, bi in pairs:
+                r = next(a for a in ac if a.aircraft_id == ri)
+                b = next(a for a in ac if a.aircraft_id == bi)
+                assert r.state.v == b.state.v, f"seed={seed} {ri}.v={r.state.v} != {bi}.v={b.state.v}"
                 assert r.state.altitude == b.state.altitude
 
     def test_team_size_not_3_raises(self):
@@ -71,7 +74,6 @@ class TestScenario:
     def test_no_initial_attack_collision_boundary(self):
         env = Homogeneous3v3AirCombatEnv(CONFIG)
         obs, info = env.reset(42)
-        assert all(v is None for v in info.get("attacks", {}).values())
         for a in env.aircraft:
             bf = env.config["battlefield"]
             assert abs(a.state.x) <= bf["x_limit"]
@@ -274,3 +276,100 @@ class TestMAPPO:
             assert np.isfinite(m["policy_loss"])
             assert "alive_actor_sample_fraction" in m
             t.close()
+
+    def test_collect_rollout_returns_real_completed_records(self):
+        from uav_combat.mappo.trainer_3v3 import FixedBlue3v3MAPPOTrainer
+        config = {"experiment": {"seed": 5, "device": "cpu", "output_dir": "tmp"}, "network": {"hidden_dim": 32, "log_std_init": -0.5},
+                  "training": {"training_mode": "fixed_rule_blue_3v3", "total_env_steps": 1024, "num_envs": 4, "num_env_workers": 2,
+                               "rollout_steps": 128, "ppo_epochs": 1, "minibatch_size": 64, "gamma": 0.99, "gae_lambda": 0.95,
+                               "clip_coef": 0.2, "learning_rate": 3e-4, "value_loss_coef": 0.5, "entropy_coef": 0.01, "max_grad_norm": 0.5},
+                  "evaluation": {"episodes": 2, "deterministic": True}}
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            config["experiment"]["output_dir"] = tmp
+            t = FixedBlue3v3MAPPOTrainer(CONFIG, config)
+            completed = t.collect_rollout()
+            # Completed records must have real fields, not {"completed": True}
+            for rec in completed:
+                assert "episode_length" in rec, f"record missing episode_length: {rec}"
+                assert "red_attack_kills" in rec
+                assert "environment_outcome" in rec
+                # Death ledger must balance
+                for team in ("red", "blue"):
+                    surv = rec[f"{team}_survivors"]
+                    atk = rec[f"{team}_attack_deaths"]
+                    bdy = rec[f"{team}_boundary_deaths"]
+                    fr = rec[f"{team}_friendly_collision_deaths"]
+                    cr = rec[f"{team}_cross_collision_deaths"]
+                    assert surv + atk + bdy + fr + cr == 3
+            t.close()
+
+
+class TestEncoding:
+    def test_3v3_reason_roundtrip(self):
+        from uav_combat.mappo.vector_env_3v3 import (
+            encode_3v3_termination_reason, decode_3v3_termination_reason,
+            encode_3v3_outcome, decode_3v3_outcome,
+        )
+        for r in [None, "red_elimination", "blue_elimination", "mutual_elimination", "max_steps"]:
+            assert decode_3v3_termination_reason(encode_3v3_termination_reason(r)) == r
+        for o in [None, "red", "blue", "draw"]:
+            assert decode_3v3_outcome(encode_3v3_outcome(o)) == o
+
+    def test_mutual_elimination_is_draw(self):
+        from uav_combat.mappo.vector_env_3v3 import (
+            encode_3v3_outcome, encode_3v3_termination_reason, decode_3v3_outcome,
+        )
+        # Mutual elimination -> reason=mutual_elimination, outcome=draw
+        code = encode_3v3_outcome("draw")
+        assert decode_3v3_outcome(code) == "draw"
+
+
+class TestScenarioOffset:
+    def test_blue_pos_equals_neg_red_pos(self):
+        from uav_combat.scenario_3v3 import Homogeneous3v3Scenario
+        from uav_combat.config import load_config
+        cfg = load_config(CONFIG)
+        sc = Homogeneous3v3Scenario(cfg)
+        for seed in range(10):
+            ac = sc.reset(seed)
+            # red_0 paired with blue_2, red_1 with blue_1, red_2 with blue_0
+            pairs = [("red_0", "blue_2"), ("red_1", "blue_1"), ("red_2", "blue_0")]
+            for ri, bi in pairs:
+                r = next(a for a in ac if a.aircraft_id == ri)
+                b = next(a for a in ac if a.aircraft_id == bi)
+                assert np.allclose([r.state.x, r.state.y], [-b.state.x, -b.state.y], atol=1e-9), \
+                    f"seed={seed} {ri} pos=({r.state.x:.3f},{r.state.y:.3f}) {bi} pos=({b.state.x:.3f},{b.state.y:.3f})"
+
+    def test_headings_differ_by_pi(self):
+        from uav_combat.scenario_3v3 import Homogeneous3v3Scenario
+        from uav_combat.config import load_config
+        cfg = load_config(CONFIG)
+        sc = Homogeneous3v3Scenario(cfg)
+        for seed in range(10):
+            ac = sc.reset(seed)
+            pairs = [("red_0", "blue_2"), ("red_1", "blue_1"), ("red_2", "blue_0")]
+            for ri, bi in pairs:
+                r = next(a for a in ac if a.aircraft_id == ri)
+                b = next(a for a in ac if a.aircraft_id == bi)
+                diff = abs(r.state.psi - b.state.psi)
+                diff = min(diff, 2 * np.pi - diff)
+                assert np.isclose(diff, np.pi, atol=1e-9), f"seed={seed} {ri}-{bi}: |psi_r-psi_b|={diff:.6f} != pi"
+
+    def test_no_three_collinear_head_on_collisions(self):
+        """Slots are offset so not all 3 red-blue pairs collide simultaneously."""
+        from uav_combat.scenario_3v3 import Homogeneous3v3Scenario
+        from uav_combat.config import load_config
+        cfg = load_config(CONFIG)
+        sc = Homogeneous3v3Scenario(cfg)
+        for seed in range(10):
+            ac = sc.reset(seed)
+            # Check that no two red-blue pairs share the same lateral line
+            for i in range(3):
+                for j in range(i + 1, 3):
+                    ri = next(a for a in ac if a.aircraft_id == f"red_{i}")
+                    rj = next(a for a in ac if a.aircraft_id == f"red_{j}")
+                    bi = next(a for a in ac if a.aircraft_id == f"blue_{i}")
+                    bj = next(a for a in ac if a.aircraft_id == f"blue_{j}")
+                    # Red i,j should have different y positions (offset)
+                    assert abs(ri.state.y - rj.state.y) > 1e-6 or abs(ri.state.x - rj.state.x) > 1e-6

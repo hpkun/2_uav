@@ -1,4 +1,4 @@
-"""Formation head-on 3v3 scenario – truly head-on with paired symmetric init."""
+"""Formation head-on 3v3 scenario – offset slots to avoid head-on collisions."""
 from typing import Any
 
 import numpy as np
@@ -13,11 +13,13 @@ ALL_IDS = RED_IDS + BLUE_IDS
 
 
 class Homogeneous3v3Scenario:
-    """Generates a symmetric formation_head_on 3v3 initial condition.
+    """Symmetric formation_head_on with offset lateral slots.
 
-    Red base heading = 0, blue base heading = pi.  After global rotation the
-    two headings differ by exactly pi.  Per-slot speed, altitude, and heading
-    jitter are sampled once and shared by the paired red_i / blue_i aircraft.
+    Red base heading = 0, blue base heading = pi.
+    Red slots are shifted by -opposing_lateral_offset/2,
+    blue slots by +opposing_lateral_offset/2.
+    Reverse slot pairing: red_i matches blue_(2-i) for symmetric
+    speed/altitude/heading jitter.
     """
 
     def __init__(self, config: dict[str, Any]) -> None:
@@ -36,46 +38,68 @@ class Homogeneous3v3Scenario:
 
         separation = float(rng.uniform(settings["separation_min"], settings["separation_max"]))
         lateral_spacing = float(settings["lateral_spacing"])
+        offset = float(settings.get("opposing_lateral_offset", 200.0))
         half_span = lateral_spacing * (team_size - 1) / 2.0
 
         red_centre = np.array([-separation / 2.0, 0.0])
         blue_centre = np.array([separation / 2.0, 0.0])
-        slot_offsets = np.linspace(-half_span, half_span, team_size)
 
-        # --- per-slot paired jitter (one sample per slot, shared by red_i and blue_i) ---
-        slot_speed = np.zeros(team_size, dtype=float)
-        slot_altitude = np.zeros(team_size, dtype=float)
-        slot_hdg_jitter = np.zeros(team_size, dtype=float)
+        # base_slots = [-lateral_spacing, 0, lateral_spacing]
+        base_slots = np.linspace(-half_span, half_span, team_size)
+        red_slots = base_slots - offset / 2.0
+        blue_slots = base_slots + offset / 2.0
+
+        # Reverse pairing: red_0<->blue_2, red_1<->blue_1, red_2<->blue_0
+        blue_pair_idx = [2, 1, 0]  # blue_i paired with red_{blue_pair_idx[i]}
+
+        # Per-pair shared jitter (3 pairs, based on red index)
+        pair_speed = np.zeros(team_size, dtype=float)
+        pair_altitude = np.zeros(team_size, dtype=float)
+        pair_hdg_jitter = np.zeros(team_size, dtype=float)
         for i in range(team_size):
-            slot_speed[i] = float(np.clip(
+            pair_speed[i] = float(np.clip(
                 settings["speed_center"] + rng.uniform(-settings["speed_jitter"], settings["speed_jitter"]),
                 self.spec.v_min, self.spec.v_max))
-            slot_altitude[i] = float(np.clip(
+            pair_altitude[i] = float(np.clip(
                 settings["altitude_center"] + rng.uniform(-settings["altitude_jitter"], settings["altitude_jitter"]),
                 battlefield["altitude_min"], battlefield["altitude_max"]))
-            slot_hdg_jitter[i] = float(rng.uniform(-settings["heading_jitter"], settings["heading_jitter"]))
+            pair_hdg_jitter[i] = float(rng.uniform(-settings["heading_jitter"], settings["heading_jitter"]))
 
-        # --- global rotation ---
         rotation = float(rng.uniform(-np.pi, np.pi))
         matrix = np.array([[np.cos(rotation), -np.sin(rotation)],
                            [np.sin(rotation), np.cos(rotation)]])
 
         aircraft_list: list[Aircraft] = []
         for i in range(team_size):
-            # red_i
-            rpos = red_centre + np.array([0.0, slot_offsets[i]])
+            # red_i: slot i, pair i
+            rpos = red_centre + np.array([0.0, red_slots[i]])
             rxy = matrix @ rpos
-            rhdg = wrap_angle(0.0 + slot_hdg_jitter[i] + rotation)
-            rstate = AircraftState(float(rxy[0]), float(rxy[1]), -slot_altitude[i],
-                                   slot_speed[i], 0.0, rhdg)
+            rhdg = wrap_angle(0.0 + pair_hdg_jitter[i] + rotation)
+            rstate = AircraftState(float(rxy[0]), float(rxy[1]), -pair_altitude[i],
+                                   pair_speed[i], 0.0, rhdg)
             aircraft_list.append(Aircraft(RED_IDS[i], "red", self.spec, rstate))
 
-            # blue_i – heading differs by exactly pi from red_i
-            bpos = blue_centre + np.array([0.0, slot_offsets[i]])
+            # blue_i: slot i, paired with red_{blue_pair_idx[i]}
+            bi = blue_pair_idx[i]
+            bpos = blue_centre + np.array([0.0, blue_slots[i]])
             bxy = matrix @ bpos
-            bhdg = wrap_angle(np.pi + slot_hdg_jitter[i] + rotation)
-            bstate = AircraftState(float(bxy[0]), float(bxy[1]), -slot_altitude[i],
-                                   slot_speed[i], 0.0, bhdg)
+            # blue_i heading = red_(paired) heading + pi
+            bhdg = wrap_angle(np.pi + pair_hdg_jitter[bi] + rotation)
+            # Position symmetry: blue_pos = -red_pos (for paired aircraft)
+            # red center = (-sep/2, red_slots[i]), blue center = (+sep/2, blue_slots[i])
+            # paired: red at (-sep/2, red_slots[bi]), blue at (+sep/2, blue_slots[i])
+            # For symmetry: blue should be at -red_pos when rotation=0:
+            # red_pos[bi] = (-sep/2, red_slots[bi])
+            # -red_pos[bi] = (+sep/2, -red_slots[bi])
+            # blue_pos[i] = (+sep/2, blue_slots[i])
+            # For symmetry: blue_slots[i] = -red_slots[bi]
+            # With our setup: red_slots[bi] = base_slots[bi] - offset/2
+            # blue_slots[i] = base_slots[i] + offset/2
+            # For i=1,bi=1: base_slots[1]=0, red_slots[1]=-offset/2, blue_slots[1]=+offset/2 ✓
+            # For i=0,bi=2: base_slots[0]=-400, red_slots[2]=+400-offset/2=+300, blue_slots[0]=-400+offset/2=-300 ✓
+            # For i=2,bi=0: base_slots[2]=+400, red_slots[0]=-400-offset/2=-500, blue_slots[2]=+400+offset/2=+500 ✓
+            bstate = AircraftState(float(bxy[0]), float(bxy[1]), -pair_altitude[bi],
+                                   pair_speed[bi], 0.0, bhdg)
             aircraft_list.append(Aircraft(BLUE_IDS[i], "blue", self.spec, bstate))
 
         return aircraft_list

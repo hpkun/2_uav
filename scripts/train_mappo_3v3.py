@@ -97,13 +97,52 @@ def main():
     # Track last milestone evaluated
     last_eval_milestone = (trainer.env_steps // eval_interval) * eval_interval
 
+    def _episode_stats(records):
+        if not records: return {}
+        n = len(records)
+        rk = sum(r["red_attack_kills"] for r in records)
+        return {
+            "completed_episodes": n,
+            "red_complete_elimination_success_rate": sum(1 for r in records if r["red_complete_elimination_success"]) / n,
+            "blue_complete_elimination_success_rate": sum(1 for r in records if r["blue_complete_elimination_success"]) / n,
+            "environment_red_outcome_rate": sum(1 for r in records if r.get("environment_outcome") == "red") / n,
+            "environment_blue_outcome_rate": sum(1 for r in records if r.get("environment_outcome") == "blue") / n,
+            "draw_rate": sum(1 for r in records if r.get("environment_outcome") == "draw") / n,
+            "mean_red_attack_kills": float(np.mean([r["red_attack_kills"] for r in records])),
+            "mean_blue_attack_kills": float(np.mean([r["blue_attack_kills"] for r in records])),
+            "mean_red_survivors": float(np.mean([r["red_survivors"] for r in records])),
+            "mean_blue_survivors": float(np.mean([r["blue_survivors"] for r in records])),
+            "mean_red_boundary_deaths": float(np.mean([r["red_boundary_deaths"] for r in records])),
+            "mean_red_collision_deaths": float(np.mean([
+                r["red_friendly_collision_deaths"] + r["red_cross_collision_deaths"] for r in records])),
+            "max_steps_rate": sum(1 for r in records if r.get("termination_reason") == "max_steps") / n,
+            "mean_episode_length": float(np.mean([r["episode_length"] for r in records])),
+            "mean_episode_return": float(np.mean([r["episode_return"] for r in records])),
+        }
+
+    # Main loop
+    all_completed: list[dict[str, Any]] = []
     try:
         while trainer.env_steps < total:
             remaining = total - trainer.env_steps
-            trainer.collect_rollout(remaining)
+            completed = trainer.collect_rollout(remaining)
+            all_completed.extend(completed)
             metrics = trainer.update()
             elapsed = time.perf_counter() - start
             env_sps = trainer.env_steps / elapsed if elapsed > 0 else 0
+
+            ep_stats = _episode_stats(completed) if completed else {
+                "completed_episodes": 0,
+                "red_complete_elimination_success_rate": np.nan,
+                "blue_complete_elimination_success_rate": np.nan,
+                "environment_red_outcome_rate": np.nan,
+                "environment_blue_outcome_rate": np.nan,
+                "draw_rate": np.nan,
+                "mean_red_attack_kills": np.nan, "mean_blue_attack_kills": np.nan,
+                "mean_red_survivors": np.nan, "mean_blue_survivors": np.nan,
+                "mean_red_boundary_deaths": np.nan, "mean_red_collision_deaths": np.nan,
+                "max_steps_rate": np.nan, "mean_episode_length": np.nan, "mean_episode_return": np.nan,
+            }
 
             row = {"update": trainer.update_count, "env_steps": trainer.env_steps,
                    "policy_loss": metrics["policy_loss"], "value_loss": metrics["value_loss"],
@@ -118,12 +157,7 @@ def main():
                    "policy_inference_seconds": trainer._timing["policy_inference"],
                    "ppo_update_seconds": trainer._timing["ppo_update"],
                    "evaluation_seconds": trainer.total_evaluation_seconds,
-                   "completed_episodes": np.nan, "red_complete_elimination_success_rate": np.nan,
-                   "mean_red_attack_kills": np.nan, "mean_blue_attack_kills": np.nan,
-                   "mean_red_survivors": np.nan, "mean_blue_survivors": np.nan,
-                   "mean_red_boundary_deaths": np.nan, "mean_red_collision_deaths": np.nan,
-                   "max_steps_rate": np.nan, "mean_episode_length": np.nan,
-                   "mean_episode_return": np.nan}
+                   **ep_stats}
             rows.append(row)
 
             # Evaluation at milestones

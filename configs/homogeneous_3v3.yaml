@@ -44,6 +44,7 @@ scenario:
   separation_min: 1500.0
   separation_max: 2500.0
   lateral_spacing: 400.0
+  opposing_lateral_offset: 200.0
   altitude_center: 3000.0
   altitude_jitter: 100.0
   speed_center: 150.0

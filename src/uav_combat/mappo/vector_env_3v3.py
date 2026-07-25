@@ -10,7 +10,44 @@ import numpy as np
 from ..environment_3v3 import GS_DIM, OBS_DIM, Homogeneous3v3AirCombatEnv
 from ..rule_policy_3v3 import NearestTargetPursuitPolicy3v3
 from ..scenario_3v3 import BLUE_IDS, RED_IDS
-from .vector_env import CONTROL_DIAGNOSTIC_KEYS, K, encode_outcome, encode_termination_reason
+from .vector_env import CONTROL_DIAGNOSTIC_KEYS, K
+
+# ===================================================================
+# 3v3-specific termination / outcome encoding
+# ===================================================================
+
+THREE_V_THREE_REASON_CODE_MAP = {
+    None: 0,
+    "red_elimination": 1,
+    "blue_elimination": 2,
+    "mutual_elimination": 3,
+    "max_steps": 4,
+}
+THREE_V_THREE_REASON_CODE_INV = {v: k for k, v in THREE_V_THREE_REASON_CODE_MAP.items()}
+
+THREE_V_THREE_OUTCOME_CODE_MAP = {
+    None: 0,
+    "red": 1,
+    "blue": 2,
+    "draw": 3,
+}
+THREE_V_THREE_OUTCOME_CODE_INV = {v: k for k, v in THREE_V_THREE_OUTCOME_CODE_MAP.items()}
+
+
+def encode_3v3_termination_reason(reason: str | None) -> int:
+    return THREE_V_THREE_REASON_CODE_MAP.get(reason, 0)
+
+
+def decode_3v3_termination_reason(code: int) -> str | None:
+    return THREE_V_THREE_REASON_CODE_INV.get(code)
+
+
+def encode_3v3_outcome(outcome: str | None) -> int:
+    return THREE_V_THREE_OUTCOME_CODE_MAP.get(outcome, 0)
+
+
+def decode_3v3_outcome(code: int) -> str | None:
+    return THREE_V_THREE_OUTCOME_CODE_INV.get(code)
 
 AGENT_ORDER = RED_IDS + BLUE_IDS
 
@@ -218,8 +255,8 @@ def _worker_step(envs, blue_policies, red_actions):
         col_r[i] = info["collision_deaths"]["red"]; col_b[i] = info["collision_deaths"]["blue"]
         red_succ[i] = info["red_complete_elimination_success"]
         blue_succ[i] = info["blue_complete_elimination_success"]
-        rc[i] = encode_termination_reason(info["termination_reason"])
-        oc[i] = encode_outcome(info["outcome"])
+        rc[i] = encode_3v3_termination_reason(info["termination_reason"])
+        oc[i] = encode_3v3_outcome(info["outcome"])
         _episode_fields.arrays = ep_arrs; _episode_fields(info, L, i)
     return _build_result(L, obs, gs, team_rew, term, trunc, am, atg, dc, tac,
                          atk_r, atk_b, bdy_r, bdy_b, col_r, col_b,
@@ -273,8 +310,8 @@ def _worker_step_rules(envs, blue_policies, red_policies, modes):
         col_r[i] = info["collision_deaths"]["red"]; col_b[i] = info["collision_deaths"]["blue"]
         red_succ[i] = info["red_complete_elimination_success"]
         blue_succ[i] = info["blue_complete_elimination_success"]
-        rc[i] = encode_termination_reason(info["termination_reason"])
-        oc[i] = encode_outcome(info["outcome"])
+        rc[i] = encode_3v3_termination_reason(info["termination_reason"])
+        oc[i] = encode_3v3_outcome(info["outcome"])
         _episode_fields.arrays = ep_arrs; _episode_fields(info, L, i)
     return _build_result(L, obs, gs, team_rew, term, trunc, am, atg, dc, tac,
                          atk_r, atk_b, bdy_r, bdy_b, col_r, col_b,

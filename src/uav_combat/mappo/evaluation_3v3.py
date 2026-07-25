@@ -10,7 +10,10 @@ import torch
 
 from ..environment_3v3 import GS_DIM, OBS_DIM
 from .networks import GaussianActor
-from .vector_env_3v3 import VectorStepResult3v3, make_combat_vector_env_3v3
+from .vector_env_3v3 import (
+    VectorStepResult3v3, make_combat_vector_env_3v3,
+    decode_3v3_outcome, decode_3v3_termination_reason,
+)
 
 
 def _summarize(summaries, elapsed):
@@ -19,6 +22,13 @@ def _summarize(summaries, elapsed):
     rk = sum(s["red_attack_kills"] for s in summaries)
     bk = sum(s["blue_attack_kills"] for s in summaries)
     def r(key): return sum(1 for s in summaries if s.get(key)) / n
+    # Validate outcome rates sum to 1
+    red_rate = sum(1 for s in summaries if s.get("environment_outcome") == "red") / n
+    blue_rate = sum(1 for s in summaries if s.get("environment_outcome") == "blue") / n
+    draw_rate = sum(1 for s in summaries if s.get("environment_outcome") == "draw") / n
+    total = red_rate + blue_rate + draw_rate
+    if abs(total - 1.0) > 1e-8:
+        raise RuntimeError(f"Outcome rates sum to {total} != 1: red={red_rate:.4f} blue={blue_rate:.4f} draw={draw_rate:.4f}")
     return {
         "episodes": n,
         "red_complete_elimination_success_rate": r("red_complete_elimination_success"),
@@ -85,12 +95,10 @@ def evaluate_mappo_fixed_blue_3v3(
                         "red_cross_collision_deaths": int(r.episode_red_cross_collision_deaths[gi]),
                         "blue_cross_collision_deaths": int(r.episode_blue_cross_collision_deaths[gi]),
                         "episode_length": int(r.episode_length[gi]),
-                        "termination_reason": "done",
+                        "termination_reason": decode_3v3_termination_reason(int(r.termination_reason_codes[gi])),
+                        "environment_outcome": decode_3v3_outcome(int(r.outcome_codes[gi])),
                     })
-                # Always reset the slot to keep it alive for subsequent steps.
-                # Seeds cycle if we need more episodes; dummy seeds for extras.
-                use_seed = next_seed
-                next_seed += 1
+                use_seed = next_seed; next_seed += 1
                 no, ng, na = vec_env.reset_at(np.array([gi], dtype=np.int32), [{"seed": use_seed}])
                 obs[gi], gs[gi], am[gi] = no[0], ng[0], na[0]
 
@@ -141,7 +149,8 @@ def evaluate_rule_matchup_3v3(
                         "red_cross_collision_deaths": int(r.episode_red_cross_collision_deaths[gi]),
                         "blue_cross_collision_deaths": int(r.episode_blue_cross_collision_deaths[gi]),
                         "episode_length": int(r.episode_length[gi]),
-                        "termination_reason": "done",
+                        "termination_reason": decode_3v3_termination_reason(int(r.termination_reason_codes[gi])),
+                        "environment_outcome": decode_3v3_outcome(int(r.outcome_codes[gi])),
                     })
                 use_seed = next_seed; next_seed += 1
                 no, ng, na = vec_env.reset_at(np.array([gi], dtype=np.int32), [{"seed": use_seed}])
