@@ -79,6 +79,7 @@ def main():
     print(f"num_envs={num_envs} workers={num_workers} envs_per_worker={num_envs//num_workers}", flush=True)
 
     trainer = FixedBlue3v3MAPPOTrainer(args.env_config, config)
+    rule_policy_mapping_modes = trainer.vector_env.policy_modes()
     output = Path(config["experiment"]["output_dir"])
     ckpt_dir = output / "checkpoints"; eval_dir = output / "evaluations"
     ckpt_dir.mkdir(parents=True, exist_ok=True); eval_dir.mkdir(parents=True, exist_ok=True)
@@ -285,6 +286,7 @@ def main():
         "log_std_min": trainer.red_actor.log_std_min,
         "log_std_max": trainer.red_actor.log_std_max,
         "kl_early_stop_count": trainer.kl_early_stop_count,
+        "rule_policy_mapping_modes": rule_policy_mapping_modes,
         "initial_evaluation": json.loads((eval_dir / "evaluation_initial.json").read_text()) if (eval_dir / "evaluation_initial.json").exists() else None,
         "best_evaluation": trainer.best_evaluation,
         "best_checkpoint": trainer.best_checkpoint_name,

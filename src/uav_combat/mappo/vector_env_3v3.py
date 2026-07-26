@@ -8,7 +8,7 @@ from typing import Any, NamedTuple
 import numpy as np
 
 from ..environment_3v3 import GS_DIM, OBS_DIM, Homogeneous3v3AirCombatEnv
-from ..rule_policy_3v3 import NearestTargetPursuitPolicy3v3
+from ..rule_policy_3v3 import make_nearest_target_pursuit_policy_3v3
 from ..scenario_3v3 import BLUE_IDS, RED_IDS
 from .vector_env import CONTROL_DIAGNOSTIC_KEYS, K
 
@@ -226,13 +226,10 @@ def _build_result(L, obs, gs, team_rew, term, trunc, am, atg, dc, tac,
 
 def _worker_main_3v3(conn, env_config, num_local_envs, worker_id):
     envs = [Homogeneous3v3AirCombatEnv(env_config) for _ in range(num_local_envs)]
-    act_cfg = envs[0].config["action"]
-    blue_policies = [NearestTargetPursuitPolicy3v3(
-        act_cfg["delta_yaw_max"], act_cfg["delta_pitch_max"], act_cfg["delta_speed_max"])
-        for _ in range(num_local_envs)]
-    red_policies = [NearestTargetPursuitPolicy3v3(
-        act_cfg["delta_yaw_max"], act_cfg["delta_pitch_max"], act_cfg["delta_speed_max"])
-        for _ in range(num_local_envs)]
+    blue_policies = [make_nearest_target_pursuit_policy_3v3(envs[0].config)
+                     for _ in range(num_local_envs)]
+    red_policies = [make_nearest_target_pursuit_policy_3v3(envs[0].config)
+                    for _ in range(num_local_envs)]
     try:
         while True:
             cmd, payload = conn.recv()
@@ -244,6 +241,8 @@ def _worker_main_3v3(conn, env_config, num_local_envs, worker_id):
                 conn.send(_worker_step_rules(envs, blue_policies, red_policies, payload))
             elif cmd == "reset_at":
                 conn.send(_worker_reset_at(envs, blue_policies, red_policies, payload))
+            elif cmd == "policy_modes":
+                conn.send(_policy_modes(blue_policies, red_policies))
             elif cmd == "close":
                 break
             else:
@@ -399,6 +398,13 @@ def _worker_reset_at(envs, blue_policies, red_policies, payload):
     return obs, gs, am
 
 
+def _policy_modes(blue_policies, red_policies):
+    return {
+        "blue": [p.mapping_mode for p in blue_policies],
+        "red": [p.mapping_mode for p in red_policies],
+    }
+
+
 # ===================================================================
 # Local backend
 # ===================================================================
@@ -407,13 +413,10 @@ class LocalCombatVectorEnv3v3:
     def __init__(self, env_config, num_envs):
         self.num_envs = num_envs
         self.envs = [Homogeneous3v3AirCombatEnv(env_config) for _ in range(num_envs)]
-        act_cfg = self.envs[0].config["action"]
-        self.blue_policies = [NearestTargetPursuitPolicy3v3(
-            act_cfg["delta_yaw_max"], act_cfg["delta_pitch_max"], act_cfg["delta_speed_max"])
-            for _ in range(num_envs)]
-        self.red_policies = [NearestTargetPursuitPolicy3v3(
-            act_cfg["delta_yaw_max"], act_cfg["delta_pitch_max"], act_cfg["delta_speed_max"])
-            for _ in range(num_envs)]
+        self.blue_policies = [make_nearest_target_pursuit_policy_3v3(self.envs[0].config)
+                              for _ in range(num_envs)]
+        self.red_policies = [make_nearest_target_pursuit_policy_3v3(self.envs[0].config)
+                             for _ in range(num_envs)]
         self._closed = False
 
     def reset(self, specs):
@@ -430,6 +433,7 @@ class LocalCombatVectorEnv3v3:
                                 (np.asarray(indices, dtype=np.int32), specs))
 
     def close(self): self._closed = True
+    def policy_modes(self): return _policy_modes(self.blue_policies, self.red_policies)
     def __enter__(self): return self
     def __exit__(self, *a): self.close()
 
@@ -502,6 +506,17 @@ class SubprocessCombatVectorEnv3v3:
             for j, g in enumerate([g for g in gi if int(g) // self.envs_per_worker == w]):
                 rm[int(g)] = (r[0][j:j+1], r[1][j:j+1], r[2][j:j+1])
         return tuple(np.concatenate([rm[int(g)][i] for g in gi], axis=0) for i in range(3))
+
+    def policy_modes(self):
+        self._check()
+        for c in self._conns:
+            c.send(("policy_modes", None))
+        ps = [self._conns[w].recv() for w in range(self.num_env_workers)]
+        for w, r in enumerate(ps): self._cerr(r, w)
+        return {
+            "blue": [mode for p in ps for mode in p["blue"]],
+            "red": [mode for p in ps for mode in p["red"]],
+        }
 
     def close(self):
         if self._closed: return

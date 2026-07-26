@@ -21,7 +21,7 @@ DEFAULT_CONFIGS = (
     ROOT / "configs" / "homogeneous_3v3_learnable_v4.yaml",
 )
 DEFAULT_OUTPUT = ROOT / "outputs" / "3v3_environment_contract_audit.json"
-AUDIT_VERSION = "3v3_contract_audit_v4"
+AUDIT_VERSION = "3v3_contract_audit_v4_rule_aligned"
 
 
 def _stats(values: list[float]) -> dict[str, Any]:
@@ -510,7 +510,9 @@ def _run_rule_matchup(config_path: Path, red_mode: str, blue_mode: str, episodes
     all_rewards_finite = True
     all_observations_finite = True
     all_global_states_finite = True
+    policy_modes: dict[str, list[str]] = {"blue": [], "red": []}
     try:
+        policy_modes = vec.policy_modes()
         obs, gs, _ = vec.reset([{"seed": 2000 + i} for i in range(num_envs)])
         all_observations_finite = all_observations_finite and bool(np.all(np.isfinite(obs)))
         all_global_states_finite = all_global_states_finite and bool(np.all(np.isfinite(gs)))
@@ -602,6 +604,7 @@ def _run_rule_matchup(config_path: Path, red_mode: str, blue_mode: str, episodes
         "all_global_states_finite": bool(all_global_states_finite),
         "death_ledger_conserved": bool(ledger_ok),
         "boundary_total_matches_altitude_plus_xy": bool(boundary_ok),
+        "rule_policy_mapping_modes": policy_modes,
     }
 
 

@@ -12,6 +12,14 @@ from uav_combat.mappo.vector_env_3v3 import (
     VectorStepResult3v3, LocalCombatVectorEnv3v3,
     make_combat_vector_env_3v3, SubprocessCombatVectorEnv3v3,
     RED_REWARD_COMPONENT_KEYS_3V3,
+    CONTROL_DIAGNOSTIC_KEYS,
+)
+from uav_combat.config import load_config
+from uav_combat.controller import TargetStateController
+from uav_combat.rule_policy import PurePursuitPolicy
+from uav_combat.rule_policy_3v3 import (
+    NearestTargetPursuitPolicy3v3,
+    make_nearest_target_pursuit_policy_3v3,
 )
 
 CONFIG = Path(__file__).parents[1] / "configs" / "homogeneous_3v3.yaml"
@@ -291,6 +299,146 @@ class TestGeometry:
 
 
 class TestRulePolicy:
+    def test_old_config_defaults_to_legacy_delta_policy(self):
+        cfg = load_config(CONFIG)
+        assert cfg["action"].get("mapping_mode", "legacy_delta") == "legacy_delta"
+        pol = make_nearest_target_pursuit_policy_3v3(cfg)
+        assert pol.mapping_mode == "legacy_delta"
+
+    def test_v4_config_uses_rate_aligned_policy(self):
+        cfg = load_config(CONFIG_V4)
+        pol = make_nearest_target_pursuit_policy_3v3(cfg)
+        assert pol.mapping_mode == "rate_aligned_v1"
+
+    def test_legacy_rule_policy_matches_previous_pure_pursuit_encoding(self):
+        env = Homogeneous3v3AirCombatEnv(CONFIG)
+        env.reset(17)
+        own = env._aircraft_by_id("blue_0")
+        target = env._aircraft_by_id("red_0")
+        cfg = env.config["action"]
+        legacy_3v3 = NearestTargetPursuitPolicy3v3(
+            cfg["delta_yaw_max"], cfg["delta_pitch_max"], cfg["delta_speed_max"]
+        )
+        previous = PurePursuitPolicy(cfg["delta_yaw_max"], cfg["delta_pitch_max"], cfg["delta_speed_max"])
+        assert np.allclose(legacy_3v3.action(own, target), previous.action(own, target), atol=0.0, rtol=0.0)
+
+    def test_nearest_target_selection_and_tie_break_are_unchanged(self):
+        env = Homogeneous3v3AirCombatEnv(CONFIG_V4)
+        env.reset(1)
+        _set(env, "blue_0", 0.0, 0.0, psi=0.0)
+        _set(env, "red_0", 1000.0, 0.0, psi=np.pi)
+        _set(env, "red_1", 1000.0, 0.0, psi=np.pi)
+        _set(env, "red_2", 800.0, 0.0, psi=np.pi)
+        pol = make_nearest_target_pursuit_policy_3v3(env.config)
+        _, targets = pol.select_actions([env._aircraft_by_id("blue_0")], [env._aircraft_by_id(aid) for aid in RED_IDS])
+        assert targets["blue_0"] == "red_2"
+
+        env._aircraft_by_id("red_2").state.alive = False
+        pol.reset_counters()
+        _, targets = pol.select_actions([env._aircraft_by_id("blue_0")], [env._aircraft_by_id(aid) for aid in RED_IDS])
+        assert targets["blue_0"] == "red_0"
+
+    @pytest.mark.parametrize(
+        "target_xy,target_altitude,own_v,target_v",
+        [
+            ((1200.0, 60.0), 3000.0, 150.0, 150.0),      # small positive yaw
+            ((1200.0, -60.0), 3000.0, 150.0, 150.0),     # small negative yaw
+            ((100.0, 1200.0), 3000.0, 150.0, 150.0),     # large positive yaw, yaw-rate limit
+            ((100.0, -1200.0), 3000.0, 150.0, 150.0),    # large negative yaw, yaw-rate limit
+            ((1200.0, 0.0), 3400.0, 150.0, 150.0),       # positive pitch
+            ((1200.0, 0.0), 2600.0, 150.0, 150.0),       # negative pitch
+            ((1200.0, 0.0), 3000.0, 120.0, 180.0),       # accelerate
+            ((1200.0, 0.0), 3000.0, 220.0, 120.0),       # decelerate
+            ((900.0, -700.0), 3300.0, 135.0, 210.0),     # combined errors
+        ],
+    )
+    def test_legacy_and_rate_aligned_policy_controller_commands_are_equivalent(
+        self, target_xy, target_altitude, own_v, target_v
+    ):
+        env = Homogeneous3v3AirCombatEnv(CONFIG)
+        env.reset(22)
+        own = env._aircraft_by_id("blue_0")
+        target = env._aircraft_by_id("red_0")
+        _set(env, "blue_0", 0.0, 0.0, z=-3000.0, v=own_v, psi=0.0)
+        _set(env, "red_0", target_xy[0], target_xy[1], z=-target_altitude, v=target_v, psi=np.pi)
+
+        act_cfg = env.config["action"]
+        spec = own.spec
+        legacy_policy = NearestTargetPursuitPolicy3v3(
+            act_cfg["delta_yaw_max"], act_cfg["delta_pitch_max"], act_cfg["delta_speed_max"],
+            mapping_mode="legacy_delta",
+        )
+        rate_policy = NearestTargetPursuitPolicy3v3(
+            act_cfg["delta_yaw_max"], act_cfg["delta_pitch_max"], act_cfg["delta_speed_max"],
+            mapping_mode="rate_aligned_v1",
+            yaw_rate_max=spec.yaw_rate_max,
+            pitch_rate_max=spec.pitch_rate_max,
+            acceleration_max=spec.acceleration_max,
+            k_yaw=spec.k_yaw,
+            k_pitch=spec.k_pitch,
+            k_speed=spec.k_speed,
+        )
+        legacy_controller = TargetStateController(**act_cfg, mapping_mode="legacy_delta")
+        rate_controller = TargetStateController(**act_cfg, mapping_mode="rate_aligned_v1")
+
+        _, legacy_cmd = legacy_controller.control_from_action(own.state, legacy_policy.action(own, target), spec)
+        _, rate_cmd = rate_controller.control_from_action(own.state, rate_policy.action(own, target), spec)
+        assert np.allclose(
+            [legacy_cmd.nx, legacy_cmd.nz, legacy_cmd.phi],
+            [rate_cmd.nx, rate_cmd.nz, rate_cmd.phi],
+            atol=1e-8,
+            rtol=1e-8,
+        )
+
+    def test_v4_rule_actions_are_bounded_and_finite(self):
+        env = Homogeneous3v3AirCombatEnv(CONFIG_V4)
+        env.reset(31)
+        pol = make_nearest_target_pursuit_policy_3v3(env.config)
+        actions, _ = pol.select_actions(
+            [a for a in env.aircraft if a.team == "blue"],
+            [a for a in env.aircraft if a.team == "red"],
+        )
+        for action in actions.values():
+            assert np.all(np.isfinite(action))
+            assert np.all(action >= -1.0)
+            assert np.all(action <= 1.0)
+
+    def test_local_and_worker_policy_modes_match_v4(self):
+        local = LocalCombatVectorEnv3v3(CONFIG_V4, 2)
+        worker = SubprocessCombatVectorEnv3v3(CONFIG_V4, 2, 2)
+        try:
+            assert local.policy_modes() == {"blue": ["rate_aligned_v1", "rate_aligned_v1"], "red": ["rate_aligned_v1", "rate_aligned_v1"]}
+            assert worker.policy_modes() == local.policy_modes()
+        finally:
+            local.close()
+            worker.close()
+
+    def test_local_and_worker_blue_rule_actions_match_same_state(self):
+        local = LocalCombatVectorEnv3v3(CONFIG_V4, 2)
+        worker = SubprocessCombatVectorEnv3v3(CONFIG_V4, 2, 2)
+        try:
+            specs = [{"seed": 101}, {"seed": 102}]
+            local.reset(specs)
+            worker.reset(specs)
+            red_actions = np.zeros((2, 3, 3), dtype=np.float32)
+            local_result = local.step(red_actions)
+            worker_result = worker.step(red_actions)
+            idx = [CONTROL_DIAGNOSTIC_KEYS.index(k) for k in (
+                "normalized_action_yaw", "normalized_action_pitch", "normalized_action_speed",
+                "nx", "nz", "phi",
+            )]
+            assert np.all(np.isfinite(local_result.control_diagnostics[:, 3:, idx]))
+            assert np.all(np.isfinite(worker_result.control_diagnostics[:, 3:, idx]))
+            assert np.allclose(
+                local_result.control_diagnostics[:, 3:, idx],
+                worker_result.control_diagnostics[:, 3:, idx],
+                atol=1e-8,
+                rtol=1e-8,
+            )
+        finally:
+            local.close()
+            worker.close()
+
     def test_per_env_independent(self):
         vec = LocalCombatVectorEnv3v3(CONFIG, 4)
         specs = [{"seed": i} for i in range(4)]
@@ -303,7 +451,6 @@ class TestRulePolicy:
         vec.close()
 
     def test_reset_counters_clears_all(self):
-        from uav_combat.rule_policy_3v3 import NearestTargetPursuitPolicy3v3
         pol = NearestTargetPursuitPolicy3v3(np.pi, np.pi/3, 50.0)
         pol.target_switch_count["b0"] = 5
         pol.target_selection_count["b0"] = 10
