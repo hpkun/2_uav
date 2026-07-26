@@ -341,6 +341,12 @@ class Homogeneous3v3AirCombatEnv:
         red_bdy_losses = sum(1 for a_id, c in step_death_causes.items()
                              if self._aircraft_by_id(a_id).team == "red"
                              and c in (DEATH_BOUNDARY_ALTITUDE, DEATH_BOUNDARY_XY))
+        red_bdy_alt_losses = sum(1 for a_id, c in step_death_causes.items()
+                                 if self._aircraft_by_id(a_id).team == "red"
+                                 and c == DEATH_BOUNDARY_ALTITUDE)
+        red_bdy_xy_losses = sum(1 for a_id, c in step_death_causes.items()
+                                if self._aircraft_by_id(a_id).team == "red"
+                                and c == DEATH_BOUNDARY_XY)
         red_col_losses = sum(1 for a_id, c in step_death_causes.items()
                              if self._aircraft_by_id(a_id).team == "red"
                              and c in (DEATH_COLLISION_FRIENDLY, DEATH_COLLISION_CROSS))
@@ -349,10 +355,18 @@ class Homogeneous3v3AirCombatEnv:
         blue_bdy_losses = sum(1 for a_id, c in step_death_causes.items()
                               if self._aircraft_by_id(a_id).team == "blue"
                               and c in (DEATH_BOUNDARY_ALTITUDE, DEATH_BOUNDARY_XY))
+        blue_bdy_alt_losses = sum(1 for a_id, c in step_death_causes.items()
+                                  if self._aircraft_by_id(a_id).team == "blue"
+                                  and c == DEATH_BOUNDARY_ALTITUDE)
+        blue_bdy_xy_losses = sum(1 for a_id, c in step_death_causes.items()
+                                 if self._aircraft_by_id(a_id).team == "blue"
+                                 and c == DEATH_BOUNDARY_XY)
         blue_col_losses = sum(1 for a_id, c in step_death_causes.items()
                               if self._aircraft_by_id(a_id).team == "blue"
                               and c in (DEATH_COLLISION_FRIENDLY, DEATH_COLLISION_CROSS))
         bdy_d = {"red": red_bdy_losses, "blue": blue_bdy_losses}
+        bdy_alt_d = {"red": red_bdy_alt_losses, "blue": blue_bdy_alt_losses}
+        bdy_xy_d = {"red": red_bdy_xy_losses, "blue": blue_bdy_xy_losses}
         col_d = {"red": red_col_losses, "blue": blue_col_losses}
 
         # 13. Rewards
@@ -401,6 +415,8 @@ class Homogeneous3v3AirCombatEnv:
             "red_alive_count": red_alive, "blue_alive_count": blue_alive,
             "attacks": attack_intents, "death_causes": step_death_causes,
             "attack_kills": attack_kills, "boundary_deaths": bdy_d, "collision_deaths": col_d,
+            "boundary_altitude_deaths": bdy_alt_d,
+            "boundary_xy_deaths": bdy_xy_d,
             "red_complete_elimination_success": red_success,
             "blue_complete_elimination_success": blue_success,
             "red_survivors": red_alive, "blue_survivors": blue_alive,
@@ -455,14 +471,14 @@ class Homogeneous3v3AirCombatEnv:
             red_state = red_ac.state
             prev_red = old_states.get(aid, red_state)
 
-            # Approach: max over alive blues
-            app = 0.0
+            # Approach: signed max over alive blues; preserves negative progress.
+            approach_values = []
             for blue_ac in alive_blues:
                 prev_blue = old_states.get(blue_ac.aircraft_id, blue_ac.state)
-                val = approach_progress_reward(
+                approach_values.append(approach_progress_reward(
                     prev_red, red_state, prev_blue, blue_ac.state,
-                    cfg["approach_distance_threshold"], cfg["approach_distance_normalizer"])
-                if val > app: app = val
+                    cfg["approach_distance_threshold"], cfg["approach_distance_normalizer"]))
+            app = max(approach_values) if approach_values else 0.0
             red_approach += app
 
             # Attack advantage: max over alive blues
@@ -522,12 +538,13 @@ class Homogeneous3v3AirCombatEnv:
             if blue_ac.team != "blue" or not blue_ac.state.alive:
                 continue
             aid = blue_ac.aircraft_id; bs = blue_ac.state; pb = old_states.get(aid, bs)
-            app = 0.0
+            approach_values = []
             for red_ac in alive_reds:
                 pr = old_states.get(red_ac.aircraft_id, red_ac.state)
-                val = approach_progress_reward(pb, bs, pr, red_ac.state,
-                                               cfg["approach_distance_threshold"], cfg["approach_distance_normalizer"])
-                if val > app: app = val
+                approach_values.append(approach_progress_reward(
+                    pb, bs, pr, red_ac.state,
+                    cfg["approach_distance_threshold"], cfg["approach_distance_normalizer"]))
+            app = max(approach_values) if approach_values else 0.0
             blue_approach += app
             atk_val = 0.0
             for red_ac in alive_reds:

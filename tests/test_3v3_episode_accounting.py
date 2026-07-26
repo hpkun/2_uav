@@ -11,6 +11,7 @@ from uav_combat.environment_3v3 import (
 from uav_combat.mappo.vector_env_3v3 import (
     VectorStepResult3v3, LocalCombatVectorEnv3v3,
     make_combat_vector_env_3v3, SubprocessCombatVectorEnv3v3,
+    RED_REWARD_COMPONENT_KEYS_3V3,
 )
 
 CONFIG = Path(__file__).parents[1] / "configs" / "homogeneous_3v3.yaml"
@@ -22,6 +23,18 @@ def _set(env, aid, x, y, z=-3000.0, v=150.0, psi=0.0):
 
 def _all_actions(env):
     return {a.aircraft_id: np.zeros(3, dtype=np.float32) for a in env.aircraft}
+
+def _set_line_pair(env, closing=True, red_team=True):
+    own_ids = RED_IDS if red_team else BLUE_IDS
+    enemy_ids = BLUE_IDS if red_team else RED_IDS
+    own_speed, enemy_speed = (250.0, 100.0) if closing else (100.0, 250.0)
+    own_psi = 0.0 if red_team else np.pi
+    enemy_psi = 0.0 if red_team else np.pi
+    for i, aid in enumerate(own_ids):
+        _set(env, aid, 0.0, i * 500.0, v=own_speed, psi=own_psi)
+    for i, aid in enumerate(enemy_ids):
+        x = 1500.0 if red_team else -1500.0
+        _set(env, aid, x, i * 500.0, v=enemy_speed, psi=enemy_psi)
 
 def _run_to_end(env):
     while True:
@@ -147,7 +160,73 @@ class TestDeathLedger:
                 es = info["episode_summary"]
                 if es["environment_outcome"] == "red":
                     assert not es["red_complete_elimination_success"]
-                break
+            break
+
+
+class TestRewardContract3v3:
+    def test_environment_approach_negative_not_clipped(self):
+        env = Homogeneous3v3AirCombatEnv(CONFIG)
+        env.reset(1)
+        _set_line_pair(env, closing=False, red_team=True)
+        _, _, _, _, info = env.step(_all_actions(env))
+        assert info["reward_components"]["red_approach_reward"] < 0.0
+
+    def test_environment_approach_positive_preserved(self):
+        env = Homogeneous3v3AirCombatEnv(CONFIG)
+        env.reset(2)
+        _set_line_pair(env, closing=True, red_team=True)
+        _, _, _, _, info = env.step(_all_actions(env))
+        assert info["reward_components"]["red_approach_reward"] > 0.0
+
+    def test_environment_approach_no_alive_enemies_is_zero(self):
+        env = Homogeneous3v3AirCombatEnv(CONFIG)
+        env.reset(3)
+        for aid in BLUE_IDS:
+            env._aircraft_by_id(aid).state.alive = False
+        _, _, _, _, info = env.step(_all_actions(env))
+        assert info["reward_components"]["red_approach_reward"] == 0.0
+
+    def test_environment_approach_red_blue_symmetric(self):
+        env = Homogeneous3v3AirCombatEnv(CONFIG)
+        env.reset(4)
+        _set_line_pair(env, closing=True, red_team=True)
+        _, _, _, _, info_red = env.step(_all_actions(env))
+
+        env = Homogeneous3v3AirCombatEnv(CONFIG)
+        env.reset(4)
+        _set_line_pair(env, closing=True, red_team=False)
+        _, _, _, _, info_blue = env.step(_all_actions(env))
+        assert np.isclose(
+            info_red["reward_components"]["red_approach_reward"],
+            info_blue["reward_components"]["blue_approach_reward"],
+        )
+
+    def test_boundary_total_equals_altitude_plus_xy(self):
+        env = Homogeneous3v3AirCombatEnv(CONFIG)
+        env.reset(5)
+        _set(env, "red_0", 0.0, 0.0, z=-499.0)
+        _set(env, "red_1", env.config["battlefield"]["x_limit"] + 1.0, 0.0)
+        _, _, _, _, info = env.step(_all_actions(env))
+        assert info["boundary_deaths"]["red"] == (
+            info["boundary_altitude_deaths"]["red"] + info["boundary_xy_deaths"]["red"]
+        )
+
+    def test_reward_components_signed_sum_matches_total(self):
+        env = Homogeneous3v3AirCombatEnv(CONFIG)
+        env.reset(6)
+        _set_line_pair(env, closing=True, red_team=True)
+        _, rewards, _, _, info = env.step(_all_actions(env))
+        rc = info["reward_components"]
+        total = (
+            rc["red_dense_reward"]
+            + rc["red_kill_reward"]
+            - rc["red_attack_death_penalty"]
+            - rc["red_boundary_death_penalty"]
+            - rc["red_collision_death_penalty"]
+            + rc["red_terminal_reward"]
+        )
+        assert np.isclose(total, rc["red_team_total_reward"])
+        assert np.isclose(total, rewards["red_0"])
 
     def test_sync_mutual_kill(self):
         env = Homogeneous3v3AirCombatEnv(CONFIG); env.reset(47)
@@ -258,6 +337,36 @@ class TestVectorEnv:
                 break
         vec.close()
 
+    def test_boundary_subfields_are_propagated(self):
+        vec = LocalCombatVectorEnv3v3(CONFIG, 1)
+        vec.reset([{"seed": 7}])
+        env = vec.envs[0]
+        _set(env, "red_0", 0.0, 0.0, z=-499.0)
+        _set(env, "red_1", env.config["battlefield"]["x_limit"] + 1.0, 0.0)
+        res = vec.step_rules(np.zeros((1, 2), dtype=np.int8))
+        assert res.step_red_boundary_deaths[0] == 2
+        assert res.step_red_boundary_altitude_deaths[0] == 1
+        assert res.step_red_boundary_xy_deaths[0] == 1
+        vec.close()
+
+    def test_reward_component_vector_order_and_values(self):
+        env = Homogeneous3v3AirCombatEnv(CONFIG)
+        env.reset(8)
+        _set_line_pair(env, closing=True, red_team=True)
+        _, _, _, _, info = env.step(_all_actions(env))
+        expected = np.array(
+            [info["reward_components"][key] for key in RED_REWARD_COMPONENT_KEYS_3V3],
+            dtype=np.float32,
+        )
+
+        vec = LocalCombatVectorEnv3v3(CONFIG, 1)
+        vec.reset([{"seed": 8}])
+        _set_line_pair(vec.envs[0], closing=True, red_team=True)
+        res = vec.step_rules(np.zeros((1, 2), dtype=np.int8))
+        assert res.red_reward_components.shape == (1, len(RED_REWARD_COMPONENT_KEYS_3V3))
+        assert np.allclose(res.red_reward_components[0], expected)
+        vec.close()
+
 
 class TestMAPPO:
     def test_alive_only_advantage_normalization(self):
@@ -304,6 +413,55 @@ class TestMAPPO:
                     assert surv + atk + bdy + fr + cr == 3
             t.close()
 
+    def test_completed_record_keeps_boundary_subfields(self):
+        from uav_combat.mappo.trainer_3v3 import FixedBlue3v3MAPPOTrainer
+        config = {"experiment": {"seed": 9, "device": "cpu", "output_dir": "tmp"}, "network": {"hidden_dim": 32, "log_std_init": -0.5},
+                  "training": {"training_mode": "fixed_rule_blue_3v3", "total_env_steps": 8, "num_envs": 1, "num_env_workers": 1,
+                               "rollout_steps": 2, "ppo_epochs": 1, "minibatch_size": 8, "gamma": 0.99, "gae_lambda": 0.95,
+                               "clip_coef": 0.2, "learning_rate": 3e-4, "value_loss_coef": 0.5, "entropy_coef": 0.01, "max_grad_norm": 0.5},
+                  "evaluation": {"episodes": 2, "deterministic": True}}
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            config["experiment"]["output_dir"] = tmp
+            t = FixedBlue3v3MAPPOTrainer(CONFIG, config)
+            env = t.vector_env.envs[0]
+            for aid in RED_IDS:
+                _set(env, aid, env.config["battlefield"]["x_limit"] + 1.0, 0.0)
+            completed = t.collect_rollout()
+            assert completed
+            rec = completed[0]
+            for key in (
+                "red_boundary_altitude_deaths",
+                "blue_boundary_altitude_deaths",
+                "red_boundary_xy_deaths",
+                "blue_boundary_xy_deaths",
+            ):
+                assert key in rec
+            assert rec["red_boundary_deaths"] == rec["red_boundary_altitude_deaths"] + rec["red_boundary_xy_deaths"]
+            t.close()
+
+    def test_rollout_reward_means_are_step_components(self):
+        from uav_combat.mappo.trainer_3v3 import FixedBlue3v3MAPPOTrainer
+        config = {"experiment": {"seed": 10, "device": "cpu", "output_dir": "tmp"}, "network": {"hidden_dim": 32, "log_std_init": -0.5},
+                  "training": {"training_mode": "fixed_rule_blue_3v3", "total_env_steps": 8, "num_envs": 1, "num_env_workers": 1,
+                               "rollout_steps": 2, "ppo_epochs": 1, "minibatch_size": 8, "gamma": 0.99, "gae_lambda": 0.95,
+                               "clip_coef": 0.2, "learning_rate": 3e-4, "value_loss_coef": 0.5, "entropy_coef": 0.01, "max_grad_norm": 0.5},
+                  "evaluation": {"episodes": 2, "deterministic": True}}
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            config["experiment"]["output_dir"] = tmp
+            t = FixedBlue3v3MAPPOTrainer(CONFIG, config)
+            t.collect_rollout()
+            m = t.last_rollout_reward_means
+            assert "mean_rollout_total_step_reward" in m
+            assert "mean_rollout_tactical_reward" in m
+            assert np.isfinite(m["mean_rollout_total_step_reward"])
+            assert np.isclose(
+                m["mean_rollout_event_terminal_reward"],
+                m["mean_rollout_event_reward"] + m["mean_rollout_terminal_reward"],
+            )
+            t.close()
+
 
 class TestEncoding:
     def test_3v3_reason_roundtrip(self):
@@ -323,6 +481,31 @@ class TestEncoding:
         # Mutual elimination -> reason=mutual_elimination, outcome=draw
         code = encode_3v3_outcome("draw")
         assert decode_3v3_outcome(code) == "draw"
+
+
+class TestEnvironmentAudit3v3:
+    def test_training_metric_rollout_and_eval_prefixes_are_separate(self):
+        text = (Path(__file__).parents[1] / "scripts" / "train_mappo_3v3.py").read_text(encoding="utf-8")
+        assert '"eval_red_complete_elimination_success_rate"' in text
+        assert '"eval_mean_red_boundary_altitude_deaths"' in text
+        assert '"mean_rollout_tactical_reward"' in text
+        assert '"red_complete_elimination_success_rate": ev.get' not in text
+
+    def test_environment_contract_audit_script_completes_and_ledgers_balance(self):
+        from scripts.audit_environment_contract_3v3 import main, OUTPUT
+        import os
+        os.environ["UAV_3V3_AUDIT_EPISODES"] = "2"
+        os.environ["UAV_3V3_AUDIT_NUM_ENVS"] = "2"
+        os.environ["UAV_3V3_AUDIT_WORKERS"] = "1"
+        main()
+        os.environ.pop("UAV_3V3_AUDIT_EPISODES", None)
+        os.environ.pop("UAV_3V3_AUDIT_NUM_ENVS", None)
+        os.environ.pop("UAV_3V3_AUDIT_WORKERS", None)
+        data = __import__("json").loads(OUTPUT.read_text(encoding="utf-8"))
+        assert data["all_death_ledgers_conserved"]
+        assert data["all_rewards_and_states_finite"]
+        for result in data["rule_matchups"].values():
+            assert result["boundary_total_matches_altitude_plus_xy"]
 
 
 class TestScenarioOffset:

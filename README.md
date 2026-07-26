@@ -18,19 +18,23 @@ The 1v1 self-play experiment is retained as an **auxiliary experiment**. It is n
 - Shared-policy idea: three homogeneous red UAVs share one Actor.
 - Red learns against a fixed-rule blue; blue uses step-by-step nearest-alive-red selection with pure-pursuit actions (MADSAC fixed-policy design).
 - Success = complete elimination of blue by red attack kills.
-- MADSAC segmented reward structure adapted to team reward with alive-red mean dense term.
+- The current reward mode is `paper_coupled_team_v2`.
+- The main references from MADSAC are CTDE, a shared Actor for homogeneous UAVs, continuous actions, geometric observations, and a nearest-target fixed blue opponent.
 
 ### Project adaptations
 
 - 3v3 scale (not 4v4 or 5v5); a verification scale before further scaling.
 - MAPPO algorithm (not MADDPG).
-- Deterministic geometric kill (not missile/radar models).
+- This is not a strict MADSAC reproduction.
+- Deterministic geometric attack/kill logic is used.
 - Automatic nearest-in-envelope target selection per aircraft per step.
+- No sensor noise, missile model, ammunition count, or weapon cooldown is modelled.
 - 68-dim fixed per-agent observation (including own x/y for boundary awareness).
 - 48-dim centralised critic state (6 aircraft × 8 features).
-- Team dense reward computed as the mean over alive red agents (not sum), to avoid scaling with team size.
+- Team dense reward is summed over alive contributors and divided by fixed `team_size=3`.
 - 8 parallel environments, 4 persistent CPU workers.
 - Best checkpoint ordered by red complete elimination success rate.
+- TAM-HAPPO and BRMA-MAPPO are reserved for later heterogeneous and variable-scale stages.
 
 ### Architecture
 
@@ -45,13 +49,14 @@ The 1v1 self-play experiment is retained as an **auxiliary experiment**. It is n
 
 ```
 red_team_reward = team_dense_reward
-    + 10 × blue_destroyed_by_red_attack
-    - 10 × red_destroyed_by_blue_attack
-    - 10 × red_boundary_deaths
-    - 10 × red_collision_deaths
+    + red_kill_reward
+    - red_attack_death_penalty
+    - red_boundary_death_penalty
+    - red_collision_death_penalty
+    + red_terminal_reward
 ```
 
-Blue receives a symmetric diagnostic reward only (not used for training).
+`red_dense_reward` is clipped after combining approach, attack-advantage, threat, soft-boundary, friendly-separation, head-on-risk, and time components. Penalty components are logged as positive magnitudes and subtracted when forming signed totals. Blue receives a symmetric diagnostic reward only (not used for training).
 
 ### Commands (3v3)
 

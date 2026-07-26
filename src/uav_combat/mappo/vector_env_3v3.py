@@ -51,6 +51,23 @@ def decode_3v3_outcome(code: int) -> str | None:
 
 AGENT_ORDER = RED_IDS + BLUE_IDS
 
+RED_REWARD_COMPONENT_KEYS_3V3 = (
+    "red_approach_reward",
+    "red_attack_advantage_reward",
+    "red_threat_penalty",
+    "red_soft_boundary_penalty",
+    "red_friendly_separation_penalty",
+    "red_head_on_risk_penalty",
+    "red_time_penalty",
+    "red_dense_reward",
+    "red_kill_reward",
+    "red_attack_death_penalty",
+    "red_boundary_death_penalty",
+    "red_collision_death_penalty",
+    "red_terminal_reward",
+    "red_team_total_reward",
+)
+
 
 class VectorStepResult3v3(NamedTuple):
     observations: np.ndarray                         # [N, 6, 68]
@@ -66,8 +83,13 @@ class VectorStepResult3v3(NamedTuple):
     step_blue_attack_kills: np.ndarray                # [N] int8
     step_red_boundary_deaths: np.ndarray              # [N] int8
     step_blue_boundary_deaths: np.ndarray             # [N] int8
+    step_red_boundary_altitude_deaths: np.ndarray     # [N] int8
+    step_blue_boundary_altitude_deaths: np.ndarray    # [N] int8
+    step_red_boundary_xy_deaths: np.ndarray           # [N] int8
+    step_blue_boundary_xy_deaths: np.ndarray          # [N] int8
     step_red_collision_deaths: np.ndarray             # [N] int8
     step_blue_collision_deaths: np.ndarray            # [N] int8
+    red_reward_components: np.ndarray                 # [N, 14] float32
     red_complete_elimination_success: np.ndarray      # [N] bool
     blue_complete_elimination_success: np.ndarray     # [N] bool
     geometry: np.ndarray                              # [N, 6, 3] (distance, ATA, AA)
@@ -83,6 +105,10 @@ class VectorStepResult3v3(NamedTuple):
     episode_blue_attack_deaths: np.ndarray            # [N] int8
     episode_red_boundary_deaths: np.ndarray           # [N] int8
     episode_blue_boundary_deaths: np.ndarray          # [N] int8
+    episode_red_boundary_altitude_deaths: np.ndarray  # [N] int8
+    episode_blue_boundary_altitude_deaths: np.ndarray # [N] int8
+    episode_red_boundary_xy_deaths: np.ndarray        # [N] int8
+    episode_blue_boundary_xy_deaths: np.ndarray       # [N] int8
     episode_red_friendly_collision_deaths: np.ndarray # [N] int8
     episode_blue_friendly_collision_deaths: np.ndarray# [N] int8
     episode_red_cross_collision_deaths: np.ndarray    # [N] int8
@@ -107,6 +133,12 @@ def _fill_geom(info, env, i, geom):
         geom[i, j, 2] = float(g.get("aa", 0.0))
 
 
+def _fill_red_reward_components(info, i, arr):
+    rc = info.get("reward_components", {})
+    for j, key in enumerate(RED_REWARD_COMPONENT_KEYS_3V3):
+        arr[i, j] = float(rc.get(key, 0.0))
+
+
 def _episode_fields(info, L, i):
     es = info.get("episode_summary")
     if es is None:
@@ -121,6 +153,10 @@ def _episode_fields(info, L, i):
     arrays["ep_bad"][idx] = es["blue_death_causes"]["attack_deaths"]
     arrays["ep_rbd"][idx] = es["red_death_causes"]["boundary_deaths"]
     arrays["ep_bbd"][idx] = es["blue_death_causes"]["boundary_deaths"]
+    arrays["ep_rbad"][idx] = es["red_death_causes"]["boundary_altitude_deaths"]
+    arrays["ep_bbad"][idx] = es["blue_death_causes"]["boundary_altitude_deaths"]
+    arrays["ep_rbxy"][idx] = es["red_death_causes"]["boundary_xy_deaths"]
+    arrays["ep_bbxy"][idx] = es["blue_death_causes"]["boundary_xy_deaths"]
     arrays["ep_rfc"][idx] = es["red_death_causes"]["friendly_collision_deaths"]
     arrays["ep_bfc"][idx] = es["blue_death_causes"]["friendly_collision_deaths"]
     arrays["ep_rcc"][idx] = es["red_death_causes"]["cross_team_collision_deaths"]
@@ -135,6 +171,8 @@ def _make_episode_arrays(L):
         "ep_rs": np.zeros(L, dtype=np.int8), "ep_bs": np.zeros(L, dtype=np.int8),
         "ep_rad": np.zeros(L, dtype=np.int8), "ep_bad": np.zeros(L, dtype=np.int8),
         "ep_rbd": np.zeros(L, dtype=np.int8), "ep_bbd": np.zeros(L, dtype=np.int8),
+        "ep_rbad": np.zeros(L, dtype=np.int8), "ep_bbad": np.zeros(L, dtype=np.int8),
+        "ep_rbxy": np.zeros(L, dtype=np.int8), "ep_bbxy": np.zeros(L, dtype=np.int8),
         "ep_rfc": np.zeros(L, dtype=np.int8), "ep_bfc": np.zeros(L, dtype=np.int8),
         "ep_rcc": np.zeros(L, dtype=np.int8), "ep_bcc": np.zeros(L, dtype=np.int8),
         "ep_len": np.zeros(L, dtype=np.int32),
@@ -142,7 +180,8 @@ def _make_episode_arrays(L):
 
 
 def _build_result(L, obs, gs, team_rew, term, trunc, am, atg, dc, tac,
-                  atk_r, atk_b, bdy_r, bdy_b, col_r, col_b,
+                  atk_r, atk_b, bdy_r, bdy_b, bdy_alt_r, bdy_alt_b,
+                  bdy_xy_r, bdy_xy_b, col_r, col_b, red_rc,
                   red_succ, blue_succ, geom, cd, rc, oc, ep_arrs):
     return VectorStepResult3v3(
         observations=obs, global_states=gs, team_rewards=team_rew,
@@ -150,7 +189,12 @@ def _build_result(L, obs, gs, team_rew, term, trunc, am, atg, dc, tac,
         attack_targets=atg, step_death_causes=dc, team_alive_counts=tac,
         step_red_attack_kills=atk_r, step_blue_attack_kills=atk_b,
         step_red_boundary_deaths=bdy_r, step_blue_boundary_deaths=bdy_b,
+        step_red_boundary_altitude_deaths=bdy_alt_r,
+        step_blue_boundary_altitude_deaths=bdy_alt_b,
+        step_red_boundary_xy_deaths=bdy_xy_r,
+        step_blue_boundary_xy_deaths=bdy_xy_b,
         step_red_collision_deaths=col_r, step_blue_collision_deaths=col_b,
+        red_reward_components=red_rc,
         red_complete_elimination_success=red_succ,
         blue_complete_elimination_success=blue_succ,
         geometry=geom, control_diagnostics=cd,
@@ -164,6 +208,10 @@ def _build_result(L, obs, gs, team_rew, term, trunc, am, atg, dc, tac,
         episode_blue_attack_deaths=ep_arrs["ep_bad"],
         episode_red_boundary_deaths=ep_arrs["ep_rbd"],
         episode_blue_boundary_deaths=ep_arrs["ep_bbd"],
+        episode_red_boundary_altitude_deaths=ep_arrs["ep_rbad"],
+        episode_blue_boundary_altitude_deaths=ep_arrs["ep_bbad"],
+        episode_red_boundary_xy_deaths=ep_arrs["ep_rbxy"],
+        episode_blue_boundary_xy_deaths=ep_arrs["ep_bbxy"],
         episode_red_friendly_collision_deaths=ep_arrs["ep_rfc"],
         episode_blue_friendly_collision_deaths=ep_arrs["ep_bfc"],
         episode_red_cross_collision_deaths=ep_arrs["ep_rcc"],
@@ -226,7 +274,10 @@ def _worker_step(envs, blue_policies, red_actions):
     am = np.empty((L, 6), np.float32); atg = np.zeros((L, 6), np.int8); dc = np.zeros((L, 6), np.int8)
     tac = np.empty((L, 2), np.int8); atk_r = np.zeros(L, np.int8); atk_b = np.zeros(L, np.int8)
     bdy_r = np.zeros(L, np.int8); bdy_b = np.zeros(L, np.int8)
+    bdy_alt_r = np.zeros(L, np.int8); bdy_alt_b = np.zeros(L, np.int8)
+    bdy_xy_r = np.zeros(L, np.int8); bdy_xy_b = np.zeros(L, np.int8)
     col_r = np.zeros(L, np.int8); col_b = np.zeros(L, np.int8)
+    red_rc = np.zeros((L, len(RED_REWARD_COMPONENT_KEYS_3V3)), np.float32)
     red_succ = np.zeros(L, bool); blue_succ = np.zeros(L, bool)
     geom = np.zeros((L, 6, 3), np.float32); cd = np.zeros((L, 6, K), np.float32)
     rc = np.empty(L, np.int8); oc = np.empty(L, np.int8)
@@ -247,11 +298,16 @@ def _worker_step(envs, blue_policies, red_actions):
             dc[i, j] = int(info["death_causes"].get(aid, 0))
             cd[i, j] = _extract_diagnostics_3v3(info["control_diagnostics"].get(aid, {}))
         _fill_geom(info, env, i, geom)
+        _fill_red_reward_components(info, i, red_rc)
         gs[i] = info["global_state"]; team_rew[i] = rewards["red_0"]
         term[i] = t; trunc[i] = tr
         tac[i, 0] = info["red_alive_count"]; tac[i, 1] = info["blue_alive_count"]
         atk_r[i] = info["attack_kills"]["red"]; atk_b[i] = info["attack_kills"]["blue"]
         bdy_r[i] = info["boundary_deaths"]["red"]; bdy_b[i] = info["boundary_deaths"]["blue"]
+        bdy_alt_r[i] = info["boundary_altitude_deaths"]["red"]
+        bdy_alt_b[i] = info["boundary_altitude_deaths"]["blue"]
+        bdy_xy_r[i] = info["boundary_xy_deaths"]["red"]
+        bdy_xy_b[i] = info["boundary_xy_deaths"]["blue"]
         col_r[i] = info["collision_deaths"]["red"]; col_b[i] = info["collision_deaths"]["blue"]
         red_succ[i] = info["red_complete_elimination_success"]
         blue_succ[i] = info["blue_complete_elimination_success"]
@@ -259,7 +315,8 @@ def _worker_step(envs, blue_policies, red_actions):
         oc[i] = encode_3v3_outcome(info["outcome"])
         _episode_fields.arrays = ep_arrs; _episode_fields(info, L, i)
     return _build_result(L, obs, gs, team_rew, term, trunc, am, atg, dc, tac,
-                         atk_r, atk_b, bdy_r, bdy_b, col_r, col_b,
+                         atk_r, atk_b, bdy_r, bdy_b, bdy_alt_r, bdy_alt_b,
+                         bdy_xy_r, bdy_xy_b, col_r, col_b, red_rc,
                          red_succ, blue_succ, geom, cd, rc, oc, ep_arrs)
 
 
@@ -271,7 +328,10 @@ def _worker_step_rules(envs, blue_policies, red_policies, modes):
     am = np.empty((L, 6), np.float32); atg = np.zeros((L, 6), np.int8); dc = np.zeros((L, 6), np.int8)
     tac = np.empty((L, 2), np.int8); atk_r = np.zeros(L, np.int8); atk_b = np.zeros(L, np.int8)
     bdy_r = np.zeros(L, np.int8); bdy_b = np.zeros(L, np.int8)
+    bdy_alt_r = np.zeros(L, np.int8); bdy_alt_b = np.zeros(L, np.int8)
+    bdy_xy_r = np.zeros(L, np.int8); bdy_xy_b = np.zeros(L, np.int8)
     col_r = np.zeros(L, np.int8); col_b = np.zeros(L, np.int8)
+    red_rc = np.zeros((L, len(RED_REWARD_COMPONENT_KEYS_3V3)), np.float32)
     red_succ = np.zeros(L, bool); blue_succ = np.zeros(L, bool)
     geom = np.zeros((L, 6, 3), np.float32); cd = np.zeros((L, 6, K), np.float32)
     rc = np.empty(L, np.int8); oc = np.empty(L, np.int8)
@@ -302,11 +362,16 @@ def _worker_step_rules(envs, blue_policies, red_policies, modes):
             dc[i, j] = int(info["death_causes"].get(aid, 0))
             cd[i, j] = _extract_diagnostics_3v3(info["control_diagnostics"].get(aid, {}))
         _fill_geom(info, env, i, geom)
+        _fill_red_reward_components(info, i, red_rc)
         gs[i] = info["global_state"]; team_rew[i] = rewards["red_0"]
         term[i] = t; trunc[i] = tr
         tac[i, 0] = info["red_alive_count"]; tac[i, 1] = info["blue_alive_count"]
         atk_r[i] = info["attack_kills"]["red"]; atk_b[i] = info["attack_kills"]["blue"]
         bdy_r[i] = info["boundary_deaths"]["red"]; bdy_b[i] = info["boundary_deaths"]["blue"]
+        bdy_alt_r[i] = info["boundary_altitude_deaths"]["red"]
+        bdy_alt_b[i] = info["boundary_altitude_deaths"]["blue"]
+        bdy_xy_r[i] = info["boundary_xy_deaths"]["red"]
+        bdy_xy_b[i] = info["boundary_xy_deaths"]["blue"]
         col_r[i] = info["collision_deaths"]["red"]; col_b[i] = info["collision_deaths"]["blue"]
         red_succ[i] = info["red_complete_elimination_success"]
         blue_succ[i] = info["blue_complete_elimination_success"]
@@ -314,7 +379,8 @@ def _worker_step_rules(envs, blue_policies, red_policies, modes):
         oc[i] = encode_3v3_outcome(info["outcome"])
         _episode_fields.arrays = ep_arrs; _episode_fields(info, L, i)
     return _build_result(L, obs, gs, team_rew, term, trunc, am, atg, dc, tac,
-                         atk_r, atk_b, bdy_r, bdy_b, col_r, col_b,
+                         atk_r, atk_b, bdy_r, bdy_b, bdy_alt_r, bdy_alt_b,
+                         bdy_xy_r, bdy_xy_b, col_r, col_b, red_rc,
                          red_succ, blue_succ, geom, cd, rc, oc, ep_arrs)
 
 

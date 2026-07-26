@@ -16,6 +16,7 @@ from .networks import CentralizedCritic, GaussianActor
 from .vector_env_3v3 import (
     VectorStepResult3v3, make_combat_vector_env_3v3,
     decode_3v3_outcome, decode_3v3_termination_reason,
+    RED_REWARD_COMPONENT_KEYS_3V3,
 )
 
 CHECKPOINT_VERSION_3V3 = 1
@@ -97,6 +98,7 @@ class FixedBlue3v3MAPPOTrainer:
         self.evaluation_history: list[dict[str, Any]] = []
         self.total_evaluation_seconds: float = 0.0
         self._timing: dict[str, float] = {"env_step": 0.0, "policy_inference": 0.0, "ppo_update": 0.0, "reset": 0.0}
+        self.last_rollout_reward_means: dict[str, float] = {}
         self.reset_environments()
 
     def reset_environments(self):
@@ -112,6 +114,8 @@ class FixedBlue3v3MAPPOTrainer:
             self.buffer = MAPPOBuffer3v3(steps, self.num_envs)
         self.buffer.clear()
         completed: list[dict[str, Any]] = []
+        reward_component_sum = np.zeros(len(RED_REWARD_COMPONENT_KEYS_3V3), dtype=np.float64)
+        reward_component_count = 0
         N = self.num_envs
 
         for _ in range(steps):
@@ -132,6 +136,8 @@ class FixedBlue3v3MAPPOTrainer:
 
             self.episode_returns += r.team_rewards
             self.episode_lengths += 1
+            reward_component_sum += r.red_reward_components.sum(axis=0)
+            reward_component_count += N
 
             done = r.terminated | r.truncated
             done_idx = np.where(done)[0]
@@ -159,6 +165,10 @@ class FixedBlue3v3MAPPOTrainer:
                         "blue_attack_deaths": int(r.episode_blue_attack_deaths[idx]),
                         "red_boundary_deaths": int(r.episode_red_boundary_deaths[idx]),
                         "blue_boundary_deaths": int(r.episode_blue_boundary_deaths[idx]),
+                        "red_boundary_altitude_deaths": int(r.episode_red_boundary_altitude_deaths[idx]),
+                        "blue_boundary_altitude_deaths": int(r.episode_blue_boundary_altitude_deaths[idx]),
+                        "red_boundary_xy_deaths": int(r.episode_red_boundary_xy_deaths[idx]),
+                        "blue_boundary_xy_deaths": int(r.episode_blue_boundary_xy_deaths[idx]),
                         "red_friendly_collision_deaths": int(r.episode_red_friendly_collision_deaths[idx]),
                         "blue_friendly_collision_deaths": int(r.episode_blue_friendly_collision_deaths[idx]),
                         "red_cross_collision_deaths": int(r.episode_red_cross_collision_deaths[idx]),
@@ -176,6 +186,10 @@ class FixedBlue3v3MAPPOTrainer:
                         total = surv + atk_d + bdy_d + fr_c + cr_c
                         if total != 3:
                             raise RuntimeError(f"Death ledger mismatch for {team}: {total} != 3 in env {idx}")
+                        if rec[f"{team}_boundary_deaths"] != (
+                            rec[f"{team}_boundary_altitude_deaths"] + rec[f"{team}_boundary_xy_deaths"]
+                        ):
+                            raise RuntimeError(f"Boundary death mismatch for {team} in env {idx}: {rec}")
                     # Validate attack kill symmetry
                     if rec["red_attack_kills"] != rec["blue_attack_deaths"]:
                         raise RuntimeError(f"red_attack_kills={rec['red_attack_kills']} != blue_attack_deaths={rec['blue_attack_deaths']}")
@@ -199,6 +213,45 @@ class FixedBlue3v3MAPPOTrainer:
             lv = self.team_critic(torch.as_tensor(self.current_global_states, device=self.device)).cpu().numpy()
         self.buffer.compute_returns_and_advantages(lv, self.config["training"]["gamma"],
                                                     self.config["training"]["gae_lambda"])
+        if reward_component_count > 0:
+            means = {
+                key: float(value)
+                for key, value in zip(
+                    RED_REWARD_COMPONENT_KEYS_3V3,
+                    reward_component_sum / reward_component_count,
+                )
+            }
+            event_reward = (
+                means["red_kill_reward"]
+                - means["red_attack_death_penalty"]
+                - means["red_boundary_death_penalty"]
+                - means["red_collision_death_penalty"]
+            )
+            self.last_rollout_reward_means = {
+                "mean_rollout_approach_reward": means["red_approach_reward"],
+                "mean_rollout_attack_advantage_reward": means["red_attack_advantage_reward"],
+                "mean_rollout_threat_penalty": means["red_threat_penalty"],
+                "mean_rollout_soft_boundary_penalty": means["red_soft_boundary_penalty"],
+                "mean_rollout_friendly_separation_penalty": means["red_friendly_separation_penalty"],
+                "mean_rollout_head_on_risk_penalty": means["red_head_on_risk_penalty"],
+                "mean_rollout_dense_reward": means["red_dense_reward"],
+                "mean_rollout_event_reward": event_reward,
+                "mean_rollout_terminal_reward": means["red_terminal_reward"],
+                "mean_rollout_total_step_reward": means["red_team_total_reward"],
+                "mean_rollout_tactical_reward": (
+                    means["red_approach_reward"]
+                    + means["red_attack_advantage_reward"]
+                    - means["red_threat_penalty"]
+                ),
+                "mean_rollout_safety_penalty": (
+                    means["red_soft_boundary_penalty"]
+                    + means["red_friendly_separation_penalty"]
+                    + means["red_head_on_risk_penalty"]
+                ),
+                "mean_rollout_event_terminal_reward": event_reward + means["red_terminal_reward"],
+            }
+        else:
+            self.last_rollout_reward_means = {}
         return completed
 
     def update(self) -> dict[str, Any]:

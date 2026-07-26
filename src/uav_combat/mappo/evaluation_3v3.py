@@ -29,6 +29,12 @@ def _summarize(summaries, elapsed):
     total = red_rate + blue_rate + draw_rate
     if abs(total - 1.0) > 1e-8:
         raise RuntimeError(f"Outcome rates sum to {total} != 1: red={red_rate:.4f} blue={blue_rate:.4f} draw={draw_rate:.4f}")
+    for s in summaries:
+        for team in ("red", "blue"):
+            if s[f"{team}_boundary_deaths"] != (
+                s[f"{team}_boundary_altitude_deaths"] + s[f"{team}_boundary_xy_deaths"]
+            ):
+                raise RuntimeError(f"Boundary death mismatch for {team}: {s}")
     return {
         "episodes": n,
         "red_complete_elimination_success_rate": r("red_complete_elimination_success"),
@@ -44,6 +50,12 @@ def _summarize(summaries, elapsed):
         "red_kd_ratio": rk / bk if bk > 0 else None,
         "mean_red_boundary_deaths": float(np.mean([s["red_boundary_deaths"] for s in summaries])),
         "mean_blue_boundary_deaths": float(np.mean([s["blue_boundary_deaths"] for s in summaries])),
+        "mean_red_boundary_altitude_deaths": float(np.mean([s["red_boundary_altitude_deaths"] for s in summaries])),
+        "mean_blue_boundary_altitude_deaths": float(np.mean([s["blue_boundary_altitude_deaths"] for s in summaries])),
+        "mean_red_boundary_xy_deaths": float(np.mean([s["red_boundary_xy_deaths"] for s in summaries])),
+        "mean_blue_boundary_xy_deaths": float(np.mean([s["blue_boundary_xy_deaths"] for s in summaries])),
+        "red_altitude_boundary_episode_rate": sum(1 for s in summaries if s["red_boundary_altitude_deaths"] > 0) / n,
+        "red_xy_boundary_episode_rate": sum(1 for s in summaries if s["red_boundary_xy_deaths"] > 0) / n,
         "mean_red_friendly_collision_deaths": float(np.mean([s["red_friendly_collision_deaths"] for s in summaries])),
         "mean_blue_friendly_collision_deaths": float(np.mean([s["blue_friendly_collision_deaths"] for s in summaries])),
         "mean_red_cross_collision_deaths": float(np.mean([s["red_cross_collision_deaths"] for s in summaries])),
@@ -90,6 +102,10 @@ def evaluate_mappo_fixed_blue_3v3(
                         "blue_attack_deaths": int(r.episode_blue_attack_deaths[gi]),
                         "red_boundary_deaths": int(r.episode_red_boundary_deaths[gi]),
                         "blue_boundary_deaths": int(r.episode_blue_boundary_deaths[gi]),
+                        "red_boundary_altitude_deaths": int(r.episode_red_boundary_altitude_deaths[gi]),
+                        "blue_boundary_altitude_deaths": int(r.episode_blue_boundary_altitude_deaths[gi]),
+                        "red_boundary_xy_deaths": int(r.episode_red_boundary_xy_deaths[gi]),
+                        "blue_boundary_xy_deaths": int(r.episode_blue_boundary_xy_deaths[gi]),
                         "red_friendly_collision_deaths": int(r.episode_red_friendly_collision_deaths[gi]),
                         "blue_friendly_collision_deaths": int(r.episode_blue_friendly_collision_deaths[gi]),
                         "red_cross_collision_deaths": int(r.episode_red_cross_collision_deaths[gi]),
@@ -144,6 +160,10 @@ def evaluate_rule_matchup_3v3(
                         "blue_attack_deaths": int(r.episode_blue_attack_deaths[gi]),
                         "red_boundary_deaths": int(r.episode_red_boundary_deaths[gi]),
                         "blue_boundary_deaths": int(r.episode_blue_boundary_deaths[gi]),
+                        "red_boundary_altitude_deaths": int(r.episode_red_boundary_altitude_deaths[gi]),
+                        "blue_boundary_altitude_deaths": int(r.episode_blue_boundary_altitude_deaths[gi]),
+                        "red_boundary_xy_deaths": int(r.episode_red_boundary_xy_deaths[gi]),
+                        "blue_boundary_xy_deaths": int(r.episode_blue_boundary_xy_deaths[gi]),
                         "red_friendly_collision_deaths": int(r.episode_red_friendly_collision_deaths[gi]),
                         "blue_friendly_collision_deaths": int(r.episode_blue_friendly_collision_deaths[gi]),
                         "red_cross_collision_deaths": int(r.episode_red_cross_collision_deaths[gi]),

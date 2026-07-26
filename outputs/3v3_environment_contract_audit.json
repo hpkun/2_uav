@@ -1,0 +1,81 @@
+{
+  "config_paths": {
+    "environment": "/mnt/c/Users/HPK/Desktop/2_uav/configs/homogeneous_3v3.yaml",
+    "reward": "/mnt/c/Users/HPK/Desktop/2_uav/configs/homogeneous_3v3_reward_v3.yaml"
+  },
+  "reward_mode": "paper_coupled_team_v2",
+  "reward_v2_mode_in_reward_config": "paper_coupled_team_v2",
+  "dt": 0.1,
+  "max_steps": 600,
+  "episode_duration_seconds": 60.0,
+  "v_min": 100.0,
+  "v_max": 250.0,
+  "theoretical_max_path_length": 15000.0,
+  "xy_physical_boundary": {
+    "x_limit": 20000.0,
+    "y_limit": 20000.0
+  },
+  "horizontal_soft_boundary_start": {
+    "x": 16000.0,
+    "y": 16000.0
+  },
+  "configured_initial_max_position_radius": 1346.291201783626,
+  "horizontal_physical_boundary_theoretically_reachable": false,
+  "nominal_closing_speed": 300.0,
+  "time_to_enter_1000m_attack_distance_seconds": {
+    "from_min_initial_distance": 1.6666666666666667,
+    "from_max_initial_distance": 5.0
+  },
+  "minimum_turn_time_seconds": {
+    "yaw_90_deg": 4.487989505128276,
+    "yaw_180_deg": 8.975979010256552
+  },
+  "initial_seed_checks": {
+    "seeds_checked": 100,
+    "red_blue_center_symmetric": true,
+    "initial_no_attack_collision_boundary": true,
+    "observed_initial_max_position_radius": 1345.1950915588993
+  },
+  "constructed_geometry_checks": {
+    "tail_chase_attack_occurs": true,
+    "head_on_attack_blocked_by_current_aa_limit": true
+  },
+  "rule_matchups": {
+    "zero_vs_pursuit": {
+      "episodes": 2,
+      "mean_red_attack_deaths": 0.0,
+      "mean_blue_attack_deaths": 0.0,
+      "mean_red_boundary_altitude_deaths": 0.0,
+      "mean_blue_boundary_altitude_deaths": 0.0,
+      "mean_red_boundary_xy_deaths": 0.0,
+      "mean_blue_boundary_xy_deaths": 0.0,
+      "mean_red_collision_deaths": 0.5,
+      "mean_blue_collision_deaths": 1.5,
+      "mean_red_survivors": 2.5,
+      "mean_blue_survivors": 1.5,
+      "max_steps_rate": 1.0,
+      "death_ledger_conserved": true,
+      "boundary_total_matches_altitude_plus_xy": true,
+      "all_rewards_and_states_finite": true
+    },
+    "pursuit_vs_pursuit": {
+      "episodes": 2,
+      "mean_red_attack_deaths": 0.0,
+      "mean_blue_attack_deaths": 0.0,
+      "mean_red_boundary_altitude_deaths": 0.0,
+      "mean_blue_boundary_altitude_deaths": 0.0,
+      "mean_red_boundary_xy_deaths": 0.0,
+      "mean_blue_boundary_xy_deaths": 0.0,
+      "mean_red_collision_deaths": 1.5,
+      "mean_blue_collision_deaths": 1.5,
+      "mean_red_survivors": 1.5,
+      "mean_blue_survivors": 1.5,
+      "max_steps_rate": 1.0,
+      "death_ledger_conserved": true,
+      "boundary_total_matches_altitude_plus_xy": true,
+      "all_rewards_and_states_finite": true
+    }
+  },
+  "all_death_ledgers_conserved": true,
+  "all_rewards_and_states_finite": true
+}

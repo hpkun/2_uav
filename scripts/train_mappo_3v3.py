@@ -10,6 +10,22 @@ from uav_combat.mappo.trainer_3v3 import (FixedBlue3v3MAPPOTrainer, compute_best
                                             CHECKPOINT_FAMILY, CHECKPOINT_VERSION_3V3)
 from uav_combat.mappo.evaluation_3v3 import evaluate_mappo_fixed_blue_3v3
 
+ROLLOUT_REWARD_FIELDS = (
+    "mean_rollout_approach_reward",
+    "mean_rollout_attack_advantage_reward",
+    "mean_rollout_threat_penalty",
+    "mean_rollout_soft_boundary_penalty",
+    "mean_rollout_friendly_separation_penalty",
+    "mean_rollout_head_on_risk_penalty",
+    "mean_rollout_dense_reward",
+    "mean_rollout_event_reward",
+    "mean_rollout_terminal_reward",
+    "mean_rollout_total_step_reward",
+    "mean_rollout_tactical_reward",
+    "mean_rollout_safety_penalty",
+    "mean_rollout_event_terminal_reward",
+)
+
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--env-config", default="configs/homogeneous_3v3.yaml")
@@ -113,6 +129,10 @@ def main():
             "mean_red_survivors": float(np.mean([r["red_survivors"] for r in records])),
             "mean_blue_survivors": float(np.mean([r["blue_survivors"] for r in records])),
             "mean_red_boundary_deaths": float(np.mean([r["red_boundary_deaths"] for r in records])),
+            "mean_red_boundary_altitude_deaths": float(np.mean([r["red_boundary_altitude_deaths"] for r in records])),
+            "mean_red_boundary_xy_deaths": float(np.mean([r["red_boundary_xy_deaths"] for r in records])),
+            "mean_blue_boundary_altitude_deaths": float(np.mean([r["blue_boundary_altitude_deaths"] for r in records])),
+            "mean_blue_boundary_xy_deaths": float(np.mean([r["blue_boundary_xy_deaths"] for r in records])),
             "mean_red_collision_deaths": float(np.mean([
                 r["red_friendly_collision_deaths"] + r["red_cross_collision_deaths"] for r in records])),
             "max_steps_rate": sum(1 for r in records if r.get("termination_reason") == "max_steps") / n,
@@ -141,6 +161,8 @@ def main():
                 "mean_red_attack_kills": np.nan, "mean_blue_attack_kills": np.nan,
                 "mean_red_survivors": np.nan, "mean_blue_survivors": np.nan,
                 "mean_red_boundary_deaths": np.nan, "mean_red_collision_deaths": np.nan,
+                "mean_red_boundary_altitude_deaths": np.nan, "mean_red_boundary_xy_deaths": np.nan,
+                "mean_blue_boundary_altitude_deaths": np.nan, "mean_blue_boundary_xy_deaths": np.nan,
                 "max_steps_rate": np.nan, "mean_episode_length": np.nan, "mean_episode_return": np.nan,
             }
 
@@ -165,10 +187,10 @@ def main():
                    "policy_inference_seconds": trainer._timing["policy_inference"],
                    "ppo_update_seconds": trainer._timing["ppo_update"],
                    "evaluation_seconds": trainer.total_evaluation_seconds,
-                   "mean_rollout_tactical_reward": np.mean([r["episode_return"] for r in completed]) if completed else np.nan,
-                   "mean_rollout_safety_penalty": np.nan,
-                   "mean_rollout_event_terminal_reward": np.nan,
                    **ep_stats}
+            for key in ROLLOUT_REWARD_FIELDS:
+                row[key] = np.nan
+            row.update(trainer.last_rollout_reward_means)
             rows.append(row)
 
             # Evaluation at milestones
@@ -188,19 +210,21 @@ def main():
                     trainer.save_checkpoint(ckpt_dir / "best.pt")
                     (eval_dir / "evaluation_best.json").write_text(json.dumps(ev, indent=2, default=str))
                 trainer.evaluation_history.append({"env_steps": trainer.env_steps, "score": list(sc), **ev})
-                # Update training rows with eval results
+                # Keep deterministic evaluation metrics separate from stochastic rollout metrics.
                 for r in rows[-1:]:
-                    r.update({"completed_episodes": ev.get("episodes", 0),
-                              "red_complete_elimination_success_rate": ev.get("red_complete_elimination_success_rate", np.nan),
-                              "mean_red_attack_kills": ev.get("mean_red_attack_kills", np.nan),
-                              "mean_blue_attack_kills": ev.get("mean_blue_attack_kills", np.nan),
-                              "mean_red_survivors": ev.get("mean_red_survivors", np.nan),
-                              "mean_blue_survivors": ev.get("mean_blue_survivors", np.nan),
-                              "mean_red_boundary_deaths": ev.get("mean_red_boundary_deaths", np.nan),
-                              "mean_red_collision_deaths": ev.get("mean_red_collision_deaths", np.nan) if isinstance(ev.get("mean_red_collision_deaths"), (int, float)) else np.nan,
-                              "max_steps_rate": ev.get("max_steps_rate", np.nan),
-                              "mean_episode_length": ev.get("mean_episode_length", np.nan),
-                              "mean_episode_return": ev.get("mean_team_return", np.nan)})
+                    r.update({
+                        "eval_episodes": ev.get("episodes", 0),
+                        "eval_red_complete_elimination_success_rate": ev.get("red_complete_elimination_success_rate", np.nan),
+                        "eval_mean_red_attack_kills": ev.get("mean_red_attack_kills", np.nan),
+                        "eval_mean_blue_attack_kills": ev.get("mean_blue_attack_kills", np.nan),
+                        "eval_mean_red_survivors": ev.get("mean_red_survivors", np.nan),
+                        "eval_mean_blue_survivors": ev.get("mean_blue_survivors", np.nan),
+                        "eval_mean_red_boundary_deaths": ev.get("mean_red_boundary_deaths", np.nan),
+                        "eval_mean_red_boundary_altitude_deaths": ev.get("mean_red_boundary_altitude_deaths", np.nan),
+                        "eval_mean_red_boundary_xy_deaths": ev.get("mean_red_boundary_xy_deaths", np.nan),
+                        "eval_draw_rate": ev.get("draw_rate", np.nan),
+                        "eval_max_steps_rate": ev.get("max_steps_rate", np.nan),
+                    })
 
             trainer.save_checkpoint(ckpt_dir / "latest.pt")
             tmd = trainer._timing
