@@ -1,0 +1,39 @@
+experiment:
+  seed: 42
+  device: auto
+  output_dir: outputs/mappo_3v3_reward_v3_stable
+
+network:
+  hidden_dim: 128
+  log_std_init: -0.5
+  log_std_min: -2.0
+  log_std_max: 0.0
+
+training:
+  training_mode: fixed_rule_blue_3v3
+  total_env_steps: 500000
+  num_envs: 8
+  num_env_workers: 4
+  rollout_steps: 256
+  ppo_epochs: 5
+  minibatch_size: 1024
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_coef: 0.2
+
+  learning_rate: 0.0003
+  learning_rate_final: 0.00003
+
+  entropy_coef: 0.01
+  entropy_coef_final: 0.001
+
+  target_kl: 0.015
+
+  value_loss_coef: 0.5
+  max_grad_norm: 0.5
+  evaluation_interval_env_steps: 100000
+  quick_evaluation_episodes: 60
+
+evaluation:
+  episodes: 60
+  deterministic: true

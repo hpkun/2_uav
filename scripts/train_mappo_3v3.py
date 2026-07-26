@@ -152,13 +152,21 @@ def main():
                    "advantage_mean": metrics["advantage_mean"],
                    "advantage_std": metrics["advantage_std"],
                    "alive_actor_sample_fraction": metrics["alive_actor_sample_fraction"],
+                   "current_learning_rate": metrics["current_learning_rate"],
+                   "current_entropy_coef": metrics["current_entropy_coef"],
+                   "effective_log_std_mean": metrics["effective_log_std_mean"],
+                   "effective_std_mean": metrics["effective_std_mean"],
+                   "actor_epochs_completed": metrics["actor_epochs_completed"],
+                   "actor_minibatches_completed": metrics["actor_minibatches_completed"],
+                   "kl_early_stop": metrics["kl_early_stop"],
+                   "max_minibatch_kl": metrics["max_minibatch_kl"],
                    "env_steps_per_second": env_sps,
                    "environment_step_seconds": trainer._timing["env_step"],
                    "policy_inference_seconds": trainer._timing["policy_inference"],
                    "ppo_update_seconds": trainer._timing["ppo_update"],
                    "evaluation_seconds": trainer.total_evaluation_seconds,
                    "mean_rollout_tactical_reward": np.mean([r["episode_return"] for r in completed]) if completed else np.nan,
-                   "mean_rollout_safety_penalty": np.nan,  # computed from reward_components if available
+                   "mean_rollout_safety_penalty": np.nan,
                    "mean_rollout_event_terminal_reward": np.nan,
                    **ep_stats}
             rows.append(row)
@@ -198,7 +206,9 @@ def main():
             tmd = trainer._timing
             print(f"update={trainer.update_count} steps={trainer.env_steps} env_sps={env_sps:.1f} "
                   f"loss={metrics['policy_loss']:.4f} val={metrics['value_loss']:.4f} "
-                  f"kl={metrics['approx_kl']:.5f}", flush=True)
+                  f"kl={metrics['approx_kl']:.5f} lr={metrics['current_learning_rate']:.2e} "
+                  f"ent_coef={metrics['current_entropy_coef']:.4f} std={metrics['effective_std_mean']:.3f} "
+                  f"act_ep={metrics['actor_epochs_completed']} kl_stop={metrics['kl_early_stop']}", flush=True)
 
             # Write metrics CSV
             if rows:
@@ -243,6 +253,14 @@ def main():
         "pure_training_seconds": elapsed_total - trainer.total_evaluation_seconds,
         "evaluation_seconds": trainer.total_evaluation_seconds,
         "environment_steps_per_second": trainer.env_steps / elapsed_total if elapsed_total > 0 else 0,
+        "learning_rate_initial": trainer.initial_learning_rate,
+        "learning_rate_final": trainer.final_learning_rate,
+        "entropy_coef_initial": trainer.initial_entropy_coef,
+        "entropy_coef_final": trainer.final_entropy_coef,
+        "target_kl": trainer.target_kl,
+        "log_std_min": trainer.red_actor.log_std_min,
+        "log_std_max": trainer.red_actor.log_std_max,
+        "kl_early_stop_count": trainer.kl_early_stop_count,
         "initial_evaluation": json.loads((eval_dir / "evaluation_initial.json").read_text()) if (eval_dir / "evaluation_initial.json").exists() else None,
         "best_evaluation": trainer.best_evaluation,
         "best_checkpoint": trainer.best_checkpoint_name,

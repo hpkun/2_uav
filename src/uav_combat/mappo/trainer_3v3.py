@@ -31,6 +31,12 @@ def resolve_device(requested: str) -> torch.device:
     return d
 
 
+def linear_schedule(start: float, end: float, progress: float) -> float:
+    """Linear interpolation with progress clipped to [0, 1]."""
+    p = float(np.clip(progress, 0.0, 1.0))
+    return start + p * (end - start)
+
+
 def compute_best_score(es: dict[str, Any]) -> tuple[float, ...]:
     """Lexicographic best: higher red_attack_success, lower blue_survivors, etc."""
     red_col = (es.get("mean_red_friendly_collision_deaths", 0.0) +
@@ -58,11 +64,24 @@ class FixedBlue3v3MAPPOTrainer:
         self.num_env_workers = int(t.get("num_env_workers", 4))
         self.rollout_steps = int(t["rollout_steps"])
         self.total_env_steps = int(t["total_env_steps"])
-        self.red_actor = GaussianActor(OBS_DIM, 3, n["hidden_dim"], n["log_std_init"]).to(self.device)
+        # Actor with configurable log_std bounds
+        log_std_min = float(n.get("log_std_min", -5.0))
+        log_std_max = float(n.get("log_std_max", 2.0))
+        self.red_actor = GaussianActor(OBS_DIM, 3, n["hidden_dim"], n["log_std_init"],
+                                       log_std_min=log_std_min, log_std_max=log_std_max).to(self.device)
         self.team_critic = CentralizedCritic(GS_DIM, n["hidden_dim"]).to(self.device)
-        lr = t["learning_rate"]
-        self.actor_optimizer = torch.optim.Adam(self.red_actor.parameters(), lr=lr)
-        self.critic_optimizer = torch.optim.Adam(self.team_critic.parameters(), lr=lr)
+        # Learning rate schedule
+        self.initial_learning_rate = float(t["learning_rate"])
+        self.final_learning_rate = float(t.get("learning_rate_final", self.initial_learning_rate * 0.1))
+        self.initial_entropy_coef = float(t.get("entropy_coef", 0.01))
+        self.final_entropy_coef = float(t.get("entropy_coef_final", self.initial_entropy_coef * 0.1))
+        self.target_kl = float(t.get("target_kl", 0.0))
+        self.current_learning_rate = self.initial_learning_rate
+        self.current_entropy_coef = self.initial_entropy_coef
+        self.actor_optimizer = torch.optim.Adam(self.red_actor.parameters(), lr=self.current_learning_rate)
+        self.critic_optimizer = torch.optim.Adam(self.team_critic.parameters(), lr=self.current_learning_rate)
+        # KL early-stop counter for run_summary
+        self.kl_early_stop_count: int = 0
         self.vector_env = make_combat_vector_env_3v3(self.env_config, self.num_envs, self.num_env_workers)
         self.buffer = MAPPOBuffer3v3(self.rollout_steps, self.num_envs)
         self.rng = np.random.default_rng(e["seed"])
@@ -185,13 +204,24 @@ class FixedBlue3v3MAPPOTrainer:
     def update(self) -> dict[str, Any]:
         t0 = time.perf_counter()
         tc = self.config["training"]
+
+        # --- Schedules ---
+        progress = float(np.clip(self.env_steps / self.total_env_steps, 0.0, 1.0))
+        self.current_learning_rate = linear_schedule(self.initial_learning_rate, self.final_learning_rate, progress)
+        self.current_entropy_coef = linear_schedule(self.initial_entropy_coef, self.final_entropy_coef, progress)
+        for pg in self.actor_optimizer.param_groups:
+            pg["lr"] = self.current_learning_rate
+        for pg in self.critic_optimizer.param_groups:
+            pg["lr"] = self.current_learning_rate
+
+        target_kl = self.target_kl
+
         obs_flat = torch.as_tensor(self.buffer.observations.reshape(-1, OBS_DIM), device=self.device)
         act_flat = torch.as_tensor(self.buffer.actions.reshape(-1, 3), device=self.device)
         old_lp_flat = torch.as_tensor(self.buffer.log_probs.reshape(-1), device=self.device)
         adv_team = torch.as_tensor(self.buffer.advantages.reshape(-1, 1), device=self.device)
         adv = adv_team.expand(-1, 3).reshape(-1)
         alive_mask = torch.as_tensor(self.buffer.agent_alive_masks.reshape(-1), device=self.device)
-        # Only alive agents for advantage normalization
         alive_adv = adv[alive_mask > 0.5]
         if len(alive_adv) > 0:
             adv_norm = (adv - alive_adv.mean()) / (alive_adv.std(unbiased=False) + 1e-8)
@@ -199,26 +229,47 @@ class FixedBlue3v3MAPPOTrainer:
             adv_norm = adv
         total_slots = len(adv); alive_slots = int((alive_mask > 0.5).sum().item())
 
+        # --- Actor update with target-KL early stop ---
         actor_data = []
-        for _ in range(tc["ppo_epochs"]):
+        actor_epochs_done = 0
+        actor_mb_done = 0
+        kl_early_stop = False
+        max_mb_kl = 0.0
+
+        for epoch_i in range(tc["ppo_epochs"]):
+            if kl_early_stop:
+                break
             order = self.rng.permutation(len(obs_flat))
+            epoch_kls = []
             for start in range(0, len(obs_flat), tc["minibatch_size"]):
                 idx = torch.as_tensor(order[start:start + tc["minibatch_size"]], device=self.device)
                 idx_alive = idx[alive_mask[idx] > 0.5]
                 if len(idx_alive) == 0: continue
                 new_lp, ent = self.red_actor.evaluate_actions(obs_flat[idx_alive], act_flat[idx_alive])
-                lr = new_lp - old_lp_flat[idx_alive]; ratio = lr.exp()
+                log_ratio = new_lp - old_lp_flat[idx_alive]; ratio = log_ratio.exp()
                 a = adv_norm[idx_alive]
                 pol_loss = -torch.minimum(ratio * a, ratio.clamp(1 - tc["clip_coef"], 1 + tc["clip_coef"]) * a).mean()
-                loss = pol_loss - tc["entropy_coef"] * ent.mean()
+                loss = pol_loss - self.current_entropy_coef * ent.mean()
                 self.actor_optimizer.zero_grad(); loss.backward()
                 grad = nn.utils.clip_grad_norm_(self.red_actor.parameters(), tc["max_grad_norm"])
                 self.actor_optimizer.step()
-                kl = ((ratio - 1) - lr).mean().item()
+                self.red_actor.clamp_log_std_()
+                kl = ((ratio - 1) - log_ratio).mean().item()
                 cf = ((ratio - 1).abs() > tc["clip_coef"]).float().mean().item()
+                if kl > max_mb_kl: max_mb_kl = kl
                 actor_data.append((pol_loss.item(), ent.mean().item(), float(grad), kl, cf, len(idx_alive)))
+                actor_mb_done += 1
+                epoch_kls.append(kl)
+                # Target-KL early stop: check after each minibatch
+                if target_kl > 0 and len(epoch_kls) > 0 and float(np.mean(epoch_kls)) > target_kl:
+                    kl_early_stop = True
+                    break
+            actor_epochs_done += 1
 
-        # Critic
+        if kl_early_stop:
+            self.kl_early_stop_count += 1
+
+        # --- Critic (always runs full epochs) ---
         st = torch.as_tensor(self.buffer.global_states.reshape(-1, GS_DIM), device=self.device)
         ret = torch.as_tensor(self.buffer.returns.reshape(-1), device=self.device)
         cl = []
@@ -247,17 +298,33 @@ class FixedBlue3v3MAPPOTrainer:
             "value_loss": float(np.mean(cl)) if cl else 0.0,
             "advantage_mean": float(alive_adv.mean()) if len(alive_adv) > 0 else 0.0,
             "advantage_std": float(alive_adv.std(unbiased=False)) if len(alive_adv) > 0 else 0.0,
+            "current_learning_rate": self.current_learning_rate,
+            "current_entropy_coef": self.current_entropy_coef,
+            "effective_log_std_mean": self.red_actor.effective_log_std_mean,
+            "effective_std_mean": self.red_actor.effective_std_mean,
+            "actor_epochs_completed": actor_epochs_done,
+            "actor_minibatches_completed": actor_mb_done,
+            "kl_early_stop": kl_early_stop,
+            "max_minibatch_kl": max_mb_kl,
         }
 
     def training_signature(self) -> dict[str, Any]:
         tc = self.config["training"]
+        nc = self.config["network"]
         sc = deepcopy(self.config)
         sc["training"].pop("total_env_steps", None); sc["training"].pop("num_env_workers", None)
+        sc["training"].pop("evaluation_interval_env_steps", None); sc["training"].pop("quick_evaluation_episodes", None)
         sc["experiment"].pop("device", None); sc["experiment"].pop("output_dir", None)
         return {"checkpoint_family": CHECKPOINT_FAMILY, "checkpoint_version": CHECKPOINT_VERSION_3V3,
                 "observation_dim": OBS_DIM, "global_state_dim": GS_DIM, "team_size": 3,
-                "network": deepcopy(self.config["network"]),
-                "ppo": {k: tc[k] for k in ("learning_rate","gamma","gae_lambda","clip_coef","entropy_coef","value_loss_coef","max_grad_norm","ppo_epochs","minibatch_size")},
+                "network": deepcopy(nc),
+                "ppo": {k: tc[k] for k in ("learning_rate","gamma","gae_lambda","clip_coef",
+                                            "value_loss_coef","max_grad_norm","ppo_epochs","minibatch_size")},
+                "learning_rate_final": self.final_learning_rate,
+                "entropy_coef_final": self.final_entropy_coef,
+                "target_kl": self.target_kl,
+                "log_std_min": nc.get("log_std_min", -5.0),
+                "log_std_max": nc.get("log_std_max", 2.0),
                 "num_envs": self.num_envs, "rollout_steps": self.rollout_steps, "config": sc}
 
     def save_checkpoint(self, path):
@@ -269,6 +336,9 @@ class FixedBlue3v3MAPPOTrainer:
                      "centralized_team_critic": self.team_critic.state_dict(),
                      "actor_optimizer": self.actor_optimizer.state_dict(),
                      "critic_optimizer": self.critic_optimizer.state_dict(),
+                     "current_learning_rate": self.current_learning_rate,
+                     "current_entropy_coef": self.current_entropy_coef,
+                     "kl_early_stop_count": self.kl_early_stop_count,
                      "best_score": self.best_score, "best_evaluation": self.best_evaluation,
                      "best_checkpoint_name": self.best_checkpoint_name,
                      "evaluation_history": self.evaluation_history,
@@ -287,6 +357,7 @@ class FixedBlue3v3MAPPOTrainer:
         self.actor_optimizer.load_state_dict(ckpt["actor_optimizer"])
         self.critic_optimizer.load_state_dict(ckpt["critic_optimizer"])
         self.env_steps = int(ckpt["env_steps"]); self.update_count = int(ckpt["update_count"])
+        self.kl_early_stop_count = int(ckpt.get("kl_early_stop_count", 0))
         self.best_score = ckpt.get("best_score"); self.best_evaluation = ckpt.get("best_evaluation")
         self.best_checkpoint_name = ckpt.get("best_checkpoint_name")
         self.evaluation_history = ckpt.get("evaluation_history", [])
@@ -295,6 +366,9 @@ class FixedBlue3v3MAPPOTrainer:
         torch.set_rng_state(ckpt["torch_cpu_rng_state"])
         if torch.cuda.is_available() and ckpt.get("torch_cuda_rng_state") is not None:
             torch.cuda.set_rng_state_all(ckpt["torch_cuda_rng_state"])
+        # Restore LR/entropy schedule state (will be recalculated on next update)
+        self.current_learning_rate = float(ckpt.get("current_learning_rate", self.initial_learning_rate))
+        self.current_entropy_coef = float(ckpt.get("current_entropy_coef", self.initial_entropy_coef))
         self.reset_environments()
 
     def close(self): self.vector_env.close()
