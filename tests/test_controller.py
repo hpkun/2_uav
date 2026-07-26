@@ -17,6 +17,60 @@ def test_paper_action_ranges_are_unchanged():
     assert controller.delta_yaw_max==np.pi
     assert controller.delta_pitch_max==np.pi/3
     assert controller.delta_speed_max==50.0
+    assert controller.mapping_mode == "legacy_delta"
+
+
+def test_legacy_delta_outputs_match_existing_values(spec):
+    controller = TargetStateController()
+    state = AircraftState(0, 0, -3000, 150, 0, 0)
+    target = controller.action_to_target(state, np.array([0.5, 0.5, 0.5]), spec)
+    assert np.isclose(angle_difference(target.desired_psi, state.psi), (np.pi - 1e-6) * 0.5)
+    assert np.isclose(target.desired_theta, np.pi / 6)
+    assert np.isclose(target.desired_v, 175.0)
+
+
+def test_rate_aligned_yaw_pitch_speed_ratios(spec):
+    controller = TargetStateController(mapping_mode="rate_aligned_v1")
+    state = AircraftState(0, 0, -3000, 150, 0, 0)
+    for yaw_action, expected in ((1.0, spec.yaw_rate_max), (-1.0, -spec.yaw_rate_max), (0.5, 0.5 * spec.yaw_rate_max)):
+        target, control = controller.control_from_action(state, np.array([yaw_action, 0.0, 0.0]), spec)
+        diag = controller.diagnostics(state, target, control, spec, np.array([yaw_action, 0.0, 0.0]))
+        assert np.isclose(diag["requested_yaw_rate"], expected)
+        assert not diag["command_yaw_rate_saturated"]
+    target, control = controller.control_from_action(state, np.array([0.0, 1.0, 1.0]), spec)
+    diag = controller.diagnostics(state, target, control, spec, np.array([0.0, 1.0, 1.0]))
+    assert np.isclose(diag["requested_pitch_rate"], spec.pitch_rate_max)
+    assert np.isclose(diag["requested_acceleration"], spec.acceleration_max)
+    assert np.isclose(diag["effective_speed_delta"], spec.acceleration_max / spec.k_speed)
+    assert not diag["command_pitch_rate_saturated"]
+    assert not diag["command_acceleration_saturated"]
+
+
+def test_rate_aligned_all_legal_actions_stay_within_command_limits(spec):
+    controller = TargetStateController(mapping_mode="rate_aligned_v1")
+    state = AircraftState(0, 0, -3000, 150, 0, 0)
+    for action in (
+        np.array([1.0, 1.0, 1.0]),
+        np.array([-1.0, -1.0, -1.0]),
+        np.array([0.75, -0.25, 0.5]),
+    ):
+        target, control = controller.control_from_action(state, action, spec)
+        diag = controller.diagnostics(state, target, control, spec, action)
+        assert diag["requested_yaw_rate_fraction"] <= 1.0 + 1e-8
+        assert diag["requested_pitch_rate_fraction"] <= 1.0 + 1e-8
+        assert diag["requested_acceleration_fraction"] <= 1.0 + 1e-8
+        assert not diag["command_yaw_rate_saturated"]
+        assert not diag["command_pitch_rate_saturated"]
+        assert not diag["command_acceleration_saturated"]
+
+
+def test_rate_aligned_can_still_hit_physical_saturation(spec):
+    controller = TargetStateController(mapping_mode="rate_aligned_v1")
+    state = AircraftState(0, 0, -3000, 150, 0, 0)
+    action = np.array([1.0, 0.0, 0.0])
+    target, control = controller.control_from_action(state, action, spec)
+    diag = controller.diagnostics(state, target, control, spec, action)
+    assert diag["nz_saturated"] or diag["phi_saturated"] or diag["nx_saturated"]
 
 
 def test_yaw_sign_and_limits(spec):

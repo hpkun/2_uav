@@ -15,6 +15,7 @@ from uav_combat.mappo.vector_env_3v3 import (
 )
 
 CONFIG = Path(__file__).parents[1] / "configs" / "homogeneous_3v3.yaml"
+CONFIG_V4 = Path(__file__).parents[1] / "configs" / "homogeneous_3v3_learnable_v4.yaml"
 
 
 def _set(env, aid, x, y, z=-3000.0, v=150.0, psi=0.0):
@@ -568,7 +569,8 @@ class TestEnvironmentAudit3v3:
         from scripts.audit_environment_contract_3v3 import _initial_geometry_audit
         root = Path(__file__).parents[1]
         for cfg in (root / "configs" / "homogeneous_3v3.yaml",
-                    root / "configs" / "homogeneous_3v3_reward_v3.yaml"):
+                    root / "configs" / "homogeneous_3v3_reward_v3.yaml",
+                    root / "configs" / "homogeneous_3v3_learnable_v4.yaml"):
             result = _initial_geometry_audit(cfg, seeds=2)
             assert result["nearest_enemy_distance_m"]["count"] == 6
             assert result["initial_closing_speed_mps"]["count"] == 6
@@ -610,6 +612,102 @@ class TestEnvironmentAudit3v3:
         assert climb["state_crossing_time"] is not None
         assert dive["time_to_soft_boundary"] is not None
         assert dive["state_crossing_time"] is not None
+
+    def test_v4_config_uses_rate_aligned_mapping(self):
+        env = Homogeneous3v3AirCombatEnv(CONFIG_V4)
+        assert env.controller.mapping_mode == "rate_aligned_v1"
+        assert Homogeneous3v3AirCombatEnv(CONFIG).controller.mapping_mode == "legacy_delta"
+
+    def test_v4_reward_and_attack_envelope_match_base(self):
+        from uav_combat.config import load_config
+        base = load_config(CONFIG)
+        v4 = load_config(CONFIG_V4)
+        assert v4["reward_v2"] == base["reward_v2"]
+        for key in ("attack_distance_min", "attack_distance_max", "attack_ata_max", "attack_aa_max"):
+            assert v4["combat"][key] == base["combat"][key]
+
+    def test_v4_observation_and_global_state_dims_unchanged(self):
+        env = Homogeneous3v3AirCombatEnv(CONFIG_V4)
+        obs, info = env.reset(0)
+        assert obs["red_0"].shape == (68,)
+        assert info["global_state"].shape == (48,)
+
+    def test_v4_initial_distance_and_entry_time_exceed_base(self):
+        from scripts.audit_environment_contract_3v3 import (
+            _initial_geometry_audit,
+            _zero_vs_zero_attack_distance_audit,
+        )
+        base_dist = _initial_geometry_audit(CONFIG, seeds=10)["nearest_enemy_distance_m"]["mean"]
+        v4_dist = _initial_geometry_audit(CONFIG_V4, seeds=10)["nearest_enemy_distance_m"]["mean"]
+        base_time = _zero_vs_zero_attack_distance_audit(CONFIG, seeds=10)["mean"]
+        v4_time = _zero_vs_zero_attack_distance_audit(CONFIG_V4, seeds=10)["mean"]
+        assert v4_dist > base_dist
+        assert v4_time > base_time
+
+    def test_v4_initial_100_seeds_clean(self):
+        from scripts.audit_environment_contract_3v3 import _initial_geometry_audit
+        result = _initial_geometry_audit(CONFIG_V4, seeds=100)
+        assert result["initial_no_attack_collision_boundary"]
+
+    def test_v4_action_mapping_audit_monotonic_at_150mps(self):
+        from scripts.audit_environment_contract_3v3 import _action_mapping_audit
+        result = _action_mapping_audit(CONFIG_V4)["speeds"]["150_mps"]
+        assert result["requested_yaw_rate_monotonic"]
+        assert result["actual_yaw_rate_monotonic"]
+        assert result["requested_pitch_rate_monotonic"]
+        assert result["actual_pitch_rate_monotonic"]
+        assert result["requested_acceleration_monotonic"]
+        assert result["actual_acceleration_monotonic"]
+        assert result["unique_actual_yaw_response_count"] > 3
+
+    def test_build_audit_includes_three_configs_with_complete_structure(self, tmp_path, monkeypatch):
+        import scripts.audit_environment_contract_3v3 as audit
+
+        def fake_config(path, episodes, num_envs, env_workers, strict_complete=True):
+            return {
+                "config_path": str(path),
+                "rule_matchups": {
+                    "zero_vs_pursuit": {
+                        "episodes_requested": episodes, "episodes_completed": episodes,
+                        "all_rewards_finite": True, "all_observations_finite": True,
+                        "all_global_states_finite": True, "death_ledger_conserved": True,
+                        "boundary_total_matches_altitude_plus_xy": True,
+                    },
+                    "pursuit_vs_pursuit": {
+                        "episodes_requested": episodes, "episodes_completed": episodes,
+                        "all_rewards_finite": True, "all_observations_finite": True,
+                        "all_global_states_finite": True, "death_ledger_conserved": True,
+                        "boundary_total_matches_altitude_plus_xy": True,
+                    },
+                },
+                "horizontal_physical_boundary_theoretically_reachable": False,
+                "maneuver_control_audit": {"150_mps": {"max_positive_yaw": {
+                    "maximum_actual_yaw_rate": 0.1,
+                    "configured_yaw_command_rate_limit": 0.35,
+                }}},
+                "altitude_control_audit": {"150_mps": {"climb": {
+                    "time_to_upper_soft_boundary": {"time_to_soft_boundary": 1.0},
+                    "time_to_upper_physical_boundary": {"state_crossing_time": 2.0},
+                }, "dive": {
+                    "time_to_lower_soft_boundary": {"time_to_soft_boundary": 1.0},
+                    "time_to_lower_physical_boundary": {"state_crossing_time": 2.0},
+                }}},
+                "scenario_timescale_comparison": {
+                    "turn_90_to_first_merge_ratio": 1.0,
+                    "turn_180_to_first_merge_ratio": 2.0,
+                },
+            }
+
+        monkeypatch.setattr(audit, "audit_config", fake_config)
+        data = audit.build_audit(100, 8, 4, tmp_path / "audit.json", generated_by_test=True)
+        assert set(data["config_audits"]) == {
+            "homogeneous_3v3",
+            "homogeneous_3v3_reward_v3",
+            "homogeneous_3v3_learnable_v4",
+        }
+        for cfg in data["config_audits"].values():
+            for matchup in cfg["rule_matchups"].values():
+                assert matchup["episodes_requested"] == matchup["episodes_completed"] == 100
 
 
 class TestScenarioOffset:

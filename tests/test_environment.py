@@ -94,7 +94,7 @@ def test_legacy_coupled_reward_mode_and_control_diagnostics():
     assert np.isclose(rewards["red_0"],-rewards["blue_0"])
     assert set(info["reward_terms"]["red_0"])=={"dense","terminal"}
     for diagnostics in info["control_diagnostics"].values():
-        numeric=[value for value in diagnostics.values() if not isinstance(value,(bool,np.bool_))]
+        numeric=[value for value in diagnostics.values() if not isinstance(value,(bool,np.bool_,str))]
         assert np.isfinite(numeric).all()
         assert env.aircraft[0].spec.nx_min<=diagnostics["nx"]<=env.aircraft[0].spec.nx_max
         assert env.aircraft[0].spec.nz_min<=diagnostics["nz"]<=env.aircraft[0].spec.nz_max

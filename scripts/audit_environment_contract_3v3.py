@@ -18,9 +18,10 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIGS = (
     ROOT / "configs" / "homogeneous_3v3.yaml",
     ROOT / "configs" / "homogeneous_3v3_reward_v3.yaml",
+    ROOT / "configs" / "homogeneous_3v3_learnable_v4.yaml",
 )
 DEFAULT_OUTPUT = ROOT / "outputs" / "3v3_environment_contract_audit.json"
-AUDIT_VERSION = "3v3_contract_audit_v2"
+AUDIT_VERSION = "3v3_contract_audit_v4"
 
 
 def _stats(values: list[float]) -> dict[str, Any]:
@@ -235,7 +236,7 @@ def _run_isolated_control(config_path: Path, speed: float, action: np.ndarray,
     nx_sat: list[bool] = []
     for _ in range(steps):
         target, control = env.controller.control_from_action(state, action, spec)
-        diag = env.controller.diagnostics(state, target, control, spec)
+        diag = env.controller.diagnostics(state, target, control, spec, action)
         deriv = env.dynamics.derivatives(state, control)
         yaw_rates.append(float(deriv[5]))
         pitch_rates.append(float(deriv[4]))
@@ -331,6 +332,100 @@ def _maneuver_audit(config_path: Path) -> dict[str, Any]:
             "max_dive": _pitch_case(config_path, speed, np.array([0.0, -1.0, 0.0], dtype=np.float32)),
             "neutral": _pitch_case(config_path, speed, np.array([0.0, 0.0, 0.0], dtype=np.float32)),
         }
+    return result
+
+
+def _single_action_response(config_path: Path, speed: float, action: np.ndarray) -> dict[str, Any]:
+    env = Homogeneous3v3AirCombatEnv(config_path)
+    env.reset(0)
+    spec = env.scenario.spec
+    state = env._aircraft_by_id("red_0").state.copy()
+    state.x = 0.0
+    state.y = 0.0
+    state.z = -3000.0
+    state.v = float(speed)
+    state.theta = 0.0
+    state.psi = 0.0
+    state.alive = True
+    target, control = env.controller.control_from_action(state, action, spec)
+    diag = env.controller.diagnostics(state, target, control, spec, action)
+    deriv = env.dynamics.derivatives(state, control)
+    return {
+        "action": [float(v) for v in np.asarray(action, dtype=float)],
+        "requested_yaw_rate": float(diag["requested_yaw_rate"]),
+        "requested_pitch_rate": float(diag["requested_pitch_rate"]),
+        "requested_acceleration": float(diag["requested_acceleration"]),
+        "actual_initial_yaw_rate": float(deriv[5]),
+        "actual_initial_pitch_rate": float(deriv[4]),
+        "actual_initial_acceleration": float(deriv[3]),
+        "command_yaw_rate_saturated": bool(diag["command_yaw_rate_saturated"]),
+        "command_pitch_rate_saturated": bool(diag["command_pitch_rate_saturated"]),
+        "command_acceleration_saturated": bool(diag["command_acceleration_saturated"]),
+        "nx_saturated": bool(diag["nx_saturated"]),
+        "nz_saturated": bool(diag["nz_saturated"]),
+        "phi_saturated": bool(diag["phi_saturated"]),
+        "action_mapping_mode": str(diag["action_mapping_mode"]),
+    }
+
+
+def _monotonic(values: list[float], tolerance: float = 1e-8) -> bool:
+    return all(values[i] <= values[i + 1] + tolerance for i in range(len(values) - 1))
+
+
+def _unique_count(values: list[float], decimals: int = 8) -> int:
+    return len({round(float(v), decimals) for v in values})
+
+
+def _axis_action(axis: str, magnitude: float) -> np.ndarray:
+    arr = np.zeros(3, dtype=np.float32)
+    arr[{"yaw": 0, "pitch": 1, "speed": 2}[axis]] = float(magnitude)
+    return arr
+
+
+def _action_mapping_audit(config_path: Path) -> dict[str, Any]:
+    magnitudes = [0.0, 0.10, 0.25, 0.50, 0.75, 1.00]
+    result: dict[str, Any] = {
+        "magnitudes": magnitudes,
+        "speeds": {},
+    }
+    for speed in (100.0, 150.0, 250.0):
+        speed_key = f"{int(speed)}_mps"
+        speed_result: dict[str, Any] = {}
+        for axis in ("yaw", "pitch", "speed"):
+            samples = []
+            positive_requested = []
+            positive_actual = []
+            for sign in (-1.0, 1.0):
+                for magnitude in magnitudes:
+                    action = _axis_action(axis, sign * magnitude)
+                    response = _single_action_response(config_path, speed, action)
+                    response["sign"] = int(sign)
+                    response["magnitude"] = float(magnitude)
+                    samples.append(response)
+                    if sign > 0:
+                        if axis == "yaw":
+                            positive_requested.append(abs(response["requested_yaw_rate"]))
+                            positive_actual.append(abs(response["actual_initial_yaw_rate"]))
+                        elif axis == "pitch":
+                            positive_requested.append(abs(response["requested_pitch_rate"]))
+                            positive_actual.append(abs(response["actual_initial_pitch_rate"]))
+                        else:
+                            positive_requested.append(abs(response["requested_acceleration"]))
+                            positive_actual.append(abs(response["actual_initial_acceleration"]))
+            speed_result[axis] = {"samples": samples}
+            if axis == "yaw":
+                speed_result["requested_yaw_rate_monotonic"] = _monotonic(positive_requested)
+                speed_result["actual_yaw_rate_monotonic"] = _monotonic(positive_actual)
+                speed_result["unique_actual_yaw_response_count"] = _unique_count(positive_actual)
+            elif axis == "pitch":
+                speed_result["requested_pitch_rate_monotonic"] = _monotonic(positive_requested)
+                speed_result["actual_pitch_rate_monotonic"] = _monotonic(positive_actual)
+                speed_result["unique_actual_pitch_response_count"] = _unique_count(positive_actual)
+            else:
+                speed_result["requested_acceleration_monotonic"] = _monotonic(positive_requested)
+                speed_result["actual_acceleration_monotonic"] = _monotonic(positive_actual)
+                speed_result["unique_actual_acceleration_response_count"] = _unique_count(positive_actual)
+        result["speeds"][speed_key] = speed_result
     return result
 
 
@@ -558,6 +653,7 @@ def audit_config(config_path: Path, episodes: int, num_envs: int, env_workers: i
     initial = _initial_geometry_audit(config_path)
     actual_time = _zero_vs_zero_attack_distance_audit(config_path)
     maneuver = _maneuver_audit(config_path)
+    action_mapping = _action_mapping_audit(config_path)
     altitude = _altitude_control_audit(config_path)
     matchups = {
         "zero_vs_pursuit": _run_rule_matchup(config_path, "zero", "pursuit", episodes, num_envs, env_workers, strict_complete),
@@ -582,6 +678,7 @@ def audit_config(config_path: Path, episodes: int, num_envs: int, env_workers: i
         "nominal_centerline_time_to_attack_distance_seconds": nominal,
         "initial_seed_checks": initial,
         "actual_time_to_attack_distance_seconds": actual_time,
+        "action_mapping_audit": action_mapping,
         "maneuver_control_audit": maneuver,
         "altitude_control_audit": altitude,
         "constructed_geometry_checks": _constructed_geometry_checks(config_path),

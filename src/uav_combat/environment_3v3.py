@@ -201,7 +201,7 @@ class Homogeneous3v3AirCombatEnv:
             aid = aircraft.aircraft_id
             tgt, ctrl = self.controller.control_from_action(old_states[aid], actions[aid], aircraft.spec)
             targets[aid], controls[aid] = tgt, ctrl
-            diag = self.controller.diagnostics(old_states[aid], tgt, ctrl, aircraft.spec)
+            diag = self.controller.diagnostics(old_states[aid], tgt, ctrl, aircraft.spec, actions[aid])
             deriv = self.dynamics.derivatives(old_states[aid], ctrl)
             aa, apr, ayr = map(float, deriv[3:6])
             diag.update({"actual_acceleration": aa, "actual_pitch_rate": apr, "actual_yaw_rate": ayr,

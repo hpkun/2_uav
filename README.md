@@ -36,6 +36,16 @@ The 1v1 self-play experiment is retained as an **auxiliary experiment**. It is n
 - Best checkpoint ordered by red complete elimination success rate.
 - TAM-HAPPO and BRMA-MAPPO are reserved for later heterogeneous and variable-scale stages.
 
+### Learnability calibration v4
+
+`configs/homogeneous_3v3_learnable_v4.yaml` is an isolated environment-design calibration, not a replacement for historical experiments. Existing configurations keep the default `legacy_delta` action mapping for reproducibility.
+
+The v4 configuration uses `rate_aligned_v1`, where the full normalized action range maps to the configured command-rate limits: yaw to `±yaw_rate_max`, pitch to `±pitch_rate_max`, and speed to `±acceleration_max`. This removes command-layer saturation caused by oversized target-state deltas, but it does not remove real physical limits from load factor, roll angle, speed, or pitch constraints.
+
+The v4 initial separation is widened to 3500-5000 m so first entry into the 1000 m near-combat region is closer to the measured turn-time scale. It keeps the same reward parameters, attack model, observation, global state, MAPPO network, and MAPPO training hyperparameters as the base 3v3 configuration. It is still not a strict reproduction of the MADSAC paper environment.
+
+Early training or exploratory policies may still show collisions, boundary deaths, zero kills, large action magnitudes, all-aircraft losses, and volatile returns. Those observations alone are not treated as environment implementation errors. Environment errors should be judged from finite-state failures, finite-reward failures, broken interfaces, non-conserved death ledgers, duplicate deaths, or reproducible logical contradictions.
+
 ### Architecture
 
 | Component | Dim | Notes |

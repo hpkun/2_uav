@@ -73,7 +73,10 @@ class HomogeneousAirCombatEnv:
                 old_states[aircraft.aircraft_id], actions[aircraft.aircraft_id], aircraft.spec
             )
             targets[aircraft.aircraft_id], controls[aircraft.aircraft_id] = target, control
-            diagnostics = self.controller.diagnostics(old_states[aircraft.aircraft_id], target, control, aircraft.spec)
+            diagnostics = self.controller.diagnostics(
+                old_states[aircraft.aircraft_id], target, control, aircraft.spec,
+                actions[aircraft.aircraft_id],
+            )
             derivatives = self.dynamics.derivatives(old_states[aircraft.aircraft_id], control)
             actual_acceleration, actual_pitch_rate, actual_yaw_rate = map(float, derivatives[3:6])
             diagnostics.update({
@@ -91,7 +94,11 @@ class HomogeneousAirCombatEnv:
             })
             clipped_action = np.clip(np.asarray(actions[aircraft.aircraft_id], dtype=float), -1.0, 1.0)
             diagnostics.update({"action_yaw": float(clipped_action[0]), "action_pitch": float(clipped_action[1]), "action_speed": float(clipped_action[2]), "delta_yaw": float(angle_difference(target.desired_psi, old_states[aircraft.aircraft_id].psi)), "delta_pitch": float(target.desired_theta-old_states[aircraft.aircraft_id].theta), "delta_speed": float(target.desired_v-old_states[aircraft.aircraft_id].v)})
-            if not np.all(np.isfinite([value for value in diagnostics.values() if not isinstance(value, (bool, np.bool_))])):
+            numeric_values = [
+                value for value in diagnostics.values()
+                if not isinstance(value, (bool, np.bool_, str))
+            ]
+            if not np.all(np.isfinite(numeric_values)):
                 raise FloatingPointError("non-finite control diagnostics")
             control_diagnostics[aircraft.aircraft_id] = diagnostics
         new_states = {
