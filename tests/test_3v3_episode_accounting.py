@@ -491,21 +491,125 @@ class TestEnvironmentAudit3v3:
         assert '"mean_rollout_tactical_reward"' in text
         assert '"red_complete_elimination_success_rate": ev.get' not in text
 
-    def test_environment_contract_audit_script_completes_and_ledgers_balance(self):
-        from scripts.audit_environment_contract_3v3 import main, OUTPUT
-        import os
-        os.environ["UAV_3V3_AUDIT_EPISODES"] = "2"
-        os.environ["UAV_3V3_AUDIT_NUM_ENVS"] = "2"
-        os.environ["UAV_3V3_AUDIT_WORKERS"] = "1"
-        main()
-        os.environ.pop("UAV_3V3_AUDIT_EPISODES", None)
-        os.environ.pop("UAV_3V3_AUDIT_NUM_ENVS", None)
-        os.environ.pop("UAV_3V3_AUDIT_WORKERS", None)
-        data = __import__("json").loads(OUTPUT.read_text(encoding="utf-8"))
-        assert data["all_death_ledgers_conserved"]
-        assert data["all_rewards_and_states_finite"]
-        for result in data["rule_matchups"].values():
-            assert result["boundary_total_matches_altitude_plus_xy"]
+    def test_audit_output_uses_tmp_path_and_marks_test(self, tmp_path, monkeypatch):
+        import scripts.audit_environment_contract_3v3 as audit
+        formal = Path("outputs/3v3_environment_contract_audit.json")
+        before = formal.read_bytes() if formal.exists() else None
+        out = tmp_path / "audit.json"
+
+        def fake_config(path, episodes, num_envs, env_workers, strict_complete=True):
+            return {
+                "config_path": str(path),
+                "rule_matchups": {
+                    "zero_vs_pursuit": {
+                        "episodes_requested": episodes, "episodes_completed": episodes,
+                        "all_rewards_finite": True, "all_observations_finite": True,
+                        "all_global_states_finite": True, "death_ledger_conserved": True,
+                        "boundary_total_matches_altitude_plus_xy": True,
+                    },
+                    "pursuit_vs_pursuit": {
+                        "episodes_requested": episodes, "episodes_completed": episodes,
+                        "all_rewards_finite": True, "all_observations_finite": True,
+                        "all_global_states_finite": True, "death_ledger_conserved": True,
+                        "boundary_total_matches_altitude_plus_xy": True,
+                    },
+                },
+                "horizontal_physical_boundary_theoretically_reachable": False,
+                "maneuver_control_audit": {"150_mps": {"max_positive_yaw": {
+                    "maximum_actual_yaw_rate": 0.1,
+                    "configured_yaw_command_rate_limit": 0.35,
+                }}},
+                "altitude_control_audit": {"150_mps": {"climb": {
+                    "time_to_upper_soft_boundary": {"time_to_soft_boundary": 1.0},
+                    "time_to_upper_physical_boundary": {"state_crossing_time": 2.0},
+                }, "dive": {
+                    "time_to_lower_soft_boundary": {"time_to_soft_boundary": 1.0},
+                    "time_to_lower_physical_boundary": {"state_crossing_time": 2.0},
+                }}},
+                "scenario_timescale_comparison": {
+                    "turn_90_to_first_merge_ratio": 1.0,
+                    "turn_180_to_first_merge_ratio": 2.0,
+                },
+            }
+
+        monkeypatch.setattr(audit, "audit_config", fake_config)
+        data = audit.build_audit(2, 2, 1, out, generated_by_test=True, config_paths=(CONFIG,))
+        audit.write_audit(data, out)
+        saved = __import__("json").loads(out.read_text(encoding="utf-8"))
+        assert saved["generated_by_test"] is True
+        assert saved["episodes_requested"] == 2
+        if before is not None:
+            assert formal.read_bytes() == before
+
+    def test_incomplete_episodes_raise(self, tmp_path, monkeypatch):
+        import scripts.audit_environment_contract_3v3 as audit
+
+        def fake_config(path, episodes, num_envs, env_workers, strict_complete=True):
+            return {
+                "rule_matchups": {
+                    "zero_vs_pursuit": {
+                        "episodes_requested": episodes, "episodes_completed": episodes - 1,
+                        "all_rewards_finite": True, "all_observations_finite": True,
+                        "all_global_states_finite": True, "death_ledger_conserved": True,
+                        "boundary_total_matches_altitude_plus_xy": True,
+                    }
+                },
+                "horizontal_physical_boundary_theoretically_reachable": False,
+                "maneuver_control_audit": {},
+                "altitude_control_audit": {},
+                "scenario_timescale_comparison": {},
+            }
+
+        monkeypatch.setattr(audit, "audit_config", fake_config)
+        with pytest.raises(RuntimeError, match="did not complete"):
+            audit.build_audit(2, 2, 1, tmp_path / "audit.json", generated_by_test=True, config_paths=(CONFIG,))
+
+    def test_both_configs_can_be_instantiated_for_initial_geometry(self):
+        from scripts.audit_environment_contract_3v3 import _initial_geometry_audit
+        root = Path(__file__).parents[1]
+        for cfg in (root / "configs" / "homogeneous_3v3.yaml",
+                    root / "configs" / "homogeneous_3v3_reward_v3.yaml"):
+            result = _initial_geometry_audit(cfg, seeds=2)
+            assert result["nearest_enemy_distance_m"]["count"] == 6
+            assert result["initial_closing_speed_mps"]["count"] == 6
+
+    def test_nominal_and_actual_time_fields_are_distinct(self, tmp_path, monkeypatch):
+        import scripts.audit_environment_contract_3v3 as audit
+        real_audit_config = audit.audit_config
+
+        def one_config(path, episodes, num_envs, env_workers, strict_complete=True):
+            return real_audit_config(path, 1, 1, 1, strict_complete)
+
+        monkeypatch.setattr(audit, "audit_config", one_config)
+        data = audit.build_audit(1, 1, 1, tmp_path / "audit.json", generated_by_test=True, config_paths=(CONFIG,))
+        cfg = data["config_audits"][CONFIG.stem]
+        assert "nominal_centerline_time_to_attack_distance_seconds" in cfg
+        assert "actual_time_to_attack_distance_seconds" in cfg
+        assert "time_to_enter_1000m_attack_distance_seconds" not in cfg
+
+    def test_nearest_distance_uses_true_3d_distance_and_closing_dot_product(self):
+        from scripts.audit_environment_contract_3v3 import _radial_closing_speed
+        rel_pos = np.array([3.0, 4.0, 12.0])
+        rel_vel = np.array([-6.0, -8.0, -24.0])
+        assert np.isclose(np.linalg.norm(rel_pos), 13.0)
+        assert np.isclose(_radial_closing_speed(rel_pos, rel_vel), 26.0)
+
+    def test_real_yaw_rate_uses_unwrapped_heading_and_is_below_command_limit(self):
+        from scripts.audit_environment_contract_3v3 import _yaw_case
+        result = _yaw_case(CONFIG, 150.0, np.array([1.0, 0.0, 0.0], dtype=np.float32))
+        assert result["used_unwrapped_heading"]
+        assert result["actual_initial_yaw_rate"] < 0.35
+        assert result["time_to_180_deg"] > 8.98
+        assert result["nz_saturation_fraction"] > 0 or result["phi_saturation_fraction"] > 0
+
+    def test_altitude_boundary_times_are_recorded(self):
+        from scripts.audit_environment_contract_3v3 import _altitude_boundary_case
+        climb = _altitude_boundary_case(CONFIG, 150.0, np.array([0.0, 1.0, 0.0], dtype=np.float32), True)
+        dive = _altitude_boundary_case(CONFIG, 150.0, np.array([0.0, -1.0, 0.0], dtype=np.float32), False)
+        assert climb["time_to_soft_boundary"] is not None
+        assert climb["state_crossing_time"] is not None
+        assert dive["time_to_soft_boundary"] is not None
+        assert dive["state_crossing_time"] is not None
 
 
 class TestScenarioOffset:
