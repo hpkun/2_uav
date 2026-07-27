@@ -1,0 +1,72 @@
+{
+  "checkpoint_family": "homogeneous_3v3_madsac_fixed_blue",
+  "checkpoint_version": 1,
+  "device": "cuda",
+  "actual_environment_steps": 4096,
+  "updates": 385,
+  "num_envs": 8,
+  "num_env_workers": 4,
+  "rule_policy_mapping_modes": {
+    "blue": [
+      "rate_aligned_v1",
+      "rate_aligned_v1",
+      "rate_aligned_v1",
+      "rate_aligned_v1",
+      "rate_aligned_v1",
+      "rate_aligned_v1",
+      "rate_aligned_v1",
+      "rate_aligned_v1"
+    ],
+    "red": [
+      "rate_aligned_v1",
+      "rate_aligned_v1",
+      "rate_aligned_v1",
+      "rate_aligned_v1",
+      "rate_aligned_v1",
+      "rate_aligned_v1",
+      "rate_aligned_v1",
+      "rate_aligned_v1"
+    ]
+  },
+  "metrics_rows": 2,
+  "metrics_finite": true,
+  "checkpoints": {
+    "initial.pt": true,
+    "latest.pt": true,
+    "final.pt": true,
+    "best.pt": true
+  },
+  "final_metrics": {
+    "env_steps": 4096,
+    "updates": 385,
+    "completed_episodes": 5,
+    "elapsed_seconds": 11.746394688991131,
+    "critic_loss": 6.271762847900391,
+    "actor_loss": -3.1060187816619873,
+    "q1_mean": 2.072861909866333,
+    "q2_mean": 2.0933048725128174,
+    "target_q_mean": 2.023876905441284,
+    "log_prob_sum_mean": -4.940130233764648,
+    "critic_grad_norm": 1.5433119535446167,
+    "actor_grad_norm": 0.3471056818962097,
+    "alpha": 0.2,
+    "replay_size": 4096.0,
+    "effective_log_std_mean": -0.39095640182495117,
+    "effective_std_mean": 0.6764098405838013
+  },
+  "final_evaluation": {
+    "episodes": 8,
+    "environment_red_outcome_rate": 0.0,
+    "environment_blue_outcome_rate": 1.0,
+    "draw_rate": 0.0,
+    "max_steps_rate": 0.0,
+    "mean_episode_length": 262.75,
+    "mean_red_attack_kills": 0.0,
+    "mean_blue_attack_kills": 3.0,
+    "mean_red_survivors": 0.0,
+    "mean_blue_survivors": 3.0,
+    "all_episode_fields_finite": true,
+    "evaluation_seconds": 5.776198945008218
+  },
+  "total_seconds": 19.886211920995265
+}

@@ -1,0 +1,165 @@
+device=cuda num_envs=8 workers=4 rule_modes={'blue': ['rate_aligned_v1', 'rate_aligned_v1', 'rate_aligned_v1', 'rate_aligned_v1', 'rate_aligned_v1', 'rate_aligned_v1', 'rate_aligned_v1', 'rate_aligned_v1'], 'red': ['rate_aligned_v1', 'rate_aligned_v1', 'rate_aligned_v1', 'rate_aligned_v1', 'rate_aligned_v1', 'rate_aligned_v1', 'rate_aligned_v1', 'rate_aligned_v1']}
+{"env_steps": 2048, "vector_steps": 256, "replay_size": 2048.0, "critic_updates": 129, "actor_updates": 64, "environment_steps_per_second": 106.47812876675896, "critic1_loss": 0.006684188265353441, "critic2_loss": 0.0073933652602136135, "actor_loss": 0.0, "q1_mean": 0.17169994115829468, "q2_mean": 0.19005943834781647, "target_q_mean": 0.2024727612733841, "q1_q2_abs_gap": 0.024900691583752632, "td_error_abs_mean": 0.06267230212688446, "sampled_log_prob_mean": 0.0, "deterministic_action_abs_mean": 0.0, "stochastic_action_abs_mean": 0.0, "action_saturation_fraction": 0.0, "actor_grad_norm": 0.0, "critic1_grad_norm": 0.12527905404567719, "critic2_grad_norm": 0.08437935262918472, "alpha": 0.1, "actor_updated": false, "target_updated": false, "completed_episodes": 0, "red_complete_elimination_success_rate": NaN, "mean_red_attack_kills": NaN, "mean_blue_attack_kills": NaN, "mean_red_survivors": NaN, "mean_blue_survivors": NaN, "mean_red_boundary_deaths": NaN, "mean_red_collision_deaths": NaN, "max_steps_rate": NaN, "mean_episode_length": NaN, "mean_episode_return": NaN}
+{"env_steps": 4096, "vector_steps": 512, "replay_size": 4096.0, "critic_updates": 385, "actor_updates": 192, "environment_steps_per_second": 155.7618645662869, "critic1_loss": 4.074709415435791, "critic2_loss": 5.027657985687256, "actor_loss": 0.0, "q1_mean": 0.07337448000907898, "q2_mean": -0.0007334463880397379, "target_q_mean": 0.047649942338466644, "q1_q2_abs_gap": 0.22510027885437012, "td_error_abs_mean": 0.38571897149086, "sampled_log_prob_mean": 0.0, "deterministic_action_abs_mean": 0.0, "stochastic_action_abs_mean": 0.0, "action_saturation_fraction": 0.0, "actor_grad_norm": 0.0, "critic1_grad_norm": 6.696763038635254, "critic2_grad_norm": 8.674038887023926, "alpha": 0.1, "actor_updated": false, "target_updated": false, "completed_episodes": 7, "red_complete_elimination_success_rate": 0.0, "mean_red_attack_kills": 0.0, "mean_blue_attack_kills": 0.7142857142857143, "mean_red_survivors": 0.0, "mean_blue_survivors": 2.142857142857143, "mean_red_boundary_deaths": 2.2857142857142856, "mean_red_collision_deaths": 0.0, "max_steps_rate": 0.0, "mean_episode_length": 463.7142857142857, "mean_episode_return": -103.9953207933847}
+{"env_steps": 6144, "vector_steps": 768, "replay_size": 6144.0, "critic_updates": 641, "actor_updates": 320, "environment_steps_per_second": 172.11076965233812, "critic1_loss": 4.843544960021973, "critic2_loss": 6.0742363929748535, "actor_loss": 0.0, "q1_mean": 0.15636202692985535, "q2_mean": 0.13076350092887878, "target_q_mean": 0.062271278351545334, "q1_q2_abs_gap": 0.13140590488910675, "td_error_abs_mean": 0.25834429264068604, "sampled_log_prob_mean": 0.0, "deterministic_action_abs_mean": 0.0, "stochastic_action_abs_mean": 0.0, "action_saturation_fraction": 0.0, "actor_grad_norm": 0.0, "critic1_grad_norm": 25.419038772583008, "critic2_grad_norm": 1.913874626159668, "alpha": 0.1, "actor_updated": false, "target_updated": false, "completed_episodes": 1, "red_complete_elimination_success_rate": 0.0, "mean_red_attack_kills": 0.0, "mean_blue_attack_kills": 1.0, "mean_red_survivors": 0.0, "mean_blue_survivors": 3.0, "mean_red_boundary_deaths": 2.0, "mean_red_collision_deaths": 0.0, "max_steps_rate": 0.0, "mean_episode_length": 553.0, "mean_episode_return": -101.95367386518046}
+{"env_steps": 8192, "vector_steps": 1024, "replay_size": 8192.0, "critic_updates": 897, "actor_updates": 448, "environment_steps_per_second": 182.12876478487672, "critic1_loss": 3.643024206161499, "critic2_loss": 3.606745958328247, "actor_loss": 0.0, "q1_mean": 0.19425736367702484, "q2_mean": 0.176177516579628, "target_q_mean": 0.1559106707572937, "q1_q2_abs_gap": 0.10272225737571716, "td_error_abs_mean": 0.18177340924739838, "sampled_log_prob_mean": 0.0, "deterministic_action_abs_mean": 0.0, "stochastic_action_abs_mean": 0.0, "action_saturation_fraction": 0.0, "actor_grad_norm": 0.0, "critic1_grad_norm": 1.1027874946594238, "critic2_grad_norm": 1.1970014572143555, "alpha": 0.1, "actor_updated": false, "target_updated": false, "completed_episodes": 2, "red_complete_elimination_success_rate": 0.0, "mean_red_attack_kills": 0.0, "mean_blue_attack_kills": 0.5, "mean_red_survivors": 0.0, "mean_blue_survivors": 3.0, "mean_red_boundary_deaths": 2.5, "mean_red_collision_deaths": 0.0, "max_steps_rate": 0.0, "mean_episode_length": 507.0, "mean_episode_return": -105.58242747337681}
+{"env_steps": 10240, "vector_steps": 1280, "replay_size": 10240.0, "critic_updates": 1153, "actor_updates": 576, "environment_steps_per_second": 144.48104204422896, "critic1_loss": 1.3426622152328491, "critic2_loss": 3.4435648918151855, "actor_loss": 0.0, "q1_mean": 0.0933367908000946, "q2_mean": 0.09599363803863525, "target_q_mean": 0.05346408113837242, "q1_q2_abs_gap": 0.23386643826961517, "td_error_abs_mean": 0.2696745991706848, "sampled_log_prob_mean": 0.0, "deterministic_action_abs_mean": 0.0, "stochastic_action_abs_mean": 0.0, "action_saturation_fraction": 0.0, "actor_grad_norm": 0.0, "critic1_grad_norm": 8.532631874084473, "critic2_grad_norm": 3.01021409034729, "alpha": 0.1, "actor_updated": false, "target_updated": false, "completed_episodes": 7, "red_complete_elimination_success_rate": 0.0, "mean_red_attack_kills": 0.0, "mean_blue_attack_kills": 0.8571428571428571, "mean_red_survivors": 1.5714285714285714, "mean_blue_survivors": 2.5714285714285716, "mean_red_boundary_deaths": 0.42857142857142855, "mean_red_collision_deaths": 0.14285714285714285, "max_steps_rate": 0.8571428571428571, "mean_episode_length": 532.2857142857143, "mean_episode_return": -40.91412095825451}
+{"env_steps": 12288, "vector_steps": 1536, "replay_size": 12288.0, "critic_updates": 1409, "actor_updates": 704, "environment_steps_per_second": 155.01404871855092, "critic1_loss": 3.6701202392578125, "critic2_loss": 3.509140968322754, "actor_loss": 0.0, "q1_mean": 0.11390392482280731, "q2_mean": 0.14598168432712555, "target_q_mean": 0.11502479016780853, "q1_q2_abs_gap": 0.22628191113471985, "td_error_abs_mean": 0.2728770971298218, "sampled_log_prob_mean": 0.0, "deterministic_action_abs_mean": 0.0, "stochastic_action_abs_mean": 0.0, "action_saturation_fraction": 0.0, "actor_grad_norm": 0.0, "critic1_grad_norm": 0.5792698264122009, "critic2_grad_norm": 4.460941314697266, "alpha": 0.1, "actor_updated": false, "target_updated": false, "completed_episodes": 4, "red_complete_elimination_success_rate": 0.0, "mean_red_attack_kills": 0.0, "mean_blue_attack_kills": 2.5, "mean_red_survivors": 0.0, "mean_blue_survivors": 2.5, "mean_red_boundary_deaths": 0.5, "mean_red_collision_deaths": 0.0, "max_steps_rate": 0.0, "mean_episode_length": 237.75, "mean_episode_return": -85.31930522028597}
+{"env_steps": 14336, "vector_steps": 1792, "replay_size": 14336.0, "critic_updates": 1665, "actor_updates": 832, "environment_steps_per_second": 164.58954670964195, "critic1_loss": 0.055479153990745544, "critic2_loss": 0.14073017239570618, "actor_loss": 0.0, "q1_mean": 0.08341020345687866, "q2_mean": 0.060658328235149384, "target_q_mean": 0.1689947098493576, "q1_q2_abs_gap": 0.19480472803115845, "td_error_abs_mean": 0.23801752924919128, "sampled_log_prob_mean": 0.0, "deterministic_action_abs_mean": 0.0, "stochastic_action_abs_mean": 0.0, "action_saturation_fraction": 0.0, "actor_grad_norm": 0.0, "critic1_grad_norm": 3.332034111022949, "critic2_grad_norm": 6.513855934143066, "alpha": 0.1, "actor_updated": false, "target_updated": false, "completed_episodes": 8, "red_complete_elimination_success_rate": 0.0, "mean_red_attack_kills": 0.0, "mean_blue_attack_kills": 0.875, "mean_red_survivors": 1.0, "mean_blue_survivors": 2.625, "mean_red_boundary_deaths": 0.75, "mean_red_collision_deaths": 0.375, "max_steps_rate": 0.625, "mean_episode_length": 482.25, "mean_episode_return": -60.52204426784715}
+{"env_steps": 16384, "vector_steps": 2048, "replay_size": 16384.0, "critic_updates": 1921, "actor_updates": 960, "environment_steps_per_second": 171.9628120476509, "critic1_loss": 5.48621940612793, "critic2_loss": 5.362001895904541, "actor_loss": 0.0, "q1_mean": 0.17458762228488922, "q2_mean": 0.2670133709907532, "target_q_mean": -0.000934022304136306, "q1_q2_abs_gap": 0.28399649262428284, "td_error_abs_mean": 0.3783911466598511, "sampled_log_prob_mean": 0.0, "deterministic_action_abs_mean": 0.0, "stochastic_action_abs_mean": 0.0, "action_saturation_fraction": 0.0, "actor_grad_norm": 0.0, "critic1_grad_norm": 9.194435119628906, "critic2_grad_norm": 17.248699188232422, "alpha": 0.1, "actor_updated": false, "target_updated": false, "completed_episodes": 1, "red_complete_elimination_success_rate": 0.0, "mean_red_attack_kills": 0.0, "mean_blue_attack_kills": 2.0, "mean_red_survivors": 0.0, "mean_blue_survivors": 3.0, "mean_red_boundary_deaths": 1.0, "mean_red_collision_deaths": 0.0, "max_steps_rate": 0.0, "mean_episode_length": 313.0, "mean_episode_return": -89.93435227844748}
+{"env_steps": 18432, "vector_steps": 2304, "replay_size": 18432.0, "critic_updates": 2177, "actor_updates": 1088, "environment_steps_per_second": 179.39700969007515, "critic1_loss": 0.1156623438000679, "critic2_loss": 0.4341058135032654, "actor_loss": 0.0, "q1_mean": 0.08390611410140991, "q2_mean": 0.11860543489456177, "target_q_mean": 0.17680326104164124, "q1_q2_abs_gap": 0.3240877091884613, "td_error_abs_mean": 0.3077482581138611, "sampled_log_prob_mean": 0.0, "deterministic_action_abs_mean": 0.0, "stochastic_action_abs_mean": 0.0, "action_saturation_fraction": 0.0, "actor_grad_norm": 0.0, "critic1_grad_norm": 3.808706521987915, "critic2_grad_norm": 8.332704544067383, "alpha": 0.1, "actor_updated": false, "target_updated": false, "completed_episodes": 3, "red_complete_elimination_success_rate": 0.0, "mean_red_attack_kills": 0.0, "mean_blue_attack_kills": 1.3333333333333333, "mean_red_survivors": 1.3333333333333333, "mean_blue_survivors": 2.3333333333333335, "mean_red_boundary_deaths": 0.3333333333333333, "mean_red_collision_deaths": 0.0, "max_steps_rate": 1.0, "mean_episode_length": 600.0, "mean_episode_return": -41.9284424786747}
+{"env_steps": 20000, "vector_steps": 2500, "replay_size": 20000.0, "critic_updates": 2373, "actor_updates": 1186, "environment_steps_per_second": 162.3615491743787, "critic1_loss": 0.1476512849330902, "critic2_loss": 0.17792268097400665, "actor_loss": 0.0, "q1_mean": 0.1748807281255722, "q2_mean": 0.17190176248550415, "target_q_mean": 0.19133508205413818, "q1_q2_abs_gap": 0.2839386761188507, "td_error_abs_mean": 0.2479252815246582, "sampled_log_prob_mean": 0.0, "deterministic_action_abs_mean": 0.0, "stochastic_action_abs_mean": 0.0, "action_saturation_fraction": 0.0, "actor_grad_norm": 0.0, "critic1_grad_norm": 16.99137306213379, "critic2_grad_norm": 3.241304397583008, "alpha": 0.1, "actor_updated": false, "target_updated": false, "completed_episodes": 5, "red_complete_elimination_success_rate": 0.0, "mean_red_attack_kills": 0.0, "mean_blue_attack_kills": 1.2, "mean_red_survivors": 1.4, "mean_blue_survivors": 2.2, "mean_red_boundary_deaths": 0.4, "mean_red_collision_deaths": 0.0, "max_steps_rate": 0.8, "mean_episode_length": 593.4, "mean_episode_return": -44.447205645266514}
+{
+  "checkpoint_family": "homogeneous_3v3_fixed_blue_madsac",
+  "checkpoint_version": 1,
+  "device": "cuda",
+  "actual_environment_steps": 20000,
+  "vector_steps": 2500,
+  "critic_updates": 2373,
+  "actor_updates": 1186,
+  "target_updates": 1186,
+  "rule_policy_mapping_modes": {
+    "blue": [
+      "rate_aligned_v1",
+      "rate_aligned_v1",
+      "rate_aligned_v1",
+      "rate_aligned_v1",
+      "rate_aligned_v1",
+      "rate_aligned_v1",
+      "rate_aligned_v1",
+      "rate_aligned_v1"
+    ],
+    "red": [
+      "rate_aligned_v1",
+      "rate_aligned_v1",
+      "rate_aligned_v1",
+      "rate_aligned_v1",
+      "rate_aligned_v1",
+      "rate_aligned_v1",
+      "rate_aligned_v1",
+      "rate_aligned_v1"
+    ]
+  },
+  "metrics_rows": 10,
+  "metrics_finite": true,
+  "checkpoints": {
+    "initial.pt": true,
+    "latest.pt": true,
+    "final.pt": true,
+    "best.pt": true
+  },
+  "replay_metadata": {
+    "capacity": 50000,
+    "size": 20000,
+    "position": 20000,
+    "full_replay_persisted": false
+  },
+  "replay_restored": false,
+  "checkpoint_reload_deterministic_action_match": true,
+  "best_score": [
+    0.0,
+    0.0,
+    -2.5,
+    0.0,
+    -2.5,
+    -0.0,
+    -489.9166666666667
+  ],
+  "best_checkpoint": "initial.pt",
+  "initial_evaluation": {
+    "episodes": 12,
+    "red_complete_elimination_success_rate": 0.0,
+    "blue_complete_elimination_success_rate": 0.0,
+    "environment_red_outcome_rate": 0.0,
+    "environment_blue_outcome_rate": 1.0,
+    "draw_rate": 0.0,
+    "mean_red_attack_kills": 0.0,
+    "mean_blue_attack_kills": 0.5,
+    "mean_red_survivors": 0.0,
+    "mean_blue_survivors": 2.5,
+    "red_kd_numerator": 0,
+    "red_kd_denominator": 6,
+    "red_kd_ratio": 0.0,
+    "mean_red_boundary_deaths": 2.5,
+    "mean_blue_boundary_deaths": 0.0,
+    "mean_red_boundary_altitude_deaths": 2.5,
+    "mean_blue_boundary_altitude_deaths": 0.0,
+    "mean_red_boundary_xy_deaths": 0.0,
+    "mean_blue_boundary_xy_deaths": 0.0,
+    "mean_red_friendly_collision_deaths": 0.0,
+    "mean_blue_friendly_collision_deaths": 0.5,
+    "mean_red_cross_collision_deaths": 0.0,
+    "mean_blue_cross_collision_deaths": 0.0,
+    "max_steps_rate": 0.0,
+    "mean_episode_length": 489.9166666666667,
+    "evaluation_seconds": 12.556106075993739,
+    "environment_steps_per_second": 468.218408192662
+  },
+  "final_evaluation": {
+    "episodes": 12,
+    "red_complete_elimination_success_rate": 0.0,
+    "blue_complete_elimination_success_rate": 0.4166666666666667,
+    "environment_red_outcome_rate": 0.0,
+    "environment_blue_outcome_rate": 0.9166666666666666,
+    "draw_rate": 0.08333333333333333,
+    "mean_red_attack_kills": 0.0,
+    "mean_blue_attack_kills": 2.3333333333333335,
+    "mean_red_survivors": 0.08333333333333333,
+    "mean_blue_survivors": 2.6666666666666665,
+    "red_kd_numerator": 0,
+    "red_kd_denominator": 28,
+    "red_kd_ratio": 0.0,
+    "mean_red_boundary_deaths": 0.5833333333333334,
+    "mean_blue_boundary_deaths": 0.0,
+    "mean_red_boundary_altitude_deaths": 0.5833333333333334,
+    "mean_blue_boundary_altitude_deaths": 0.0,
+    "mean_red_boundary_xy_deaths": 0.0,
+    "mean_blue_boundary_xy_deaths": 0.0,
+    "mean_red_friendly_collision_deaths": 0.0,
+    "mean_blue_friendly_collision_deaths": 0.3333333333333333,
+    "mean_red_cross_collision_deaths": 0.0,
+    "mean_blue_cross_collision_deaths": 0.0,
+    "max_steps_rate": 0.08333333333333333,
+    "mean_episode_length": 345.5833333333333,
+    "evaluation_seconds": 10.157615017000353,
+    "environment_steps_per_second": 408.26512848334465
+  },
+  "final_metrics": {
+    "env_steps": 20000,
+    "vector_steps": 2500,
+    "replay_size": 20000.0,
+    "critic_updates": 2373,
+    "actor_updates": 1186,
+    "environment_steps_per_second": 162.3615491743787,
+    "critic1_loss": 0.1476512849330902,
+    "critic2_loss": 0.17792268097400665,
+    "actor_loss": 0.0,
+    "q1_mean": 0.1748807281255722,
+    "q2_mean": 0.17190176248550415,
+    "target_q_mean": 0.19133508205413818,
+    "q1_q2_abs_gap": 0.2839386761188507,
+    "td_error_abs_mean": 0.2479252815246582,
+    "sampled_log_prob_mean": 0.0,
+    "deterministic_action_abs_mean": 0.0,
+    "stochastic_action_abs_mean": 0.0,
+    "action_saturation_fraction": 0.0,
+    "actor_grad_norm": 0.0,
+    "critic1_grad_norm": 16.99137306213379,
+    "critic2_grad_norm": 3.241304397583008,
+    "alpha": 0.1,
+    "actor_updated": false,
+    "target_updated": false,
+    "completed_episodes": 5,
+    "red_complete_elimination_success_rate": 0.0,
+    "mean_red_attack_kills": 0.0,
+    "mean_blue_attack_kills": 1.2,
+    "mean_red_survivors": 1.4,
+    "mean_blue_survivors": 2.2,
+    "mean_red_boundary_deaths": 0.4,
+    "mean_red_collision_deaths": 0.0,
+    "max_steps_rate": 0.8,
+    "mean_episode_length": 593.4,
+    "mean_episode_return": -44.447205645266514
+  },
+  "total_seconds": 137.82325529499212
+}

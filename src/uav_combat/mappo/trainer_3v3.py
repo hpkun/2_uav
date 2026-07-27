@@ -39,11 +39,14 @@ def linear_schedule(start: float, end: float, progress: float) -> float:
 
 
 def compute_best_score(es: dict[str, Any]) -> tuple[float, ...]:
-    """Lexicographic best: higher red_attack_success, lower blue_survivors, etc."""
-    red_col = (es.get("mean_red_friendly_collision_deaths", 0.0) +
-               es.get("mean_red_cross_collision_deaths", 0.0))
+    """Lexicographic checkpoint ranking centered on genuine red attack performance."""
+    red_col = (
+        es.get("mean_red_friendly_collision_deaths", 0.0)
+        + es.get("mean_red_cross_collision_deaths", 0.0)
+    )
     return (
         float(es.get("red_complete_elimination_success_rate", 0.0)),
+        float(es.get("mean_red_attack_kills", 0.0)),
         -float(es.get("mean_blue_survivors", 3.0)),
         float(es.get("mean_red_survivors", 0.0)),
         -float(es.get("mean_red_boundary_deaths", 0.0)),
