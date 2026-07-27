@@ -58,7 +58,7 @@ def evaluate_madsac_fixed_blue_3v3(
     actor: SharedSquashedGaussianActor,
     env_config: str | Path,
     episodes: int,
-    num_envs: int = 8,
+    num_envs: int = 16,
     num_env_workers: int = 4,
     device: torch.device | None = None,
     seed_start: int = 100000,

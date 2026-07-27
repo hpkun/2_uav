@@ -17,6 +17,12 @@ The implementation treats the following as fixed:
 
 No environment dynamics, controller equation, reward term, attack judgment, or fixed-rule blue behavior is changed by the MADSAC files.
 
+## Runtime sampling defaults
+
+The formal MADSAC training configuration defaults to 16 parallel environments and 4 worker processes, so each worker manages 4 environments by default. `total_env_steps` remains the cumulative count of environment transitions across all parallel environments: increasing `num_envs` changes sampling throughput and the number of vector steps needed to reach the same total, but it does not change the per-sample algorithm definition. CLI arguments such as `--num-envs` and `--env-workers` can still override the YAML defaults.
+
+This is an engineering throughput setting, not a change to the paper-aligned SAC/MADSAC algorithm structure. Because checkpoint compatibility signatures include `num_envs`, old 8-environment checkpoints should be resumed with an explicit `--num-envs 8`; new experiments that omit `--num-envs` use 16 by default.
+
 ## Structures aligned with the paper description
 
 The baseline includes these MADSAC/SAC structures:

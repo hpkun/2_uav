@@ -14,7 +14,7 @@ network:
 training:
   training_mode: fixed_rule_blue_3v3_madsac
   total_env_steps: 1000000
-  num_envs: 8
+  num_envs: 16
   num_env_workers: 4
 
   replay_capacity: 1000000

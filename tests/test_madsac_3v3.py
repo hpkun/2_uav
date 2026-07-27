@@ -1,8 +1,11 @@
 """Tests for the homogeneous 3v3 MADSAC baseline."""
+import inspect
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import torch
+import yaml
 
 from uav_combat.madsac.evaluation_3v3 import evaluate_madsac_fixed_blue_3v3
 from uav_combat.madsac.metrics import MADSACMetricAccumulator
@@ -14,11 +17,27 @@ from uav_combat.madsac.trainer_3v3 import (
     masked_mean,
     soft_update_,
 )
-from scripts.train_madsac_3v3 import next_strict_milestone
+from scripts.train_madsac_3v3 import load_config, next_strict_milestone
 
 
 ROOT = Path(__file__).parents[1]
 ENV_V4 = ROOT / "configs" / "homogeneous_3v3_learnable_v4.yaml"
+MADSAC_PAPER_CONFIG = ROOT / "configs" / "madsac_3v3_paper.yaml"
+
+
+def _script_args(**overrides):
+    values = {
+        "train_config": str(MADSAC_PAPER_CONFIG),
+        "smoke": False,
+        "total_env_steps": None,
+        "num_envs": None,
+        "env_workers": None,
+        "seed": None,
+        "device": None,
+        "output_dir": None,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
 
 
 def _tiny_config(tmp_path, workers=1, policy_delay=2):
@@ -55,6 +74,31 @@ def _tiny_config(tmp_path, workers=1, policy_delay=2):
         },
         "evaluation": {"episodes": 2, "deterministic": True},
     }
+
+
+def test_madsac_paper_config_defaults_to_16_envs_and_4_workers():
+    with MADSAC_PAPER_CONFIG.open(encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    assert cfg["training"]["num_envs"] == 16
+    assert cfg["training"]["num_env_workers"] == 4
+
+
+def test_madsac_load_config_preserves_16_env_default_without_cli_override():
+    cfg = load_config(_script_args())
+    assert cfg["training"]["num_envs"] == 16
+    assert cfg["training"]["num_env_workers"] == 4
+
+
+def test_madsac_load_config_allows_cli_num_envs_override_to_8():
+    cfg = load_config(_script_args(num_envs=8))
+    assert cfg["training"]["num_envs"] == 8
+    assert cfg["training"]["num_env_workers"] == 4
+
+
+def test_madsac_evaluation_helper_default_num_envs_is_16():
+    sig = inspect.signature(evaluate_madsac_fixed_blue_3v3)
+    assert sig.parameters["num_envs"].default == 16
+    assert sig.parameters["num_env_workers"].default == 4
 
 
 def test_actor_shapes_bounds_finiteness_and_single_input():
