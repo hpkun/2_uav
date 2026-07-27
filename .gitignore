@@ -1,6 +1,17 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+
+# Generated experiment outputs
+outputs/
+
+# Model checkpoints
+*.pt
+*.pth
+*.ckpt
+
+# Local test/runtime artifacts
+.pytest_tmp/
 .pytest_cache/
 outputs/mappo/checkpoints/
 outputs/mappo/*.csv

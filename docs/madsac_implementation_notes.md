@@ -110,6 +110,12 @@ Current dead agents are excluded from critic and actor losses. Next dead agents 
 
 Checkpoints save network and optimizer states, counters, RNG states, best-evaluation metadata, and replay metadata. The full replay array is intentionally not persisted in the first version to avoid very large checkpoint files. Loaded checkpoints report `replay_restored = false` rather than pretending to be lossless replay resumes.
 
+Training metrics are aggregated over each logging interval instead of taking only the last `trainer.update()` result. Critic metrics are weighted by real critic updates, while actor metrics are computed only from true actor optimizer steps. Critic-only updates therefore leave actor interval fields as `None` when no actor update occurred instead of contributing artificial zeros. Reported gradient-norm metrics are the `pre_clip` values returned by `clip_grad_norm_`; clipping fractions are computed from whether those pre-clip norms exceed the configured maximum.
+
+Resume runs preserve the historical `best_score`, `best_evaluation`, `best_checkpoint_name`, and `evaluation_history` loaded from the checkpoint. Resume is not lossless because replay contents are not restored; only replay metadata is persisted. Resume milestones for logging, evaluation, and checkpoints are scheduled at the next strict interval after the restored environment step.
+
+Checkpoint compatibility signatures include the environment YAML content SHA256, network architecture, core SAC hyperparameters, learning rates, replay capacity, learning starts, gradient steps, gradient clipping limits, and number of vector environments. Mismatches report the specific incompatible fields. Final checkpoint reload validation uses a lightweight actor-only load path that checks the saved `online_actor` deterministic action for a fixed probe observation, rather than constructing a second full trainer, replay buffer, and vector environment.
+
 ## Correctness criteria
 
 Tests and smoke runs check interface and numerical validity: finite actions, log probabilities, Q values, TD targets, losses, gradients, target updates, replay sampling, checkpoint reload, worker execution, and evaluation generation. Kills, collisions, boundary deaths, draw rate, or reward improvement are not used as implementation-correctness gates.

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,28 @@ def soft_update_(target: nn.Module, source: nn.Module, tau: float) -> None:
 def set_requires_grad_(module: nn.Module, value: bool) -> None:
     for p in module.parameters():
         p.requires_grad_(value)
+
+
+def sha256_file(path: str | Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def signature_mismatches(checkpoint: Any, current: Any, prefix: str = "") -> list[str]:
+    """Return stable, field-specific differences between two signatures."""
+    diffs: list[str] = []
+    if isinstance(checkpoint, dict) and isinstance(current, dict):
+        keys = sorted(set(checkpoint) | set(current))
+        for key in keys:
+            child = f"{prefix}.{key}" if prefix else str(key)
+            if key not in checkpoint:
+                diffs.append(f"- {child}: checkpoint=<missing> current={current[key]!r}")
+            elif key not in current:
+                diffs.append(f"- {child}: checkpoint={checkpoint[key]!r} current=<missing>")
+            else:
+                diffs.extend(signature_mismatches(checkpoint[key], current[key], child))
+    elif checkpoint != current:
+        diffs.append(f"- {prefix}: checkpoint={checkpoint!r} current={current!r}")
+    return diffs
 
 
 class MADSAC3v3Trainer:
@@ -195,10 +218,12 @@ class MADSAC3v3Trainer:
             )
         return y.detach()
 
-    def update(self) -> dict[str, float | bool]:
+    def update(self) -> dict[str, Any]:
         if self.replay.size < self.batch_size or self.env_steps < self.learning_starts:
             return {}
-        rows: list[dict[str, float | bool]] = []
+        critic_rows: list[dict[str, float]] = []
+        actor_rows: list[dict[str, float]] = []
+        target_updates_in_call = 0
         for _ in range(self.gradient_steps):
             batch = self.replay.sample(self.batch_size, self.rng, self.device)
             alive = batch["alive_masks"]
@@ -221,14 +246,36 @@ class MADSAC3v3Trainer:
             self.critic2_optimizer.step()
             self.critic_update_count += 1
 
-            actor_updated = False
-            target_updated = False
-            actor_loss_value = 0.0
-            actor_grad_value = 0.0
-            sampled_log_prob_mean = 0.0
-            deterministic_abs_mean = 0.0
-            stochastic_abs_mean = 0.0
-            saturation_fraction = 0.0
+            alive_bool = alive > 0.5
+            td_error = (torch.minimum(q1, q2) - y).abs()
+            q_gap_values = (q1 - q2).abs()
+            td_err_mean = masked_mean(td_error, alive)
+            q_gap = masked_mean(q_gap_values, alive)
+            q1_mean = masked_mean(q1, alive)
+            q2_mean = masked_mean(q2, alive)
+            target_mean = masked_mean(y, alive)
+            q_gap_max = float(q_gap_values[alive_bool].max().item())
+            td_error_max = float(td_error[alive_bool].max().item())
+            critic_row = {
+                "critic1_loss": float(critic1_loss.item()),
+                "critic2_loss": float(critic2_loss.item()),
+                "q1_mean": float(q1_mean.item()) if q1_mean is not None else 0.0,
+                "q2_mean": float(q2_mean.item()) if q2_mean is not None else 0.0,
+                "target_q_mean": float(target_mean.item()) if target_mean is not None else 0.0,
+                "q1_q2_abs_gap": float(q_gap.item()) if q_gap is not None else 0.0,
+                "q1_q2_abs_gap_max": q_gap_max,
+                "td_error_abs_mean": float(td_err_mean.item()) if td_err_mean is not None else 0.0,
+                "td_error_abs_max": td_error_max,
+                "critic1_grad_norm_pre_clip": float(critic1_grad),
+                "critic2_grad_norm_pre_clip": float(critic2_grad),
+                "critic1_grad_clipped": float(float(critic1_grad) > self.max_critic_grad_norm),
+                "critic2_grad_clipped": float(float(critic2_grad) > self.max_critic_grad_norm),
+            }
+            numeric = [float(v) for v in critic_row.values()]
+            if not all(np.isfinite(v) for v in numeric):
+                raise FloatingPointError(f"non-finite MADSAC critic metrics: {critic_row}")
+            critic_rows.append(critic_row)
+
             if self.critic_update_count % self.policy_delay == 0:
                 set_requires_grad_(self.critic, False)
                 actions_pi, log_probs_pi = self.actor.sample(batch["observations"])
@@ -242,7 +289,6 @@ class MADSAC3v3Trainer:
                     actor_loss.backward()
                     actor_grad = nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_actor_grad_norm)
                     self.actor_optimizer.step()
-                    actor_updated = True
                     self.actor_update_count += 1
                     actor_loss_value = float(actor_loss.item())
                     actor_grad_value = float(actor_grad)
@@ -255,49 +301,96 @@ class MADSAC3v3Trainer:
                     soft_update_(self.target_actor, self.actor, self.tau)
                     soft_update_(self.target_critic, self.critic, self.tau)
                     self.target_update_count += 1
-                    target_updated = True
+                    target_updates_in_call += 1
+                    actor_row = {
+                        "actor_loss": actor_loss_value,
+                        "sampled_log_prob_mean": sampled_log_prob_mean,
+                        "deterministic_action_abs_mean": deterministic_abs_mean,
+                        "stochastic_action_abs_mean": stochastic_abs_mean,
+                        "action_saturation_fraction": saturation_fraction,
+                        "actor_grad_norm_pre_clip": actor_grad_value,
+                        "actor_grad_clipped": float(actor_grad_value > self.max_actor_grad_norm),
+                    }
+                    numeric = [float(v) for v in actor_row.values()]
+                    if not all(np.isfinite(v) for v in numeric):
+                        raise FloatingPointError(f"non-finite MADSAC actor metrics: {actor_row}")
+                    actor_rows.append(actor_row)
                 set_requires_grad_(self.critic, True)
 
-            td_error = (torch.minimum(q1, q2) - y).abs()
-            td_err_mean = masked_mean(td_error, alive)
-            q_gap = masked_mean((q1 - q2).abs(), alive)
-            q1_mean = masked_mean(q1, alive)
-            q2_mean = masked_mean(q2, alive)
-            target_mean = masked_mean(y, alive)
-            row = {
-                "critic1_loss": float(critic1_loss.item()),
-                "critic2_loss": float(critic2_loss.item()),
-                "actor_loss": actor_loss_value,
-                "q1_mean": float(q1_mean.item()) if q1_mean is not None else 0.0,
-                "q2_mean": float(q2_mean.item()) if q2_mean is not None else 0.0,
-                "target_q_mean": float(target_mean.item()) if target_mean is not None else 0.0,
-                "q1_q2_abs_gap": float(q_gap.item()) if q_gap is not None else 0.0,
-                "td_error_abs_mean": float(td_err_mean.item()) if td_err_mean is not None else 0.0,
-                "sampled_log_prob_mean": sampled_log_prob_mean,
-                "deterministic_action_abs_mean": deterministic_abs_mean,
-                "stochastic_action_abs_mean": stochastic_abs_mean,
-                "action_saturation_fraction": saturation_fraction,
-                "actor_grad_norm": actor_grad_value,
-                "critic1_grad_norm": float(critic1_grad),
-                "critic2_grad_norm": float(critic2_grad),
-                "alpha": self.alpha,
-                "actor_updated": actor_updated,
-                "target_updated": target_updated,
-                "replay_size": float(self.replay.size),
-            }
-            numeric = [float(v) for v in row.values() if isinstance(v, (int, float, np.floating))]
-            if not all(np.isfinite(v) for v in numeric):
-                raise FloatingPointError(f"non-finite MADSAC update metrics: {row}")
-            rows.append(row)
-        if not rows:
+        if not critic_rows:
             return {}
-        out: dict[str, float | bool] = {}
-        for key in rows[0]:
-            vals = [r[key] for r in rows]
-            if isinstance(vals[0], bool):
-                out[key] = bool(any(vals))
-            else:
-                out[key] = float(np.mean(vals))
+        out: dict[str, Any] = {
+            "critic_updates_in_call": len(critic_rows),
+            "actor_updates_in_call": len(actor_rows),
+            "target_updates_in_call": target_updates_in_call,
+            "alpha": self.alpha,
+            "actor_updated": len(actor_rows) > 0,
+            "actor_metrics_available": len(actor_rows) > 0,
+            "target_updated": target_updates_in_call > 0,
+            "replay_size": float(self.replay.size),
+        }
+        for source, target in (
+            ("critic1_loss", "critic1_loss_mean"),
+            ("critic2_loss", "critic2_loss_mean"),
+            ("q1_mean", "q1_mean"),
+            ("q2_mean", "q2_mean"),
+            ("target_q_mean", "target_q_mean"),
+            ("q1_q2_abs_gap", "q1_q2_abs_gap_mean"),
+            ("td_error_abs_mean", "td_error_abs_mean"),
+            ("critic1_grad_norm_pre_clip", "critic1_grad_norm_pre_clip_mean"),
+            ("critic2_grad_norm_pre_clip", "critic2_grad_norm_pre_clip_mean"),
+        ):
+            out[target] = float(np.mean([r[source] for r in critic_rows]))
+        out["critic1_loss_max"] = float(np.max([r["critic1_loss"] for r in critic_rows]))
+        out["critic2_loss_max"] = float(np.max([r["critic2_loss"] for r in critic_rows]))
+        out["q1_q2_abs_gap_max"] = float(np.max([r["q1_q2_abs_gap_max"] for r in critic_rows]))
+        out["td_error_abs_max"] = float(np.max([r["td_error_abs_max"] for r in critic_rows]))
+        out["critic1_grad_norm_pre_clip_max"] = float(np.max([r["critic1_grad_norm_pre_clip"] for r in critic_rows]))
+        out["critic2_grad_norm_pre_clip_max"] = float(np.max([r["critic2_grad_norm_pre_clip"] for r in critic_rows]))
+        out["critic1_grad_clipped_fraction"] = float(np.mean([r["critic1_grad_clipped"] for r in critic_rows]))
+        out["critic2_grad_clipped_fraction"] = float(np.mean([r["critic2_grad_clipped"] for r in critic_rows]))
+
+        if actor_rows:
+            for source, target in (
+                ("actor_loss", "actor_loss_mean"),
+                ("sampled_log_prob_mean", "sampled_log_prob_mean"),
+                ("deterministic_action_abs_mean", "deterministic_action_abs_mean"),
+                ("stochastic_action_abs_mean", "stochastic_action_abs_mean"),
+                ("action_saturation_fraction", "action_saturation_fraction_mean"),
+                ("actor_grad_norm_pre_clip", "actor_grad_norm_pre_clip_mean"),
+            ):
+                out[target] = float(np.mean([r[source] for r in actor_rows]))
+            out["actor_loss_last"] = float(actor_rows[-1]["actor_loss"])
+            out["action_saturation_fraction_max"] = float(np.max([r["action_saturation_fraction"] for r in actor_rows]))
+            out["actor_grad_norm_pre_clip_max"] = float(np.max([r["actor_grad_norm_pre_clip"] for r in actor_rows]))
+            out["actor_grad_clipped_fraction"] = float(np.mean([r["actor_grad_clipped"] for r in actor_rows]))
+        else:
+            for key in (
+                "actor_loss_mean",
+                "actor_loss_last",
+                "sampled_log_prob_mean",
+                "deterministic_action_abs_mean",
+                "stochastic_action_abs_mean",
+                "action_saturation_fraction_mean",
+                "action_saturation_fraction_max",
+                "actor_grad_norm_pre_clip_mean",
+                "actor_grad_norm_pre_clip_max",
+                "actor_grad_clipped_fraction",
+            ):
+                out[key] = None
+
+        # Backward-compatible aliases for older local analysis notebooks.
+        out["critic1_loss"] = out["critic1_loss_mean"]
+        out["critic2_loss"] = out["critic2_loss_mean"]
+        out["actor_loss"] = out["actor_loss_mean"]
+        out["q1_q2_abs_gap"] = out["q1_q2_abs_gap_mean"]
+        out["actor_grad_norm"] = out["actor_grad_norm_pre_clip_mean"]
+        out["critic1_grad_norm"] = out["critic1_grad_norm_pre_clip_mean"]
+        out["critic2_grad_norm"] = out["critic2_grad_norm_pre_clip_mean"]
+
+        numeric = [float(v) for v in out.values() if isinstance(v, (int, float, np.floating))]
+        if not all(np.isfinite(v) for v in numeric):
+            raise FloatingPointError(f"non-finite MADSAC update metrics: {out}")
         self.last_metrics = out
         return out
 
@@ -331,7 +424,16 @@ class MADSAC3v3Trainer:
                 "alpha": t["alpha"],
                 "policy_delay": t.get("policy_delay", 2),
                 "batch_size": t["batch_size"],
+                "actor_learning_rate": t["actor_learning_rate"],
+                "critic_learning_rate": t["critic_learning_rate"],
+                "replay_capacity": t.get("replay_capacity", t.get("replay_size")),
+                "learning_starts": t["learning_starts"],
+                "gradient_steps": t.get("gradient_steps", t.get("updates_per_step", 1)),
+                "max_actor_grad_norm": t.get("max_actor_grad_norm", t.get("max_grad_norm", 10.0)),
+                "max_critic_grad_norm": t.get("max_critic_grad_norm", t.get("max_grad_norm", 10.0)),
+                "num_envs": t["num_envs"],
             },
+            "env_config_sha256": sha256_file(self.env_config),
         }
 
     def save_checkpoint(self, path: str | Path) -> None:
@@ -373,8 +475,9 @@ class MADSAC3v3Trainer:
         ckpt = torch.load(path, map_location="cpu", weights_only=False)
         if ckpt.get("checkpoint_family") != CHECKPOINT_FAMILY_MADSAC_3V3:
             raise RuntimeError(f"Expected {CHECKPOINT_FAMILY_MADSAC_3V3}, got {ckpt.get('checkpoint_family')}")
-        if ckpt.get("training_signature") != self.training_signature():
-            raise RuntimeError("MADSAC checkpoint signature mismatch")
+        diffs = signature_mismatches(ckpt.get("training_signature"), self.training_signature())
+        if diffs:
+            raise RuntimeError("checkpoint signature mismatch:\n" + "\n".join(diffs))
         self.actor.load_state_dict(ckpt["online_actor"])
         self.target_actor.load_state_dict(ckpt["target_actor"])
         self.critic.q1.load_state_dict(ckpt["online_critic1"])
@@ -410,5 +513,7 @@ __all__ = [
     "MADSAC3v3Trainer",
     "compute_best_score",
     "masked_mean",
+    "sha256_file",
+    "signature_mismatches",
     "soft_update_",
 ]

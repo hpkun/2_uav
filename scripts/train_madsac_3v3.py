@@ -12,12 +12,16 @@ import numpy as np
 import torch
 import yaml
 
+from uav_combat.environment_3v3 import OBS_DIM
 from uav_combat.madsac.evaluation_3v3 import evaluate_madsac_fixed_blue_3v3
+from uav_combat.madsac.metrics import MADSACMetricAccumulator
+from uav_combat.madsac.networks import SharedSquashedGaussianActor
 from uav_combat.madsac.trainer_3v3 import (
     CHECKPOINT_FAMILY_MADSAC_3V3,
     CHECKPOINT_VERSION_MADSAC_3V3,
     MADSAC3v3Trainer,
     compute_best_score,
+    signature_mismatches,
 )
 
 
@@ -78,9 +82,47 @@ def load_config(args) -> dict:
 
 def finite_row(row: dict) -> bool:
     for value in row.values():
+        if value is None:
+            continue
         if isinstance(value, (float, int, np.floating, np.integer)) and not np.isfinite(float(value)):
             return False
     return True
+
+
+def next_strict_milestone(current: int, interval: int) -> int:
+    if interval <= 0:
+        raise ValueError("milestone interval must be positive")
+    return ((int(current) // int(interval)) + 1) * int(interval)
+
+
+def build_actor_from_config(cfg: dict, device: torch.device) -> SharedSquashedGaussianActor:
+    n = cfg["network"]
+    actor_hidden = int(n.get("actor_hidden_dim", n.get("hidden_dim", 256)))
+    log_std_bias = float(n.get("log_std_bias_init", n.get("log_std_init", -0.5)))
+    return SharedSquashedGaussianActor(
+        OBS_DIM, 3, 3, actor_hidden, log_std_bias,
+        float(n.get("log_std_min", -5.0)), float(n.get("log_std_max", 2.0)),
+    ).to(device)
+
+
+def validate_final_checkpoint_lightweight(trainer: MADSAC3v3Trainer, final_checkpoint: Path) -> bool:
+    probe = torch.zeros(2, 3, OBS_DIM, device=trainer.device)
+    with torch.no_grad():
+        before = trainer.actor.deterministic(probe).cpu()
+    ckpt = torch.load(final_checkpoint, map_location="cpu", weights_only=False)
+    if ckpt.get("checkpoint_family") != CHECKPOINT_FAMILY_MADSAC_3V3:
+        raise RuntimeError(f"unexpected checkpoint family: {ckpt.get('checkpoint_family')}")
+    if ckpt.get("checkpoint_version") != CHECKPOINT_VERSION_MADSAC_3V3:
+        raise RuntimeError(f"unexpected checkpoint version: {ckpt.get('checkpoint_version')}")
+    diffs = signature_mismatches(ckpt.get("training_signature"), trainer.training_signature())
+    if diffs:
+        raise RuntimeError("checkpoint signature mismatch:\n" + "\n".join(diffs))
+    actor = build_actor_from_config(trainer.config, trainer.device)
+    actor.load_state_dict(ckpt["online_actor"])
+    actor.eval()
+    with torch.no_grad():
+        after = actor.deterministic(probe).cpu()
+    return bool(torch.allclose(before, after, atol=1e-6, rtol=1e-6))
 
 
 def episode_stats(records: list[dict]) -> dict:
@@ -133,11 +175,15 @@ def main() -> None:
     torch.manual_seed(seed)
     trainer = MADSAC3v3Trainer(args.env_config, cfg)
     restored_action_match = None
+    resumed = bool(args.resume)
     replay_restored = False
+    initial_eval = None
+    resume_start_eval = None
     if args.resume:
         trainer.load_checkpoint(args.resume)
         replay_restored = trainer.replay_restored
         print(f"resumed_from={args.resume} replay_restored={replay_restored}", flush=True)
+        print("resume is not lossless because replay buffer is not restored", flush=True)
     else:
         trainer.save_checkpoint(ckpt_dir / "initial.pt")
 
@@ -155,25 +201,51 @@ def main() -> None:
     ckpt_interval = int(cfg["training"]["checkpoint_interval_env_steps"])
     log_interval = int(cfg["training"].get("log_interval_env_steps", 2048))
     quick_eps = int(cfg["training"]["quick_evaluation_episodes"])
-    next_eval = eval_interval
-    next_ckpt = ckpt_interval
-    next_log = log_interval
+    next_eval = next_strict_milestone(trainer.env_steps, eval_interval)
+    next_ckpt = next_strict_milestone(trainer.env_steps, ckpt_interval)
+    next_log = next_strict_milestone(trainer.env_steps, log_interval)
+    metric_accumulator = MADSACMetricAccumulator()
 
-    initial_eval = evaluate_madsac_fixed_blue_3v3(
-        trainer.actor, args.env_config, quick_eps, trainer.num_envs,
-        trainer.num_env_workers, trainer.device, seed + 100000,
-    )
-    (eval_dir / "evaluation_initial.json").write_text(json.dumps(initial_eval, indent=2, default=str))
-    trainer.best_evaluation = initial_eval
-    trainer.best_score = compute_best_score(initial_eval)
-    trainer.best_checkpoint_name = "initial.pt"
-    trainer.save_checkpoint(ckpt_dir / "best.pt")
-    (eval_dir / "evaluation_best.json").write_text(json.dumps(initial_eval, indent=2, default=str))
+    if args.resume:
+        resume_start_eval = evaluate_madsac_fixed_blue_3v3(
+            trainer.actor, args.env_config, quick_eps, trainer.num_envs,
+            trainer.num_env_workers, trainer.device, seed + 100000,
+        )
+        (eval_dir / "evaluation_resume_start.json").write_text(
+            json.dumps(resume_start_eval, indent=2, default=str)
+        )
+        score = compute_best_score(resume_start_eval)
+        trainer.evaluation_history.append({"env_steps": trainer.env_steps, "score": list(score), **resume_start_eval})
+        if trainer.best_score is None or score > trainer.best_score:
+            trainer.best_score = score
+            trainer.best_evaluation = resume_start_eval
+            trainer.best_checkpoint_name = f"resume_start_{trainer.env_steps:06d}.pt"
+            trainer.save_checkpoint(ckpt_dir / "best.pt")
+            (eval_dir / "evaluation_best.json").write_text(json.dumps(resume_start_eval, indent=2, default=str))
+    else:
+        initial_eval = evaluate_madsac_fixed_blue_3v3(
+            trainer.actor, args.env_config, quick_eps, trainer.num_envs,
+            trainer.num_env_workers, trainer.device, seed + 100000,
+        )
+        (eval_dir / "evaluation_initial.json").write_text(json.dumps(initial_eval, indent=2, default=str))
+        trainer.best_evaluation = initial_eval
+        trainer.best_score = compute_best_score(initial_eval)
+        trainer.best_checkpoint_name = "initial.pt"
+        trainer.save_checkpoint(ckpt_dir / "best.pt")
+        (eval_dir / "evaluation_best.json").write_text(json.dumps(initial_eval, indent=2, default=str))
 
     try:
+        if trainer.env_steps >= total_steps:
+            print(
+                f"restored env_steps={trainer.env_steps} >= total_env_steps={total_steps}; "
+                "skipping additional training and running final evaluation only",
+                flush=True,
+            )
         while trainer.env_steps < total_steps:
             completed_since_log.extend(trainer.step_environment())
             metrics = trainer.update()
+            if metrics:
+                metric_accumulator.add(metrics)
             if trainer.env_steps >= next_eval:
                 ev = evaluate_madsac_fixed_blue_3v3(
                     trainer.actor, args.env_config, quick_eps, trainer.num_envs,
@@ -196,6 +268,7 @@ def main() -> None:
                 next_ckpt += ckpt_interval
             if trainer.env_steps >= next_log or trainer.env_steps >= total_steps:
                 elapsed = time.perf_counter() - start
+                interval_metrics = metric_accumulator.summarize()
                 row = {
                     "env_steps": trainer.env_steps,
                     "vector_steps": trainer.vector_steps,
@@ -203,7 +276,7 @@ def main() -> None:
                     "critic_updates": trainer.critic_update_count,
                     "actor_updates": trainer.actor_update_count,
                     "environment_steps_per_second": trainer.env_steps / elapsed if elapsed > 0 else 0.0,
-                    **metrics,
+                    **interval_metrics,
                     **episode_stats(completed_since_log),
                 }
                 if not finite_row({k: v for k, v in row.items() if not (isinstance(v, float) and np.isnan(v))}):
@@ -211,13 +284,12 @@ def main() -> None:
                 rows.append(row)
                 print(json.dumps(row, default=str), flush=True)
                 completed_since_log.clear()
+                metric_accumulator.reset()
                 trainer.save_checkpoint(ckpt_dir / "latest.pt")
                 next_log += log_interval
     finally:
         trainer.close()
 
-    trainer.save_checkpoint(ckpt_dir / "final.pt")
-    trainer.save_checkpoint(ckpt_dir / "latest.pt")
     final_eval = evaluate_madsac_fixed_blue_3v3(
         trainer.actor, args.env_config, int(cfg["evaluation"]["episodes"]), trainer.num_envs,
         trainer.num_env_workers, trainer.device, seed + 100000,
@@ -230,6 +302,8 @@ def main() -> None:
         trainer.best_checkpoint_name = "final.pt"
         trainer.save_checkpoint(ckpt_dir / "best.pt")
         (eval_dir / "evaluation_best.json").write_text(json.dumps(final_eval, indent=2, default=str))
+    trainer.save_checkpoint(ckpt_dir / "final.pt")
+    trainer.save_checkpoint(ckpt_dir / "latest.pt")
 
     if rows:
         keys = list(dict.fromkeys(k for row in rows for k in row))
@@ -238,17 +312,7 @@ def main() -> None:
             writer.writeheader()
             writer.writerows(rows)
 
-    restored = MADSAC3v3Trainer(args.env_config, cfg)
-    try:
-        probe = torch.zeros(2, 3, 68, device=trainer.device)
-        with torch.no_grad():
-            before = trainer.actor.deterministic(probe).cpu()
-        restored.load_checkpoint(ckpt_dir / "final.pt")
-        with torch.no_grad():
-            after = restored.actor.deterministic(probe).cpu()
-        restored_action_match = bool(torch.allclose(before, after, atol=1e-6, rtol=1e-6))
-    finally:
-        restored.close()
+    restored_action_match = validate_final_checkpoint_lightweight(trainer, ckpt_dir / "final.pt")
 
     summary = {
         "checkpoint_family": CHECKPOINT_FAMILY_MADSAC_3V3,
@@ -268,7 +332,10 @@ def main() -> None:
         "checkpoint_reload_deterministic_action_match": restored_action_match,
         "best_score": list(trainer.best_score) if trainer.best_score else None,
         "best_checkpoint": trainer.best_checkpoint_name,
+        "resumed": resumed,
+        "resumed_from": args.resume,
         "initial_evaluation": initial_eval,
+        "resume_start_evaluation": resume_start_eval,
         "final_evaluation": final_eval,
         "final_metrics": rows[-1] if rows else {},
         "total_seconds": time.perf_counter() - start,
