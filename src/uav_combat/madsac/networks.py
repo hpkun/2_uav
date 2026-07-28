@@ -87,7 +87,13 @@ class SharedSquashedGaussianActor(nn.Module):
 
 
 class AttentionCritic(nn.Module):
-    """Per-agent centralized attention critic for three red aircraft."""
+    """Per-agent centralized attention critic with other-agent attention.
+
+    For each agent i, the query is produced from its own encoded
+    observation-action token. Keys and values come only from other alive agents
+    j != i. The agent's own embedding is preserved as an explicit self path and
+    concatenated with the attention context before the Q head.
+    """
 
     def __init__(
         self,
@@ -108,11 +114,13 @@ class AttentionCritic(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
         )
-        self.attention = nn.MultiheadAttention(
-            embed_dim=hidden_dim,
-            num_heads=attention_heads,
-            batch_first=True,
-        )
+        if hidden_dim % attention_heads != 0:
+            raise ValueError("hidden_dim must be divisible by attention_heads")
+        self.attention_heads = attention_heads
+        self.head_dim = hidden_dim // attention_heads
+        self.query = nn.Linear(hidden_dim, hidden_dim)
+        self.key = nn.Linear(hidden_dim, hidden_dim)
+        self.value = nn.Linear(hidden_dim, hidden_dim)
         self.q_head = nn.Sequential(
             nn.Linear(2 * hidden_dim, hidden_dim),
             nn.ReLU(),
@@ -128,21 +136,21 @@ class AttentionCritic(nn.Module):
         joint = torch.cat([observations, actions], dim=-1)
         encoded = self.encoder(joint) * alive.unsqueeze(-1)
 
-        key_padding_mask = alive <= 0.5
-        # PyTorch attention returns NaN if every key is masked. Keep one dummy
-        # zero token available in all-dead rows; final Q is explicitly zeroed.
-        all_dead = key_padding_mask.all(dim=1)
-        if bool(all_dead.any()):
-            key_padding_mask = key_padding_mask.clone()
-            key_padding_mask[all_dead, 0] = False
+        batch = encoded.shape[0]
+        q = self.query(encoded).view(batch, self.team_size, self.attention_heads, self.head_dim).transpose(1, 2)
+        k = self.key(encoded).view(batch, self.team_size, self.attention_heads, self.head_dim).transpose(1, 2)
+        v = self.value(encoded).view(batch, self.team_size, self.attention_heads, self.head_dim).transpose(1, 2)
 
-        context, _ = self.attention(
-            query=encoded,
-            key=encoded,
-            value=encoded,
-            key_padding_mask=key_padding_mask,
-            need_weights=False,
-        )
+        scores = torch.matmul(q, k.transpose(-1, -2)) / (self.head_dim ** 0.5)
+        other_mask = torch.ones(self.team_size, self.team_size, dtype=torch.bool, device=observations.device)
+        other_mask.fill_diagonal_(False)
+        key_alive = alive[:, None, None, :] > 0.5
+        valid_keys = key_alive & other_mask[None, None, :, :]
+        scores = scores.masked_fill(~valid_keys, -torch.finfo(scores.dtype).max)
+        has_other = valid_keys.any(dim=-1, keepdim=True)
+        weights = torch.softmax(scores, dim=-1)
+        weights = torch.where(has_other, weights, torch.zeros_like(weights))
+        context = torch.matmul(weights, v).transpose(1, 2).contiguous().view(batch, self.team_size, self.hidden_dim)
         q = self.q_head(torch.cat([encoded, context], dim=-1)).squeeze(-1)
         q = q * alive
         if not torch.isfinite(q).all():

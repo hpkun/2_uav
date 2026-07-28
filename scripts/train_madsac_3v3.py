@@ -46,6 +46,7 @@ def parse_args():
     p.add_argument("--total-env-steps", type=int)
     p.add_argument("--num-envs", type=int)
     p.add_argument("--env-workers", type=int)
+    p.add_argument("--gradient-steps", type=int)
     p.add_argument("--seed", type=int)
     p.add_argument("--device")
     p.add_argument("--output-dir")
@@ -71,11 +72,14 @@ def load_config(args) -> dict:
         (args.total_env_steps, "training", "total_env_steps"),
         (args.num_envs, "training", "num_envs"),
         (args.env_workers, "training", "num_env_workers"),
+        (args.gradient_steps, "training", "gradient_steps"),
         (args.seed, "experiment", "seed"),
         (args.device, "experiment", "device"),
         (args.output_dir, "experiment", "output_dir"),
     ):
         if value is not None:
+            if key == "gradient_steps" and int(value) <= 0:
+                raise ValueError("--gradient-steps must be positive")
             cfg[section][key] = value
     return cfg
 

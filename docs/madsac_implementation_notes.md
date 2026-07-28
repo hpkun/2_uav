@@ -19,7 +19,7 @@ No environment dynamics, controller equation, reward term, attack judgment, or f
 
 ## Runtime sampling defaults
 
-The formal MADSAC training configuration defaults to 16 parallel environments and 4 worker processes, so each worker manages 4 environments by default. `total_env_steps` remains the cumulative count of environment transitions across all parallel environments: increasing `num_envs` changes sampling throughput and the number of vector steps needed to reach the same total, but it does not change the per-sample algorithm definition. CLI arguments such as `--num-envs` and `--env-workers` can still override the YAML defaults.
+The formal MADSAC training configuration defaults to 16 parallel environments and 4 worker processes, so each worker manages 4 environments by default. `total_env_steps` remains the cumulative count of environment transitions across all parallel environments: increasing `num_envs` changes sampling throughput and the number of vector steps needed to reach the same total, but it does not change the per-sample algorithm definition. To preserve the previous approximate update-to-data ratio after moving the default from 8 to 16 environments, the formal default uses `gradient_steps=2`. CLI arguments such as `--num-envs`, `--env-workers`, and `--gradient-steps` can still override the YAML defaults.
 
 This is an engineering throughput setting, not a change to the paper-aligned SAC/MADSAC algorithm structure. Because checkpoint compatibility signatures include `num_envs`, old 8-environment checkpoints should be resumed with an explicit `--num-envs 8`; new experiments that omit `--num-envs` use 16 by default.
 
@@ -29,7 +29,7 @@ The baseline includes these MADSAC/SAC structures:
 
 - shared actor for homogeneous agents;
 - double centralized critics;
-- attention aggregation across red agents;
+- per-agent attention critics whose query comes from the current agent and whose key/value set contains only other alive red agents;
 - uniform experience replay;
 - fixed maximum-entropy coefficient;
 - target actor and target critics;
@@ -80,7 +80,7 @@ actions:      [batch, 3, 3]
 alive_masks:  [batch, 3]
 ```
 
-Each red agent encodes `concat(observation_i, action_i)` with a shared encoder. A 2-head `MultiheadAttention` layer aggregates over alive red agents. Dead agents are masked as keys/values and their final Q values are forced to zero. All-dead rows keep one zero dummy token available internally to avoid attention NaNs, then the final Q row is explicitly zeroed.
+Each red agent encodes `concat(observation_i, action_i)` with a shared encoder. For agent `i`, query comes from its own encoded token, while keys and values come only from other alive red agents `j != i`. The self embedding and the other-agent attention context are concatenated before the Q head. Dead agents are masked as keys/values and their final Q values are forced to zero. If no other alive agent exists, the attention context is a finite zero vector; all-dead rows return zero Q values.
 
 `TwinAttentionCritic` contains two fully independent `AttentionCritic` instances, Q1 and Q2.
 

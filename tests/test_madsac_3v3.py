@@ -32,6 +32,7 @@ def _script_args(**overrides):
         "total_env_steps": None,
         "num_envs": None,
         "env_workers": None,
+        "gradient_steps": None,
         "seed": None,
         "device": None,
         "output_dir": None,
@@ -81,18 +82,30 @@ def test_madsac_paper_config_defaults_to_16_envs_and_4_workers():
         cfg = yaml.safe_load(f)
     assert cfg["training"]["num_envs"] == 16
     assert cfg["training"]["num_env_workers"] == 4
+    assert cfg["training"]["gradient_steps"] == 2
 
 
-def test_madsac_load_config_preserves_16_env_default_without_cli_override():
+def test_madsac_load_config_preserves_16_env_and_two_gradient_steps_without_cli_override():
     cfg = load_config(_script_args())
     assert cfg["training"]["num_envs"] == 16
     assert cfg["training"]["num_env_workers"] == 4
+    assert cfg["training"]["gradient_steps"] == 2
 
 
-def test_madsac_load_config_allows_cli_num_envs_override_to_8():
-    cfg = load_config(_script_args(num_envs=8))
+def test_madsac_load_config_allows_cli_num_envs_and_gradient_steps_override_to_8_and_1():
+    cfg = load_config(_script_args(num_envs=8, gradient_steps=1))
     assert cfg["training"]["num_envs"] == 8
     assert cfg["training"]["num_env_workers"] == 4
+    assert cfg["training"]["gradient_steps"] == 1
+
+
+def test_madsac_load_config_rejects_non_positive_gradient_steps():
+    try:
+        load_config(_script_args(gradient_steps=0))
+    except ValueError as exc:
+        assert "--gradient-steps must be positive" in str(exc)
+    else:
+        raise AssertionError("expected non-positive gradient steps to be rejected")
 
 
 def test_madsac_evaluation_helper_default_num_envs_is_16():
@@ -159,6 +172,39 @@ def test_dead_agent_observation_action_does_not_affect_alive_q():
     act2[:, 1, :] = -999.0
     q2 = critic(obs2, act2, mask)
     assert torch.allclose(q1[:, [0, 2]], q2[:, [0, 2]], atol=1e-6)
+
+
+def test_attention_critic_excludes_self_token_from_other_agent_attention():
+    critic = AttentionCritic(hidden_dim=32, attention_heads=2)
+    obs = torch.randn(1, 3, 68)
+    act = torch.randn(1, 3, 3).clamp(-1, 1)
+    single_alive = torch.tensor([[1.0, 0.0, 0.0]])
+    all_dead = torch.zeros(1, 3)
+    q_single = critic(obs, act, single_alive)
+    q_all_dead = critic(obs, act, all_dead)
+    obs_dead_changed = obs.clone()
+    act_dead_changed = act.clone()
+    obs_dead_changed[:, 1:, :] = 999.0
+    act_dead_changed[:, 1:, :] = -999.0
+    q_changed = critic(obs_dead_changed, act_dead_changed, single_alive)
+    assert torch.isfinite(q_single).all()
+    assert torch.isfinite(q_all_dead).all()
+    assert torch.all(q_all_dead == 0.0)
+    assert torch.allclose(q_single[:, 0], q_changed[:, 0], atol=1e-6)
+
+
+def test_attention_critic_alive_teammate_can_affect_other_alive_agent_q():
+    critic = AttentionCritic(hidden_dim=32, attention_heads=2)
+    obs = torch.randn(1, 3, 68)
+    act = torch.randn(1, 3, 3).clamp(-1, 1)
+    mask = torch.tensor([[1.0, 1.0, 0.0]])
+    q1 = critic(obs, act, mask)
+    obs2, act2 = obs.clone(), act.clone()
+    obs2[:, 1, :] += 10.0
+    act2[:, 1, :] = (act2[:, 1, :] + 0.5).clamp(-1, 1)
+    q2 = critic(obs2, act2, mask)
+    assert torch.isfinite(q1).all() and torch.isfinite(q2).all()
+    assert not torch.allclose(q1[:, 0], q2[:, 0])
 
 
 def test_q1_q2_parameters_are_independent():
