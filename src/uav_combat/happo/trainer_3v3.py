@@ -506,11 +506,11 @@ class HAPPO3v3Trainer:
         self.best_evaluation = ckpt.get("best_evaluation")
         self.best_checkpoint_name = ckpt.get("best_checkpoint_name")
         self.evaluation_history = ckpt.get("evaluation_history", [])
+        self.reset_environments()
         self.rng.bit_generator.state = ckpt["numpy_rng_state"]
         torch.set_rng_state(ckpt["torch_cpu_rng_state"])
         if torch.cuda.is_available() and ckpt.get("torch_cuda_rng_state") is not None:
             torch.cuda.set_rng_state_all(ckpt["torch_cuda_rng_state"])
-        self.reset_environments()
 
     def close(self) -> None:
         self.vector_env.close()

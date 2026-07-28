@@ -70,6 +70,8 @@ HAPPO checkpoints use family `homogeneous_3v3_fixed_blue_happo` and save:
 
 Signature mismatch errors report specific differing fields.
 
+Checkpoints do not persist vector-worker or aircraft physical episode state. On resume, the trainer recreates fresh environment episodes first, then restores NumPy, Torch CPU, and Torch CUDA RNG states from the checkpoint. This preserves subsequent algorithm randomness such as agent update permutations and minibatch ordering from the checkpoint RNG position, but it is not a claim of step-by-step physical trajectory continuation.
+
 ## What this baseline does not claim
 
 This code is a baseline implementation for the current project environment. It does not claim to reproduce the original HAPPO paper's experimental results, and it does not add HARL-specific engineering modules beyond the HAPPO sequential update behavior needed here.
