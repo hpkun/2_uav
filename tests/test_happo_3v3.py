@@ -13,7 +13,9 @@ from uav_combat.happo.trainer_3v3 import (
     CHECKPOINT_FAMILY_HAPPO_3V3,
     HAPPO3v3Trainer,
     happo_preceding_factor_update,
+    normalize_advantages_for_agent,
     ppo_clipped_policy_loss,
+    validate_episode_accounting_3v3,
 )
 
 ROOT = Path(__file__).parents[1]
@@ -146,6 +148,72 @@ def test_happo_factor_update_uses_new_old_ratio_dead_samples_one_and_detaches():
     assert updated.requires_grad is False
 
 
+def test_per_agent_advantage_normalization_uses_each_agent_active_mask():
+    advantages = torch.tensor([1.0, 2.0, 10.0, 20.0])
+    masks = torch.tensor([
+        [1.0, 1.0, 1.0],
+        [0.0, 1.0, 1.0],
+        [0.0, 0.0, 1.0],
+        [0.0, 1.0, 0.0],
+    ])
+    norm0 = normalize_advantages_for_agent(advantages, masks[:, 0])
+    norm1 = normalize_advantages_for_agent(advantages, masks[:, 1])
+    norm2 = normalize_advantages_for_agent(advantages, masks[:, 2])
+    expected0 = (advantages - torch.tensor(1.0)) / 1e-8
+    expected1 = (advantages - torch.tensor([1.0, 2.0, 20.0]).mean()) / (
+        torch.tensor([1.0, 2.0, 20.0]).std(unbiased=False) + 1e-8
+    )
+    expected2 = (advantages - torch.tensor([1.0, 2.0, 10.0]).mean()) / (
+        torch.tensor([1.0, 2.0, 10.0]).std(unbiased=False) + 1e-8
+    )
+    assert torch.allclose(norm0, expected0)
+    assert torch.allclose(norm1, expected1)
+    assert torch.allclose(norm2, expected2)
+    assert not torch.allclose(norm1, norm2)
+
+
+def test_per_agent_advantage_normalization_no_active_samples_is_finite_passthrough():
+    advantages = torch.tensor([1.0, -2.0, 3.0])
+    out = normalize_advantages_for_agent(advantages, torch.zeros(3))
+    assert torch.allclose(out, advantages)
+    assert torch.isfinite(out).all()
+
+
+def test_happo_full_sequential_factor_propagation_with_agent_masks():
+    advantages = torch.tensor([1.0, -1.0, 2.0])
+    active = torch.tensor([
+        [1.0, 1.0, 1.0],
+        [1.0, 0.0, 1.0],
+        [0.0, 1.0, 1.0],
+    ])
+    old = torch.zeros(3, 3)
+    new = torch.log(torch.tensor([
+        [2.0, 3.0, 5.0],
+        [4.0, 7.0, 11.0],
+        [13.0, 17.0, 19.0],
+    ]))
+    factor = torch.ones(3)
+    used_effective_advantages = []
+    for agent_id in [0, 1, 2]:
+        norm_i = normalize_advantages_for_agent(advantages, active[:, agent_id])
+        used_effective_advantages.append((factor * norm_i).detach())
+        factor = happo_preceding_factor_update(factor, old[:, agent_id], new[:, agent_id], active[:, agent_id])
+    norm0 = normalize_advantages_for_agent(advantages, active[:, 0])
+    norm1 = normalize_advantages_for_agent(advantages, active[:, 1])
+    norm2 = normalize_advantages_for_agent(advantages, active[:, 2])
+    assert torch.allclose(used_effective_advantages[0], norm0)
+    assert torch.allclose(used_effective_advantages[1], torch.tensor([2.0, 4.0, 1.0]) * norm1)
+    assert torch.allclose(used_effective_advantages[2], torch.tensor([6.0, 4.0, 17.0]) * norm2)
+    assert factor.requires_grad is False
+    reverse_factor = torch.ones(3)
+    reverse_used = []
+    for agent_id in [2, 1, 0]:
+        norm_i = normalize_advantages_for_agent(advantages, active[:, agent_id])
+        reverse_used.append((reverse_factor * norm_i).detach())
+        reverse_factor = happo_preceding_factor_update(reverse_factor, old[:, agent_id], new[:, agent_id], active[:, agent_id])
+    assert not torch.allclose(used_effective_advantages[1], reverse_used[1])
+
+
 def test_ppo_clipped_policy_loss_positive_and_negative_advantages():
     ratio = torch.tensor([1.5, 0.5, 1.1, 0.9])
     adv = torch.tensor([1.0, 1.0, -1.0, -1.0])
@@ -155,6 +223,35 @@ def test_ppo_clipped_policy_loss_positive_and_negative_advantages():
         ratio.clamp(0.8, 1.2) * adv,
     ).mean()
     assert torch.allclose(loss, manual)
+
+
+def test_actor_update_isolation_for_single_agent_phase(tmp_path):
+    trainer = HAPPO3v3Trainer(ENV_V4, _tiny_config(tmp_path))
+    try:
+        obs = torch.randn(4, 68)
+        actions, _ = trainer.actors.actors[0].sample_action(obs)
+        old_log_prob = torch.zeros(4)
+        advantage = torch.ones(4)
+        before_actor0 = [p.detach().clone() for p in trainer.actors.actors[0].parameters()]
+        before_actor1 = [p.detach().clone() for p in trainer.actors.actors[1].parameters()]
+        before_actor2 = [p.detach().clone() for p in trainer.actors.actors[2].parameters()]
+        before_critic = [p.detach().clone() for p in trainer.critic.parameters()]
+        before_opt1 = trainer.actor_optimizers[1].state_dict()
+        before_opt2 = trainer.actor_optimizers[2].state_dict()
+        log_prob, entropy = trainer.actors.actors[0].evaluate_actions(obs, actions.detach())
+        ratio = torch.exp(log_prob - old_log_prob)
+        loss = ppo_clipped_policy_loss(ratio, advantage, 0.2) - 0.01 * entropy.mean()
+        trainer.actor_optimizers[0].zero_grad()
+        loss.backward()
+        trainer.actor_optimizers[0].step()
+        assert any(not torch.allclose(a, b) for a, b in zip(before_actor0, trainer.actors.actors[0].parameters()))
+        assert all(torch.allclose(a, b) for a, b in zip(before_actor1, trainer.actors.actors[1].parameters()))
+        assert all(torch.allclose(a, b) for a, b in zip(before_actor2, trainer.actors.actors[2].parameters()))
+        assert all(torch.allclose(a, b) for a, b in zip(before_critic, trainer.critic.parameters()))
+        assert before_opt1 == trainer.actor_optimizers[1].state_dict()
+        assert before_opt2 == trainer.actor_optimizers[2].state_dict()
+    finally:
+        trainer.close()
 
 
 def test_happo_trainer_constructs_independent_optimizers_and_signature(tmp_path):
@@ -167,6 +264,31 @@ def test_happo_trainer_constructs_independent_optimizers_and_signature(tmp_path)
         assert sig["observation_dims"] == [68, 68, 68]
         assert sig["action_dims"] == [3, 3, 3]
         assert "env_config_sha256" in sig
+    finally:
+        trainer.close()
+
+
+def test_happo_actor_updates_are_minibatch_steps_and_agents_updated_counts_unique_agents(tmp_path):
+    trainer = HAPPO3v3Trainer(ENV_V4, _tiny_config(tmp_path))
+    try:
+        rows = [
+            {"agent_id": 0, "policy_loss": 1.0, "entropy": 0.1, "approx_kl": 0.01,
+             "clip_fraction": 0.0, "ratio_mean": 1.0, "ratio_min": 0.9, "ratio_max": 1.1,
+             "factor_mean": 1.0, "factor_min": 1.0, "factor_max": 1.0,
+             "actor_grad_norm": 0.5, "active_samples": 4},
+            {"agent_id": 0, "policy_loss": 2.0, "entropy": 0.2, "approx_kl": 0.02,
+             "clip_fraction": 0.1, "ratio_mean": 1.1, "ratio_min": 0.8, "ratio_max": 1.2,
+             "factor_mean": 1.0, "factor_min": 1.0, "factor_max": 1.0,
+             "actor_grad_norm": 0.6, "active_samples": 4},
+            {"agent_id": 1, "active_samples": 0},
+            {"agent_id": 2, "policy_loss": 3.0, "entropy": 0.3, "approx_kl": 0.03,
+             "clip_fraction": 0.2, "ratio_mean": 1.2, "ratio_min": 0.7, "ratio_max": 1.3,
+             "factor_mean": 2.0, "factor_min": 2.0, "factor_max": 2.0,
+             "actor_grad_norm": 0.7, "active_samples": 4},
+        ]
+        metrics = trainer._summarize_update(rows, [0.5], np.zeros(8), np.ones(8))
+        assert metrics["actor_updates"] == 3
+        assert metrics["agents_updated"] == 2
     finally:
         trainer.close()
 
@@ -187,3 +309,165 @@ def test_happo_checkpoint_signature_mismatch_reports_field(tmp_path):
             raise AssertionError("expected signature mismatch")
     finally:
         trainer.close()
+
+
+def _nested_state_equal(a, b):
+    if isinstance(a, torch.Tensor):
+        return isinstance(b, torch.Tensor) and torch.equal(a, b)
+    if isinstance(a, np.ndarray):
+        return isinstance(b, np.ndarray) and np.array_equal(a, b)
+    if isinstance(a, dict):
+        return isinstance(b, dict) and set(a) == set(b) and all(_nested_state_equal(a[k], b[k]) for k in a)
+    if isinstance(a, (list, tuple)):
+        return isinstance(b, type(a)) and len(a) == len(b) and all(_nested_state_equal(x, y) for x, y in zip(a, b))
+    return a == b
+
+
+def _make_optimizer_state_nonempty(trainer):
+    for agent_id, actor in enumerate(trainer.actors.actors):
+        obs = torch.full((3, 68), float(agent_id + 1))
+        action, _ = actor.sample_action(obs)
+        log_prob, entropy = actor.evaluate_actions(obs, action.detach())
+        loss = -(log_prob + 0.01 * entropy).mean()
+        trainer.actor_optimizers[agent_id].zero_grad()
+        loss.backward()
+        trainer.actor_optimizers[agent_id].step()
+    states = torch.arange(96, dtype=torch.float32).reshape(2, 48) / 100.0
+    values = trainer.critic(states)
+    critic_loss = values.square().mean()
+    trainer.critic_optimizer.zero_grad()
+    critic_loss.backward()
+    trainer.critic_optimizer.step()
+
+
+def test_happo_checkpoint_full_roundtrip_preserves_actors_critic_optimizers_and_rng(tmp_path):
+    trainer = HAPPO3v3Trainer(ENV_V4, _tiny_config(tmp_path / "a"))
+    restored = None
+    ckpt = tmp_path / "happo_roundtrip.pt"
+    probe_obs = torch.randn(4, 3, 68)
+    probe_state = torch.randn(4, 48)
+    try:
+        with torch.no_grad():
+            for agent_id, actor in enumerate(trainer.actors.actors):
+                for param in actor.parameters():
+                    param.add_(0.01 * (agent_id + 1))
+            for param in trainer.critic.parameters():
+                param.sub_(0.02)
+        _make_optimizer_state_nonempty(trainer)
+        trainer.env_steps = 128
+        trainer.vector_steps = 16
+        trainer.update_count = 3
+        trainer.last_agent_order = [2, 0, 1]
+        trainer.best_score = (1.0, 2.0, -3.0)
+        trainer.best_evaluation = {"episodes": 2, "mean_red_attack_kills": 1.5}
+        trainer.best_checkpoint_name = "best.pt"
+        trainer.evaluation_history = [{"env_steps": 64, "score": [1.0]}]
+        with torch.no_grad():
+            actor_actions = trainer.actors.deterministic_actions(probe_obs)
+            critic_values = trainer.critic(probe_state)
+        actor_states = [actor.state_dict() for actor in trainer.actors.actors]
+        actor_opt_states = [opt.state_dict() for opt in trainer.actor_optimizers]
+        critic_state = trainer.critic.state_dict()
+        critic_opt_state = trainer.critic_optimizer.state_dict()
+        numpy_state = trainer.rng.bit_generator.state
+        torch_state = torch.get_rng_state()
+        trainer.save_checkpoint(ckpt)
+    finally:
+        trainer.close()
+
+    restored = HAPPO3v3Trainer(ENV_V4, _tiny_config(tmp_path / "b"))
+    try:
+        restored.load_checkpoint(ckpt)
+        with torch.no_grad():
+            restored_actions = restored.actors.deterministic_actions(probe_obs)
+            restored_values = restored.critic(probe_state)
+        assert torch.allclose(actor_actions, restored_actions, atol=1e-7)
+        assert torch.allclose(critic_values, restored_values, atol=1e-7)
+        for expected, actor in zip(actor_states, restored.actors.actors):
+            for key, value in expected.items():
+                assert torch.equal(value, actor.state_dict()[key])
+        for key, value in critic_state.items():
+            assert torch.equal(value, restored.critic.state_dict()[key])
+        for expected, opt in zip(actor_opt_states, restored.actor_optimizers):
+            assert _nested_state_equal(expected, opt.state_dict())
+        assert _nested_state_equal(critic_opt_state, restored.critic_optimizer.state_dict())
+        assert restored.env_steps == 128
+        assert restored.vector_steps == 16
+        assert restored.update_count == 3
+        assert restored.last_agent_order == [2, 0, 1]
+        assert restored.best_score == (1.0, 2.0, -3.0)
+        assert restored.best_evaluation == {"episodes": 2, "mean_red_attack_kills": 1.5}
+        assert restored.best_checkpoint_name == "best.pt"
+        assert restored.evaluation_history == [{"env_steps": 64, "score": [1.0]}]
+        assert _nested_state_equal(numpy_state, restored.rng.bit_generator.state)
+        assert torch.equal(torch_state, torch.get_rng_state())
+    finally:
+        restored.close()
+
+
+def test_happo_episode_accounting_validation_accepts_consistent_record():
+    rec = {
+        "red_survivors": 1, "red_attack_deaths": 1, "red_boundary_deaths": 1,
+        "red_friendly_collision_deaths": 0, "red_cross_collision_deaths": 0,
+        "red_boundary_altitude_deaths": 1, "red_boundary_xy_deaths": 0,
+        "blue_survivors": 0, "blue_attack_deaths": 2, "blue_boundary_deaths": 0,
+        "blue_friendly_collision_deaths": 1, "blue_cross_collision_deaths": 0,
+        "blue_boundary_altitude_deaths": 0, "blue_boundary_xy_deaths": 0,
+        "red_attack_kills": 2, "blue_attack_kills": 1,
+    }
+    validate_episode_accounting_3v3(rec, env_index=0)
+
+
+def test_happo_episode_accounting_validation_rejects_survivor_total_mismatch():
+    rec = {
+        "red_survivors": 3, "red_attack_deaths": 1, "red_boundary_deaths": 0,
+        "red_friendly_collision_deaths": 0, "red_cross_collision_deaths": 0,
+        "red_boundary_altitude_deaths": 0, "red_boundary_xy_deaths": 0,
+        "blue_survivors": 3, "blue_attack_deaths": 0, "blue_boundary_deaths": 0,
+        "blue_friendly_collision_deaths": 0, "blue_cross_collision_deaths": 0,
+        "blue_boundary_altitude_deaths": 0, "blue_boundary_xy_deaths": 0,
+        "red_attack_kills": 0, "blue_attack_kills": 1,
+    }
+    try:
+        validate_episode_accounting_3v3(rec, env_index=4)
+    except RuntimeError as exc:
+        assert "Death ledger mismatch" in str(exc)
+        assert "env=4" in str(exc)
+    else:
+        raise AssertionError("expected death ledger mismatch")
+
+
+def test_happo_episode_accounting_validation_rejects_boundary_mismatch():
+    rec = {
+        "red_survivors": 2, "red_attack_deaths": 0, "red_boundary_deaths": 1,
+        "red_friendly_collision_deaths": 0, "red_cross_collision_deaths": 0,
+        "red_boundary_altitude_deaths": 0, "red_boundary_xy_deaths": 0,
+        "blue_survivors": 3, "blue_attack_deaths": 0, "blue_boundary_deaths": 0,
+        "blue_friendly_collision_deaths": 0, "blue_cross_collision_deaths": 0,
+        "blue_boundary_altitude_deaths": 0, "blue_boundary_xy_deaths": 0,
+        "red_attack_kills": 0, "blue_attack_kills": 0,
+    }
+    try:
+        validate_episode_accounting_3v3(rec, env_index=1)
+    except RuntimeError as exc:
+        assert "Boundary death mismatch" in str(exc)
+    else:
+        raise AssertionError("expected boundary mismatch")
+
+
+def test_happo_episode_accounting_validation_rejects_attack_mismatch():
+    rec = {
+        "red_survivors": 3, "red_attack_deaths": 0, "red_boundary_deaths": 0,
+        "red_friendly_collision_deaths": 0, "red_cross_collision_deaths": 0,
+        "red_boundary_altitude_deaths": 0, "red_boundary_xy_deaths": 0,
+        "blue_survivors": 2, "blue_attack_deaths": 1, "blue_boundary_deaths": 0,
+        "blue_friendly_collision_deaths": 0, "blue_cross_collision_deaths": 0,
+        "blue_boundary_altitude_deaths": 0, "blue_boundary_xy_deaths": 0,
+        "red_attack_kills": 0, "blue_attack_kills": 0,
+    }
+    try:
+        validate_episode_accounting_3v3(rec, env_index=2)
+    except RuntimeError as exc:
+        assert "Attack ledger mismatch" in str(exc)
+    else:
+        raise AssertionError("expected attack ledger mismatch")

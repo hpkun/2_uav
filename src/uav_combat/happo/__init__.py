@@ -3,7 +3,13 @@
 from .buffer_3v3 import HAPPORolloutBuffer3v3
 from .evaluation_3v3 import evaluate_happo_fixed_blue_3v3
 from .networks import CentralizedValueCritic, HAPPOGaussianActor, IndependentHAPPOActors
-from .trainer_3v3 import HAPPO3v3Trainer, happo_preceding_factor_update, ppo_clipped_policy_loss
+from .trainer_3v3 import (
+    HAPPO3v3Trainer,
+    happo_preceding_factor_update,
+    normalize_advantages_for_agent,
+    ppo_clipped_policy_loss,
+    validate_episode_accounting_3v3,
+)
 
 __all__ = [
     "CentralizedValueCritic",
@@ -13,5 +19,7 @@ __all__ = [
     "IndependentHAPPOActors",
     "evaluate_happo_fixed_blue_3v3",
     "happo_preceding_factor_update",
+    "normalize_advantages_for_agent",
     "ppo_clipped_policy_loss",
+    "validate_episode_accounting_3v3",
 ]

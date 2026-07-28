@@ -34,7 +34,7 @@ The current wrapper passes homogeneous dimensions, but the core interface does n
 
 `HAPPORolloutBuffer3v3` stores local observations, centralized states, per-agent actions, per-agent old log probabilities, team rewards, value predictions, done flags, and alive masks. GAE follows the existing MAPPO 3v3 semantics: `terminated OR truncated` stops bootstrap under the current environment contract, and returns are team-level.
 
-Advantages are normalized over valid active samples. Dead-agent samples are excluded from actor losses and entropy means, and their preceding-ratio contribution to HAPPO `factor` is forced to 1.
+Team GAE is shared across the red team, but advantage normalization is performed separately for each actor using that agent's own active mask. Dead-after-termination samples therefore do not contribute to that agent's normalization mean or variance. The HAPPO preceding-policy-ratio `factor` is then multiplied by the normalized advantage for the current agent. Dead-agent samples are excluded from actor losses and entropy means, and their preceding-ratio contribution to HAPPO `factor` is forced to 1.
 
 ## Sequential HAPPO update
 
@@ -52,6 +52,8 @@ For each rollout update:
 10. update the centralized value critic after the actor sequence.
 
 The factor is not clipped. PPO clipping still applies inside each actor's surrogate objective.
+
+`actor_updates` in training metrics means the number of actual Actor optimizer minibatch steps. `agents_updated` means the number of distinct agents that had at least one active sample and actually performed an optimizer step in the update. HAPPO rollout collection also validates the same 3v3 death-ledger invariants used by the MAPPO trainer: survivor/death totals, boundary subcategories, and attack kill/death symmetry.
 
 ## Checkpointing
 

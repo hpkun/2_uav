@@ -69,6 +69,56 @@ def ppo_clipped_policy_loss(ratio: torch.Tensor, advantage: torch.Tensor, clip_c
     return -torch.minimum(unclipped, clipped).mean()
 
 
+def normalize_advantages_for_agent(advantages: torch.Tensor, active_mask: torch.Tensor) -> torch.Tensor:
+    """Normalize team GAE advantages using only one agent's active samples."""
+    active = active_mask > 0.5
+    if int(active.sum().detach().cpu().item()) <= 0:
+        out = advantages.clone()
+    else:
+        active_advantages = advantages[active]
+        out = (advantages - active_advantages.mean()) / (active_advantages.std(unbiased=False) + 1e-8)
+    if not torch.isfinite(out).all():
+        raise FloatingPointError("non-finite per-agent normalized advantages")
+    return out
+
+
+def validate_episode_accounting_3v3(record: dict[str, Any], env_index: int) -> None:
+    """Validate the same 3v3 episode death-ledger invariants used by MAPPO."""
+    for team in ("red", "blue"):
+        fields = {
+            "survivors": int(record[f"{team}_survivors"]),
+            "attack_deaths": int(record[f"{team}_attack_deaths"]),
+            "boundary_deaths": int(record[f"{team}_boundary_deaths"]),
+            "friendly_collision_deaths": int(record[f"{team}_friendly_collision_deaths"]),
+            "cross_collision_deaths": int(record[f"{team}_cross_collision_deaths"]),
+            "boundary_altitude_deaths": int(record[f"{team}_boundary_altitude_deaths"]),
+            "boundary_xy_deaths": int(record[f"{team}_boundary_xy_deaths"]),
+        }
+        total = (
+            fields["survivors"]
+            + fields["attack_deaths"]
+            + fields["boundary_deaths"]
+            + fields["friendly_collision_deaths"]
+            + fields["cross_collision_deaths"]
+        )
+        if total != 3:
+            raise RuntimeError(f"Death ledger mismatch for {team} env={env_index}: {fields} total={total} != 3")
+        if fields["boundary_deaths"] != fields["boundary_altitude_deaths"] + fields["boundary_xy_deaths"]:
+            raise RuntimeError(f"Boundary death mismatch for {team} env={env_index}: {fields}")
+    if int(record["red_attack_kills"]) != int(record["blue_attack_deaths"]):
+        raise RuntimeError(
+            "Attack ledger mismatch env="
+            f"{env_index}: red_attack_kills={record['red_attack_kills']} "
+            f"blue_attack_deaths={record['blue_attack_deaths']}"
+        )
+    if int(record["blue_attack_kills"]) != int(record["red_attack_deaths"]):
+        raise RuntimeError(
+            "Attack ledger mismatch env="
+            f"{env_index}: blue_attack_kills={record['blue_attack_kills']} "
+            f"red_attack_deaths={record['red_attack_deaths']}"
+        )
+
+
 class HAPPO3v3Trainer:
     """Three independent red actors with sequential HAPPO updates."""
 
@@ -189,12 +239,20 @@ class HAPPO3v3Trainer:
                         "blue_attack_kills": int(r.episode_blue_attack_kills[idx]),
                         "red_survivors": int(r.episode_red_survivors[idx]),
                         "blue_survivors": int(r.episode_blue_survivors[idx]),
+                        "red_attack_deaths": int(r.episode_red_attack_deaths[idx]),
+                        "blue_attack_deaths": int(r.episode_blue_attack_deaths[idx]),
                         "red_boundary_deaths": int(r.episode_red_boundary_deaths[idx]),
+                        "blue_boundary_deaths": int(r.episode_blue_boundary_deaths[idx]),
                         "red_boundary_altitude_deaths": int(r.episode_red_boundary_altitude_deaths[idx]),
+                        "blue_boundary_altitude_deaths": int(r.episode_blue_boundary_altitude_deaths[idx]),
                         "red_boundary_xy_deaths": int(r.episode_red_boundary_xy_deaths[idx]),
+                        "blue_boundary_xy_deaths": int(r.episode_blue_boundary_xy_deaths[idx]),
                         "red_friendly_collision_deaths": int(r.episode_red_friendly_collision_deaths[idx]),
+                        "blue_friendly_collision_deaths": int(r.episode_blue_friendly_collision_deaths[idx]),
                         "red_cross_collision_deaths": int(r.episode_red_cross_collision_deaths[idx]),
+                        "blue_cross_collision_deaths": int(r.episode_blue_cross_collision_deaths[idx]),
                     }
+                    validate_episode_accounting_3v3(rec, int(idx))
                     completed.append(rec)
                 self.episode_returns[idx] = 0.0
                 self.episode_lengths[idx] = 0
@@ -256,12 +314,7 @@ class HAPPO3v3Trainer:
         alive = torch.as_tensor(self.buffer.agent_alive_masks.reshape(-1, self.team_size), device=self.device)
         advantages = torch.as_tensor(self.buffer.advantages.reshape(-1), device=self.device)
         returns = torch.as_tensor(self.buffer.returns.reshape(-1), device=self.device)
-        active_adv = advantages[(alive.sum(dim=1) > 0.5)]
-        if len(active_adv) > 0:
-            norm_adv = (advantages - active_adv.mean()) / (active_adv.std(unbiased=False) + 1e-8)
-        else:
-            norm_adv = advantages
-        factor = torch.ones_like(norm_adv)
+        factor = torch.ones_like(advantages)
         agent_order = [int(v) for v in self.rng.permutation(self.team_size)]
         self.last_agent_order = agent_order
 
@@ -270,7 +323,7 @@ class HAPPO3v3Trainer:
         minibatch_size = int(t["minibatch_size"])
         ppo_epochs = int(t["ppo_epochs"])
         max_grad_norm = float(t["max_grad_norm"])
-        total_samples = len(norm_adv)
+        total_samples = len(advantages)
 
         for agent_id in agent_order:
             active = alive[:, agent_id] > 0.5
@@ -278,6 +331,7 @@ class HAPPO3v3Trainer:
                 factor = factor.detach()
                 actor_rows.append({"agent_id": agent_id, "active_samples": 0})
                 continue
+            normalized_advantages_i = normalize_advantages_for_agent(advantages, active.float())
             for _ in range(ppo_epochs):
                 order = self.rng.permutation(total_samples)
                 for start in range(0, total_samples, minibatch_size):
@@ -291,7 +345,7 @@ class HAPPO3v3Trainer:
                     )
                     log_ratio = new_lp - old_log_probs[idx, agent_id]
                     ratio = log_ratio.exp()
-                    effective_adv = (factor[idx] * norm_adv[idx]).detach()
+                    effective_adv = (factor[idx] * normalized_advantages_i[idx]).detach()
                     policy_loss = ppo_clipped_policy_loss(ratio, effective_adv, clip_coef)
                     loss = policy_loss - self.current_entropy_coef * entropy.mean()
                     opt = self.actor_optimizers[agent_id]
@@ -360,6 +414,7 @@ class HAPPO3v3Trainer:
             "update": self.update_count,
             "agent_update_order": list(self.last_agent_order),
             "actor_updates": len(nonempty),
+            "agents_updated": len({int(r["agent_id"]) for r in nonempty}),
             "policy_loss": mean("policy_loss"),
             "entropy": mean("entropy"),
             "approx_kl": mean("approx_kl"),
@@ -467,6 +522,8 @@ __all__ = [
     "HAPPO3v3Trainer",
     "compute_best_score",
     "happo_preceding_factor_update",
+    "normalize_advantages_for_agent",
     "ppo_clipped_policy_loss",
     "signature_mismatches",
+    "validate_episode_accounting_3v3",
 ]
