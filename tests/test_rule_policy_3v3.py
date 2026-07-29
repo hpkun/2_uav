@@ -106,31 +106,25 @@ def test_two_blue_three_red_assigns_two_targets_only():
     assert len(set(targets.values())) == 2
 
 
-def test_attackable_pair_is_prioritized_over_nearer_non_attackable_pair():
+def test_greedy_uses_pure_distance_even_when_farther_target_is_attackable():
     spec = _spec()
     blue = _aircraft("blue_0", spec, 0.0, 0.0, psi=0.0)
-    attackable = _aircraft("red_0", spec, 900.0, 0.0, psi=0.0)
+    farther_attackable = _aircraft("red_0", spec, 900.0, 0.0, psi=0.0)
     nearer_not_attackable = _aircraft("red_1", spec, 700.0, 450.0, psi=0.0)
-    _, targets = _greedy_policy().select_actions([blue], [nearer_not_attackable, attackable])
-    assert targets["blue_0"] == "red_0"
+    _, targets = _greedy_policy().select_actions([blue], [nearer_not_attackable, farther_attackable])
+    assert targets["blue_0"] == "red_1"
 
 
-def test_switch_penalty_keeps_target_for_tiny_improvement_and_reassigns_when_dead():
+def test_greedy_result_does_not_depend_on_previous_calls():
     spec = _spec()
     policy = _greedy_policy()
     blue = _aircraft("blue_0", spec, 0.0, 0.0)
-    red_0 = _aircraft("red_0", spec, 1000.0, 0.0)
-    red_1 = _aircraft("red_1", spec, 1100.0, 0.0)
-    _, first_targets = policy.select_actions([blue], [red_0, red_1])
-    assert first_targets["blue_0"] == "red_0"
+    policy.select_actions([blue], [_aircraft("red_0", spec, 1000.0, 0.0)])
 
-    red_1.state.x = 900.0
-    _, second_targets = policy.select_actions([blue], [red_0, red_1])
-    assert second_targets["blue_0"] == "red_0"
-
-    red_0.state.alive = False
-    _, third_targets = policy.select_actions([blue], [red_0, red_1])
-    assert third_targets["blue_0"] == "red_1"
+    current_reds = [_aircraft("red_0", spec, 1000.0, 0.0), _aircraft("red_1", spec, 900.0, 0.0)]
+    _, reused_policy_targets = policy.select_actions([blue], current_reds)
+    _, fresh_policy_targets = _greedy_policy().select_actions([blue], current_reds)
+    assert reused_policy_targets == fresh_policy_targets == {"blue_0": "red_1"}
 
 
 def test_tie_break_is_deterministic_by_aircraft_id():
@@ -168,10 +162,10 @@ def test_local_vector_env_uses_v5_greedy_blue_policy():
     vec = LocalCombatVectorEnv3v3(CONFIG_V5, 1)
     try:
         modes = vec.policy_modes()
+        assert set(modes) == {"blue", "red", "blue_policy", "red_policy"}
         assert modes["blue"] == ["rate_aligned_v1"]
         assert modes["blue_policy"] == ["greedy_team_pursuit_v1"]
         assert modes["red_policy"] == ["paper_nearest_pursuit_v1"]
-        assert modes["blue_action_mapping"] == ["rate_aligned_v1"]
     finally:
         vec.close()
 
@@ -180,9 +174,19 @@ def test_multiprocessing_vector_env_uses_v5_greedy_blue_policy():
     vec = SubprocessCombatVectorEnv3v3(CONFIG_V5, 2, 2)
     try:
         modes = vec.policy_modes()
+        assert set(modes) == {"blue", "red", "blue_policy", "red_policy"}
         assert modes["blue"] == ["rate_aligned_v1", "rate_aligned_v1"]
         assert modes["blue_policy"] == ["greedy_team_pursuit_v1", "greedy_team_pursuit_v1"]
         assert modes["red_policy"] == ["paper_nearest_pursuit_v1", "paper_nearest_pursuit_v1"]
-        assert modes["red_action_mapping"] == ["rate_aligned_v1", "rate_aligned_v1"]
     finally:
         vec.close()
+
+
+def test_v5_matches_v4_except_rule_policy_fields():
+    v4 = load_config(CONFIG_V4)
+    v5 = load_config(CONFIG_V5)
+    assert "blue_rule_policy" not in v4
+    assert "red_rule_policy" not in v4
+    assert v5.pop("blue_rule_policy") == {"mode": "greedy_team_pursuit_v1"}
+    assert v5.pop("red_rule_policy") == {"mode": "paper_nearest_pursuit_v1"}
+    assert v5 == v4

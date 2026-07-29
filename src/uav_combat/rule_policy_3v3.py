@@ -1,7 +1,6 @@
 """Nearest-target pursuit policy for fixed-rule blue team in 3v3."""
 import numpy as np
 
-from .combat import SimplifiedAttackModel
 from .geometry import compute_pairwise_geometry
 from .math_utils import safe_clip
 from .models import Aircraft
@@ -146,10 +145,6 @@ class GreedyTeamPursuitPolicy3v3(NearestTargetPursuitPolicy3v3):
         delta_yaw_max: float,
         delta_pitch_max: float,
         delta_speed_max: float,
-        attack_distance_min: float,
-        attack_distance_max: float,
-        attack_ata_max: float,
-        attack_aa_max: float,
         mapping_mode: str = "legacy_delta",
         yaw_rate_max: float | None = None,
         pitch_rate_max: float | None = None,
@@ -170,31 +165,11 @@ class GreedyTeamPursuitPolicy3v3(NearestTargetPursuitPolicy3v3):
             k_pitch=k_pitch,
             k_speed=k_speed,
         )
-        self.attack_distance_max = float(attack_distance_max)
-        self._attack_model = SimplifiedAttackModel(
-            attack_distance_min,
-            attack_distance_max,
-            attack_ata_max,
-            attack_aa_max,
-        )
 
-    def _pair_score(self, own: Aircraft, target: Aircraft) -> tuple[int, float, str, str]:
+    def _pair_score(self, own: Aircraft, target: Aircraft) -> tuple[float, str, str]:
         geometry = compute_pairwise_geometry(own.state, target.state)
-        attackable_rank = 0 if self._attack_model.can_attack(own.state, target.state) else 1
-        geometry_cost = (
-            geometry.distance
-            + self.attack_distance_max * abs(geometry.yaw_error) / np.pi
-            + 0.5 * self.attack_distance_max * abs(geometry.pitch_error) / (np.pi / 2.0)
-        )
-        previous_target = self._prev_targets.get(own.aircraft_id)
-        switch_cost = (
-            0.25 * self.attack_distance_max
-            if previous_target is not None and previous_target != target.aircraft_id
-            else 0.0
-        )
         return (
-            attackable_rank,
-            float(geometry_cost + switch_cost),
+            float(geometry.distance),
             own.aircraft_id,
             target.aircraft_id,
         )
@@ -240,7 +215,6 @@ class GreedyTeamPursuitPolicy3v3(NearestTargetPursuitPolicy3v3):
         """Return (actions, targets) for one synchronous team-greedy step."""
         actions: dict[str, np.ndarray] = {}
         targets: dict[str, str | None] = {}
-        target_counts: dict[str, int] = {}
         assignments = self._assign_targets(own_aircraft, enemy_aircraft)
 
         for own in own_aircraft:
@@ -256,27 +230,14 @@ class GreedyTeamPursuitPolicy3v3(NearestTargetPursuitPolicy3v3):
                 continue
 
             targets[own.aircraft_id] = target.aircraft_id
-            target_counts[target.aircraft_id] = target_counts.get(target.aircraft_id, 0) + 1
             action = np.asarray(self.action(own, target), dtype=np.float32)
             actions[own.aircraft_id] = np.clip(action, -1.0, 1.0).astype(np.float32)
-
-        for own_id, target_id in targets.items():
-            previous_target = self._prev_targets.get(own_id)
-            if previous_target is not None and target_id is not None and previous_target != target_id:
-                self.target_switch_count[own_id] = self.target_switch_count.get(own_id, 0) + 1
-            self._prev_targets[own_id] = target_id
-
-        for count in target_counts.values():
-            if count >= 2:
-                self.focus_fire_count += 1
 
         return actions, targets
 
     def reset_counters(self) -> None:
-        """Reset episode-level target memory and lightweight counters."""
-        self._prev_targets.clear()
-        self.target_switch_count.clear()
-        self.focus_fire_count = 0
+        """Satisfy the vector-env rule-policy interface without state."""
+        return None
 
 
 def make_nearest_target_pursuit_policy_3v3(config: dict) -> NearestTargetPursuitPolicy3v3:
@@ -300,15 +261,10 @@ def make_nearest_target_pursuit_policy_3v3(config: dict) -> NearestTargetPursuit
 def _make_greedy_team_pursuit_policy_3v3(config: dict) -> GreedyTeamPursuitPolicy3v3:
     act_cfg = config["action"]
     ac_cfg = config["aircraft"]
-    combat_cfg = config["combat"]
     return GreedyTeamPursuitPolicy3v3(
         act_cfg["delta_yaw_max"],
         act_cfg["delta_pitch_max"],
         act_cfg["delta_speed_max"],
-        combat_cfg["attack_distance_min"],
-        combat_cfg["attack_distance_max"],
-        combat_cfg["attack_ata_max"],
-        combat_cfg["attack_aa_max"],
         mapping_mode=act_cfg.get("mapping_mode", "legacy_delta"),
         yaw_rate_max=ac_cfg["yaw_rate_max"],
         pitch_rate_max=ac_cfg["pitch_rate_max"],

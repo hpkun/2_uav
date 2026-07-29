@@ -408,12 +408,11 @@ class TestRulePolicy:
         worker = SubprocessCombatVectorEnv3v3(CONFIG_V4, 2, 2)
         try:
             local_modes = local.policy_modes()
+            assert set(local_modes) == {"blue", "red", "blue_policy", "red_policy"}
             assert local_modes["blue"] == ["rate_aligned_v1", "rate_aligned_v1"]
             assert local_modes["red"] == ["rate_aligned_v1", "rate_aligned_v1"]
             assert local_modes["blue_policy"] == ["paper_nearest_pursuit_v1", "paper_nearest_pursuit_v1"]
             assert local_modes["red_policy"] == ["paper_nearest_pursuit_v1", "paper_nearest_pursuit_v1"]
-            assert local_modes["blue_action_mapping"] == ["rate_aligned_v1", "rate_aligned_v1"]
-            assert local_modes["red_action_mapping"] == ["rate_aligned_v1", "rate_aligned_v1"]
             assert worker.policy_modes() == local_modes
         finally:
             local.close()

@@ -408,8 +408,6 @@ def _policy_modes(blue_policies, red_policies):
         # Explicit fields for the actual rule policy and action mapping.
         "blue_policy": [p.policy_name for p in blue_policies],
         "red_policy": [p.policy_name for p in red_policies],
-        "blue_action_mapping": blue_mapping,
-        "red_action_mapping": red_mapping,
     }
 
 

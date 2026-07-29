@@ -50,7 +50,7 @@ Early training or exploratory policies may still show collisions, boundary death
 
 The default fixed-blue rule policy remains `paper_nearest_pursuit_v1`: each aircraft independently selects the nearest alive enemy at every step and uses the existing pure-pursuit continuous action mapping. Configurations that omit `blue_rule_policy` keep this historical behavior.
 
-`configs/homogeneous_3v3_learnable_v5_greedy_blue.yaml` keeps the v4 dynamics, reward, attack model, initial conditions, and `rate_aligned_v1` action mapping, but sets blue to `greedy_team_pursuit_v1`. This rule first performs a deterministic team-level greedy one-to-one target assignment when possible, then reuses the same pure-pursuit controller. It is a simple fixed training opponent, not an optimal policy or a complex expert system.
+`configs/homogeneous_3v3_learnable_v5_greedy_blue.yaml` keeps the v4 dynamics, reward, attack model, initial conditions, and `rate_aligned_v1` action mapping, but sets blue to `greedy_team_pursuit_v1`. This rule first performs a deterministic team-level greedy one-to-one target assignment using only current 3-D distance and aircraft-id tie-breaks, then reuses the same pure-pursuit controller. It is a simple fixed training opponent, not an optimal policy or a complex expert system.
 
 ### Architecture
 
