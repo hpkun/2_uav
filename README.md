@@ -46,6 +46,12 @@ The v4 initial separation is widened to 3500-5000 m so first entry into the 1000
 
 Early training or exploratory policies may still show collisions, boundary deaths, zero kills, large action magnitudes, all-aircraft losses, and volatile returns. Those observations alone are not treated as environment implementation errors. Environment errors should be judged from finite-state failures, finite-reward failures, broken interfaces, non-conserved death ledgers, duplicate deaths, or reproducible logical contradictions.
 
+### Fixed blue rule policies
+
+The default fixed-blue rule policy remains `paper_nearest_pursuit_v1`: each aircraft independently selects the nearest alive enemy at every step and uses the existing pure-pursuit continuous action mapping. Configurations that omit `blue_rule_policy` keep this historical behavior.
+
+`configs/homogeneous_3v3_learnable_v5_greedy_blue.yaml` keeps the v4 dynamics, reward, attack model, initial conditions, and `rate_aligned_v1` action mapping, but sets blue to `greedy_team_pursuit_v1`. This rule first performs a deterministic team-level greedy one-to-one target assignment when possible, then reuses the same pure-pursuit controller. It is a simple fixed training opponent, not an optimal policy or a complex expert system.
+
 ### Architecture
 
 | Component | Dim | Notes |

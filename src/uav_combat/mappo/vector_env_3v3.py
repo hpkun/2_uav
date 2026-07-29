@@ -8,7 +8,7 @@ from typing import Any, NamedTuple
 import numpy as np
 
 from ..environment_3v3 import GS_DIM, OBS_DIM, Homogeneous3v3AirCombatEnv
-from ..rule_policy_3v3 import make_nearest_target_pursuit_policy_3v3
+from ..rule_policy_3v3 import make_team_rule_policy_3v3
 from ..scenario_3v3 import BLUE_IDS, RED_IDS
 from .vector_env import CONTROL_DIAGNOSTIC_KEYS, K
 
@@ -226,9 +226,9 @@ def _build_result(L, obs, gs, team_rew, term, trunc, am, atg, dc, tac,
 
 def _worker_main_3v3(conn, env_config, num_local_envs, worker_id):
     envs = [Homogeneous3v3AirCombatEnv(env_config) for _ in range(num_local_envs)]
-    blue_policies = [make_nearest_target_pursuit_policy_3v3(envs[0].config)
+    blue_policies = [make_team_rule_policy_3v3(envs[0].config, team="blue")
                      for _ in range(num_local_envs)]
-    red_policies = [make_nearest_target_pursuit_policy_3v3(envs[0].config)
+    red_policies = [make_team_rule_policy_3v3(envs[0].config, team="red")
                     for _ in range(num_local_envs)]
     try:
         while True:
@@ -399,9 +399,17 @@ def _worker_reset_at(envs, blue_policies, red_policies, payload):
 
 
 def _policy_modes(blue_policies, red_policies):
+    blue_mapping = [p.mapping_mode for p in blue_policies]
+    red_mapping = [p.mapping_mode for p in red_policies]
     return {
-        "blue": [p.mapping_mode for p in blue_policies],
-        "red": [p.mapping_mode for p in red_policies],
+        # Backward-compatible fields used by existing training summaries.
+        "blue": blue_mapping,
+        "red": red_mapping,
+        # Explicit fields for the actual rule policy and action mapping.
+        "blue_policy": [p.policy_name for p in blue_policies],
+        "red_policy": [p.policy_name for p in red_policies],
+        "blue_action_mapping": blue_mapping,
+        "red_action_mapping": red_mapping,
     }
 
 
@@ -413,9 +421,9 @@ class LocalCombatVectorEnv3v3:
     def __init__(self, env_config, num_envs):
         self.num_envs = num_envs
         self.envs = [Homogeneous3v3AirCombatEnv(env_config) for _ in range(num_envs)]
-        self.blue_policies = [make_nearest_target_pursuit_policy_3v3(self.envs[0].config)
+        self.blue_policies = [make_team_rule_policy_3v3(self.envs[0].config, team="blue")
                               for _ in range(num_envs)]
-        self.red_policies = [make_nearest_target_pursuit_policy_3v3(self.envs[0].config)
+        self.red_policies = [make_team_rule_policy_3v3(self.envs[0].config, team="red")
                              for _ in range(num_envs)]
         self._closed = False
 
@@ -513,10 +521,7 @@ class SubprocessCombatVectorEnv3v3:
             c.send(("policy_modes", None))
         ps = [self._conns[w].recv() for w in range(self.num_env_workers)]
         for w, r in enumerate(ps): self._cerr(r, w)
-        return {
-            "blue": [mode for p in ps for mode in p["blue"]],
-            "red": [mode for p in ps for mode in p["red"]],
-        }
+        return {key: [mode for p in ps for mode in p[key]] for key in ps[0]}
 
     def close(self):
         if self._closed: return
