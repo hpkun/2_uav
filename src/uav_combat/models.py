@@ -70,4 +70,10 @@ class Aircraft:
     team: str
     spec: AircraftSpec
     state: AircraftState
+    role: str = "combat"
+    sensor_range: float = float("inf")
+    can_attack: bool = True
 
+    def __post_init__(self) -> None:
+        if self.role not in ("support", "combat"):
+            raise ValueError(f"unknown aircraft role: {self.role!r}")

@@ -63,6 +63,14 @@ The default fixed-blue rule policy remains `paper_nearest_pursuit_v1`: each airc
 | Action | 3 | yaw, pitch, speed (same as 1v1) |
 | Team size | 3 | Three red agents share one Actor |
 
+### Functional heterogeneous 3v3 v1
+
+`configs/heterogeneous_3v3_functional_v1.yaml` is an isolated functional-heterogeneity environment derived from v6. Each side has one support aircraft (`red_0` / `blue_0`) and two combat aircraft (`red_1, red_2` / `blue_1, blue_2`). Red and blue are mirrored; all aircraft keep the same point-mass dynamics, same 3-D continuous action space, same controller, same attack envelope, and the same 68-dimensional actor observation and 48-dimensional critic state.
+
+The support role has no weapon permission and a 6000 m deterministic distance sensor. Combat roles can attack and have a 3000 m deterministic distance sensor. A live support aircraft instantly shares only its direct detections to same-team combat aircraft; combat-to-combat sharing is disabled. There is no communication delay, loss, noise, FOV, track memory, ammunition, missile entity, GRU, attention module, or type embedding in this first version.
+
+The fixed heterogeneous rule policy `functional_heterogeneous_team_v1` lets combat aircraft greedily pursue only currently visible legal target pairs, while support aircraft hold a point behind the live combat centroid. HAPPO keeps three independent red actors and one centralized critic: actor 0 controls the support slot, and actors 1/2 control combat slots. This design is inspired by TAM-HAPPO's role heterogeneity idea, but it is not a strict reproduction of that paper's environment.
+
 ### Reward
 
 ```

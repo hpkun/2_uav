@@ -114,6 +114,12 @@ class VectorStepResult3v3(NamedTuple):
     episode_red_cross_collision_deaths: np.ndarray    # [N] int8
     episode_blue_cross_collision_deaths: np.ndarray   # [N] int8
     episode_length: np.ndarray                        # [N] int32
+    episode_red_kills_with_shared_observation: np.ndarray   # [N] int8
+    episode_blue_kills_with_shared_observation: np.ndarray  # [N] int8
+    episode_red_mean_support_coverage_ratio: np.ndarray     # [N] float32
+    episode_blue_mean_support_coverage_ratio: np.ndarray    # [N] float32
+    episode_red_support_survived: np.ndarray          # [N] bool
+    episode_blue_support_survived: np.ndarray         # [N] bool
 
 
 def _extract_diagnostics_3v3(diag):
@@ -139,6 +145,17 @@ def _fill_red_reward_components(info, i, arr):
         arr[i, j] = float(rc.get(key, 0.0))
 
 
+def _select_rule_actions(env, policy, own_aircraft, enemy_aircraft):
+    if getattr(policy, "policy_name", "") == "functional_heterogeneous_team_v1":
+        team = own_aircraft[0].team if own_aircraft else "red"
+        return policy.select_actions(
+            own_aircraft,
+            enemy_aircraft,
+            visible_enemy_ids_by_own=env.visible_enemy_ids_by_own(team),
+        )
+    return policy.select_actions(own_aircraft, enemy_aircraft)
+
+
 def _episode_fields(info, L, i):
     es = info.get("episode_summary")
     if es is None:
@@ -162,6 +179,12 @@ def _episode_fields(info, L, i):
     arrays["ep_rcc"][idx] = es["red_death_causes"]["cross_team_collision_deaths"]
     arrays["ep_bcc"][idx] = es["blue_death_causes"]["cross_team_collision_deaths"]
     arrays["ep_len"][idx] = es["episode_length"]
+    arrays["ep_rks"][idx] = es.get("red_kills_with_shared_observation", 0)
+    arrays["ep_bks"][idx] = es.get("blue_kills_with_shared_observation", 0)
+    arrays["ep_rcov"][idx] = es.get("red_mean_support_coverage_ratio", 0.0)
+    arrays["ep_bcov"][idx] = es.get("blue_mean_support_coverage_ratio", 0.0)
+    arrays["ep_rsup"][idx] = es.get("red_support_survived", False)
+    arrays["ep_bsup"][idx] = es.get("blue_support_survived", False)
 
 
 def _make_episode_arrays(L):
@@ -176,6 +199,9 @@ def _make_episode_arrays(L):
         "ep_rfc": np.zeros(L, dtype=np.int8), "ep_bfc": np.zeros(L, dtype=np.int8),
         "ep_rcc": np.zeros(L, dtype=np.int8), "ep_bcc": np.zeros(L, dtype=np.int8),
         "ep_len": np.zeros(L, dtype=np.int32),
+        "ep_rks": np.zeros(L, dtype=np.int8), "ep_bks": np.zeros(L, dtype=np.int8),
+        "ep_rcov": np.zeros(L, dtype=np.float32), "ep_bcov": np.zeros(L, dtype=np.float32),
+        "ep_rsup": np.zeros(L, dtype=bool), "ep_bsup": np.zeros(L, dtype=bool),
     }
 
 
@@ -217,6 +243,12 @@ def _build_result(L, obs, gs, team_rew, term, trunc, am, atg, dc, tac,
         episode_red_cross_collision_deaths=ep_arrs["ep_rcc"],
         episode_blue_cross_collision_deaths=ep_arrs["ep_bcc"],
         episode_length=ep_arrs["ep_len"],
+        episode_red_kills_with_shared_observation=ep_arrs["ep_rks"],
+        episode_blue_kills_with_shared_observation=ep_arrs["ep_bks"],
+        episode_red_mean_support_coverage_ratio=ep_arrs["ep_rcov"],
+        episode_blue_mean_support_coverage_ratio=ep_arrs["ep_bcov"],
+        episode_red_support_survived=ep_arrs["ep_rsup"],
+        episode_blue_support_survived=ep_arrs["ep_bsup"],
     )
 
 
@@ -260,7 +292,8 @@ def _worker_reset(envs, blue_policies, red_policies, specs):
         o, info = env.reset(int(spec["seed"]))
         for j, aid in enumerate(AGENT_ORDER): obs[i, j] = o[aid]
         gs[i] = info["global_state"]
-        for j, a in enumerate(env.aircraft): am[i, j] = 1.0 if a.state.alive else 0.0
+        for j, aid in enumerate(AGENT_ORDER):
+            am[i, j] = 1.0 if env._aircraft_by_id(aid).state.alive else 0.0
         blue_policies[i].reset_counters()
         red_policies[i].reset_counters()
     return obs, gs, am
@@ -285,7 +318,7 @@ def _worker_step(envs, blue_policies, red_actions):
     for i, (env, ra) in enumerate(zip(envs, red_actions)):
         reds = [a for a in env.aircraft if a.team == "red"]
         blues = [a for a in env.aircraft if a.team == "blue"]
-        ba, _ = blue_policies[i].select_actions(blues, reds)
+        ba, _ = _select_rule_actions(env, blue_policies[i], blues, reds)
         actions = {}
         for j, aid in enumerate(RED_IDS): actions[aid] = np.asarray(ra[j], np.float32)
         for aid in BLUE_IDS: actions[aid] = np.asarray(ba.get(aid, np.zeros(3, np.float32)), np.float32)
@@ -344,12 +377,12 @@ def _worker_step_rules(envs, blue_policies, red_policies, modes):
         if r_m == 0:
             ra = {a.aircraft_id: np.zeros(3, np.float32) for a in reds if a.state.alive}
         else:
-            ra, _ = red_policies[i].select_actions(reds, blues)
+            ra, _ = _select_rule_actions(env, red_policies[i], reds, blues)
         # Blue actions
         if b_m == 0:
             ba = {a.aircraft_id: np.zeros(3, np.float32) for a in blues if a.state.alive}
         else:
-            ba, _ = blue_policies[i].select_actions(blues, reds)
+            ba, _ = _select_rule_actions(env, blue_policies[i], blues, reds)
         actions = {}
         for aid in RED_IDS: actions[aid] = np.asarray(ra.get(aid, np.zeros(3, np.float32)), np.float32)
         for aid in BLUE_IDS: actions[aid] = np.asarray(ba.get(aid, np.zeros(3, np.float32)), np.float32)
@@ -392,7 +425,8 @@ def _worker_reset_at(envs, blue_policies, red_policies, payload):
         o, info = env.reset(int(specs[j]["seed"]))
         for k, aid in enumerate(AGENT_ORDER): obs[j, k] = o[aid]
         gs[j] = info["global_state"]
-        for k, a in enumerate(env.aircraft): am[j, k] = 1.0 if a.state.alive else 0.0
+        for k, aid in enumerate(AGENT_ORDER):
+            am[j, k] = 1.0 if env._aircraft_by_id(aid).state.alive else 0.0
         blue_policies[i].reset_counters()
         red_policies[i].reset_counters()
     return obs, gs, am
@@ -408,6 +442,8 @@ def _policy_modes(blue_policies, red_policies):
         # Explicit fields for the actual rule policy and action mapping.
         "blue_policy": [p.policy_name for p in blue_policies],
         "red_policy": [p.policy_name for p in red_policies],
+        "blue_action_mapping": blue_mapping,
+        "red_action_mapping": red_mapping,
     }
 
 

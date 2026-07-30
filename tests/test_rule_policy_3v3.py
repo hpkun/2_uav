@@ -162,8 +162,9 @@ def test_local_vector_env_uses_v5_greedy_blue_policy():
     vec = LocalCombatVectorEnv3v3(CONFIG_V5, 1)
     try:
         modes = vec.policy_modes()
-        assert set(modes) == {"blue", "red", "blue_policy", "red_policy"}
+        assert set(modes) == {"blue", "red", "blue_policy", "red_policy", "blue_action_mapping", "red_action_mapping"}
         assert modes["blue"] == ["rate_aligned_v1"]
+        assert modes["blue_action_mapping"] == ["rate_aligned_v1"]
         assert modes["blue_policy"] == ["greedy_team_pursuit_v1"]
         assert modes["red_policy"] == ["paper_nearest_pursuit_v1"]
     finally:
@@ -174,8 +175,9 @@ def test_multiprocessing_vector_env_uses_v5_greedy_blue_policy():
     vec = SubprocessCombatVectorEnv3v3(CONFIG_V5, 2, 2)
     try:
         modes = vec.policy_modes()
-        assert set(modes) == {"blue", "red", "blue_policy", "red_policy"}
+        assert set(modes) == {"blue", "red", "blue_policy", "red_policy", "blue_action_mapping", "red_action_mapping"}
         assert modes["blue"] == ["rate_aligned_v1", "rate_aligned_v1"]
+        assert modes["blue_action_mapping"] == ["rate_aligned_v1", "rate_aligned_v1"]
         assert modes["blue_policy"] == ["greedy_team_pursuit_v1", "greedy_team_pursuit_v1"]
         assert modes["red_policy"] == ["paper_nearest_pursuit_v1", "paper_nearest_pursuit_v1"]
     finally:

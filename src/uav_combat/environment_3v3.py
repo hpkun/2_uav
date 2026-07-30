@@ -1,4 +1,4 @@
-"""Homogeneous 3v3 air combat environment with synchronous step semantics."""
+"""Synchronous 3v3 air combat environment with backward-compatible heterogeneity."""
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +52,7 @@ def _make_episode_summary(
     red_alive: int, blue_alive: int,
     outcome: str | None, reason: str | None,
     step_count: int,
+    heterogeneous_episode_metrics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build authoritative episode_summary with full death-cause breakdown."""
 
@@ -105,7 +106,7 @@ def _make_episode_summary(
     red_success = (episode_attack_kills["red"] == 3 and red_alive > 0)
     blue_success = (episode_attack_kills["blue"] == 3 and blue_alive > 0)
 
-    return {
+    summary = {
         "red_attack_kills": episode_attack_kills["red"],
         "blue_attack_kills": episode_attack_kills["blue"],
         "red_survivors": red_alive,
@@ -119,6 +120,15 @@ def _make_episode_summary(
         "episode_length": step_count,
         "termination_reason": reason,
     }
+    summary.update(heterogeneous_episode_metrics or {
+        "red_kills_with_shared_observation": 0,
+        "blue_kills_with_shared_observation": 0,
+        "red_mean_support_coverage_ratio": 0.0,
+        "blue_mean_support_coverage_ratio": 0.0,
+        "red_support_survived": False,
+        "blue_support_survived": False,
+    })
+    return summary
 
 
 def _team_dense(own_team_alive: list[Aircraft], enemy_team_alive: list[Aircraft]) -> tuple[float, dict[str, float]]:
@@ -137,7 +147,7 @@ def _team_dense(own_team_alive: list[Aircraft], enemy_team_alive: list[Aircraft]
 
 
 class Homogeneous3v3AirCombatEnv:
-    """3v3 synchronous air combat."""
+    """3v3 synchronous air combat with opt-in functional heterogeneity."""
 
     def __init__(self, config_path: str | Path = "configs/homogeneous_3v3.yaml") -> None:
         self.config = load_config(config_path)
@@ -154,6 +164,10 @@ class Homogeneous3v3AirCombatEnv:
         self._running = False
         self._episode_death_causes: dict[str, int] = {}
         self._episode_attack_kills: dict[str, int] = {}
+        self._heterogeneous = bool(self.config.get("heterogeneous", {}).get("enabled", False))
+        self._episode_support_coverage_sum: dict[str, float] = {}
+        self._episode_support_coverage_step_count: dict[str, int] = {}
+        self._episode_shared_kills: dict[str, int] = {}
 
     def _aircraft_by_id(self, aid: str) -> Aircraft:
         return next(a for a in self.aircraft if a.aircraft_id == aid)
@@ -164,13 +178,138 @@ class Homogeneous3v3AirCombatEnv:
     def _alive_count(self, team: str) -> int:
         return sum(1 for a in self.aircraft if a.team == team and a.state.alive)
 
+    def _enemy_team(self, team: str) -> str:
+        return "blue" if team == "red" else "red"
+
+    def _direct_visible(self, own: Aircraft, enemy: Aircraft) -> bool:
+        if not own.state.alive or not enemy.state.alive or own.team == enemy.team:
+            return False
+        distance = float(np.linalg.norm(own.state.as_array()[:3] - enemy.state.as_array()[:3]))
+        return distance <= float(own.sensor_range)
+
+    def _team_support(self, team: str) -> Aircraft | None:
+        return next((a for a in self.aircraft if a.team == team and a.role == "support"), None)
+
+    def _direct_visible_enemy_ids(self, own: Aircraft) -> set[str]:
+        return {
+            enemy.aircraft_id
+            for enemy in self.aircraft
+            if enemy.team != own.team and self._direct_visible(own, enemy)
+        }
+
+    def _effective_visible_enemy_ids(self, own: Aircraft) -> set[str]:
+        direct = self._direct_visible_enemy_ids(own)
+        if not self._heterogeneous or own.role != "combat" or not own.state.alive:
+            return direct
+        sharing = self.config["heterogeneous"].get("information_sharing", {})
+        if not bool(sharing.get("support_to_combat", False)):
+            return direct
+        support = self._team_support(own.team)
+        if support is None or not support.state.alive:
+            return direct
+        return direct | self._direct_visible_enemy_ids(support)
+
+    def visible_enemy_ids_by_own(self, team: str) -> dict[str, set[str]]:
+        """Return a fresh, read-only-by-convention visibility map for rule policies."""
+        return {
+            own.aircraft_id: set(self._effective_visible_enemy_ids(own))
+            for own in self.aircraft
+            if own.team == team
+        }
+
+    def _visibility_snapshot(self) -> dict[str, dict[str, list[str]]]:
+        if not self._heterogeneous:
+            return {}
+        snapshot: dict[str, dict[str, list[str]]] = {}
+        for own in self.aircraft:
+            direct = self._direct_visible_enemy_ids(own)
+            effective = self._effective_visible_enemy_ids(own)
+            snapshot[own.aircraft_id] = {
+                "direct": sorted(direct),
+                "effective": sorted(effective),
+                "shared": sorted(effective - direct),
+            }
+        return snapshot
+
+    def _support_coverage(self, team: str) -> tuple[float, int]:
+        if not self._heterogeneous:
+            return 0.0, 0
+        support = self._team_support(team)
+        combats = [
+            a for a in self.aircraft
+            if a.team == team and a.role == "combat" and a.state.alive
+        ]
+        enemies = [
+            a for a in self.aircraft
+            if a.team == self._enemy_team(team) and a.state.alive
+        ]
+        if support is None or not support.state.alive or not combats or not enemies:
+            return 0.0, 0
+        useful = 0
+        for enemy in enemies:
+            if self._direct_visible(support, enemy) and any(
+                not self._direct_visible(combat, enemy) for combat in combats
+            ):
+                useful += 1
+        return float(useful / len(enemies)), useful
+
+    def _heterogeneous_step_metrics(
+        self,
+        coverage: dict[str, tuple[float, int]] | None = None,
+        shared_kills: dict[str, int] | None = None,
+    ) -> dict[str, Any]:
+        if not self._heterogeneous:
+            return {}
+        coverage = coverage or {team: self._support_coverage(team) for team in ("red", "blue")}
+        shared_kills = shared_kills or {"red": 0, "blue": 0}
+        red_support = self._team_support("red")
+        blue_support = self._team_support("blue")
+        return {
+            "red_support_coverage_ratio": float(coverage["red"][0]),
+            "blue_support_coverage_ratio": float(coverage["blue"][0]),
+            "red_support_alive": bool(red_support is not None and red_support.state.alive),
+            "blue_support_alive": bool(blue_support is not None and blue_support.state.alive),
+            "red_useful_shared_target_count": int(coverage["red"][1]),
+            "blue_useful_shared_target_count": int(coverage["blue"][1]),
+            "red_kills_with_shared_observation": int(shared_kills.get("red", 0)),
+            "blue_kills_with_shared_observation": int(shared_kills.get("blue", 0)),
+        }
+
+    def _heterogeneous_episode_summary_metrics(self) -> dict[str, Any]:
+        if not self._heterogeneous:
+            return {}
+        means = {
+            team: (
+                self._episode_support_coverage_sum[team]
+                / self._episode_support_coverage_step_count[team]
+                if self._episode_support_coverage_step_count[team] > 0 else 0.0
+            )
+            for team in ("red", "blue")
+        }
+        return {
+            "red_kills_with_shared_observation": int(self._episode_shared_kills["red"]),
+            "blue_kills_with_shared_observation": int(self._episode_shared_kills["blue"]),
+            "red_mean_support_coverage_ratio": float(means["red"]),
+            "blue_mean_support_coverage_ratio": float(means["blue"]),
+            "red_support_survived": bool(
+                self._team_support("red") is not None and self._team_support("red").state.alive
+            ),
+            "blue_support_survived": bool(
+                self._team_support("blue") is not None and self._team_support("blue").state.alive
+            ),
+        }
+
     def reset(self, seed: int | None = None) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
         self.aircraft = self.scenario.reset(seed)
         self.step_count = 0
         self._running = True
         self._episode_death_causes = {aid: DEATH_NONE for aid in ALL_IDS}
         self._episode_attack_kills = {"red": 0, "blue": 0}
+        self._episode_support_coverage_sum = {"red": 0.0, "blue": 0.0}
+        self._episode_support_coverage_step_count = {"red": 0, "blue": 0}
+        self._episode_shared_kills = {"red": 0, "blue": 0}
         observations = self._all_observations()
+        heterogeneous_metrics = self._heterogeneous_step_metrics()
         info = {"step_count": 0, "scenario_name": self.scenario.scenario_name,
                 "termination_reason": None, "outcome": None,
                 "red_alive_count": 3, "blue_alive_count": 3,
@@ -182,6 +321,8 @@ class Homogeneous3v3AirCombatEnv:
                 "control_diagnostics": {}, "reward_components": {},
                 "reward_targets": {},
                 "nearest_enemy_geometry": {}, "episode_summary": None,
+                "heterogeneous_metrics": heterogeneous_metrics,
+                "visibility": self._visibility_snapshot(),
                 "global_state": self.global_state()}
         return observations, info
 
@@ -278,20 +419,41 @@ class Homogeneous3v3AirCombatEnv:
                 "target_id": nearest.aircraft_id, "distance": float(geo.distance),
                 "ata": float(geo.ata), "aa": float(geo.aa)}
 
+        coverage = {team: self._support_coverage(team) for team in ("red", "blue")}
+        for team in ("red", "blue"):
+            self._episode_support_coverage_sum[team] += float(coverage[team][0])
+            self._episode_support_coverage_step_count[team] += 1
+
+        direct_visible_ids = {
+            aircraft.aircraft_id: self._direct_visible_enemy_ids(aircraft)
+            for aircraft in self.aircraft
+        }
+        effective_visible_ids = {
+            aircraft.aircraft_id: self._effective_visible_enemy_ids(aircraft)
+            for aircraft in self.aircraft
+        }
+        shared_attackers: dict[str, set[str]] = {"red": set(), "blue": set()}
+
         # 10-11. Attack intents
         attack_intents: dict[str, str | None] = {}
         for aircraft in self.aircraft:
-            if not aircraft.state.alive:
+            if not aircraft.state.alive or not aircraft.can_attack:
                 attack_intents[aircraft.aircraft_id] = None; continue
             enemy_team = "blue" if aircraft.team == "red" else "red"
             alive_enemies = [a for a in self.aircraft if a.team == enemy_team and a.state.alive]
             if not alive_enemies:
                 attack_intents[aircraft.aircraft_id] = None; continue
-            attackable = [e for e in alive_enemies if self.attack_model.can_attack(aircraft.state, e.state)]
+            visible = effective_visible_ids[aircraft.aircraft_id]
+            attackable = [
+                e for e in alive_enemies
+                if e.aircraft_id in visible and self.attack_model.can_attack(aircraft.state, e.state)
+            ]
             if attackable:
                 best = min(attackable, key=lambda e: (
                     float(np.linalg.norm(aircraft.state.as_array()[:3] - e.state.as_array()[:3])), e.aircraft_id))
                 attack_intents[aircraft.aircraft_id] = best.aircraft_id
+                if best.aircraft_id not in direct_visible_ids[aircraft.aircraft_id]:
+                    shared_attackers[aircraft.team].add(best.aircraft_id)
             else:
                 attack_intents[aircraft.aircraft_id] = None
 
@@ -301,14 +463,21 @@ class Homogeneous3v3AirCombatEnv:
                 attackers_by_target.setdefault(tgt_id, []).append(atk_id)
 
         attack_kills = {"red": 0, "blue": 0}
+        shared_kills = {"red": 0, "blue": 0}
         for tgt_id in attackers_by_target:
             tgt = self._aircraft_by_id(tgt_id)
             if tgt.state.alive:
                 tgt.state.alive = False
                 if tgt_id not in step_death_causes:
                     step_death_causes[tgt_id] = DEATH_ATTACK
-                if tgt.team == "blue": attack_kills["red"] += 1
-                else: attack_kills["blue"] += 1
+                if tgt.team == "blue":
+                    attack_kills["red"] += 1
+                    if tgt_id in shared_attackers["red"]:
+                        shared_kills["red"] += 1
+                else:
+                    attack_kills["blue"] += 1
+                    if tgt_id in shared_attackers["blue"]:
+                        shared_kills["blue"] += 1
 
         # Accumulate episode
         for aid, cause in step_death_causes.items():
@@ -316,6 +485,8 @@ class Homogeneous3v3AirCombatEnv:
                 self._episode_death_causes[aid] = cause
         self._episode_attack_kills["red"] += attack_kills["red"]
         self._episode_attack_kills["blue"] += attack_kills["blue"]
+        self._episode_shared_kills["red"] += shared_kills["red"]
+        self._episode_shared_kills["blue"] += shared_kills["blue"]
 
         # 12. Team elimination
         red_alive = self._alive_count("red")
@@ -385,6 +556,10 @@ class Homogeneous3v3AirCombatEnv:
             rewards, reward_components, reward_targets = self._compute_v3_rewards(
                 old_states, attack_kills, step_death_causes, terminated, truncated,
                 outcome, reason, red_alive, blue_alive)
+        elif reward_mode == "functional_heterogeneous_team_v1":
+            rewards, reward_components, reward_targets = self._compute_heterogeneous_rewards(
+                old_states, attack_kills, step_death_causes, terminated, truncated,
+                outcome, reason, red_alive, blue_alive, coverage)
         else:
             # Legacy madsac_segmented (kept for baseline comparison)
             red_dense, _ = _team_dense(self._alive("red"), self._alive("blue"))
@@ -414,7 +589,8 @@ class Homogeneous3v3AirCombatEnv:
         if terminated or truncated:
             episode_summary = _make_episode_summary(
                 self._episode_death_causes, self._episode_attack_kills,
-                red_alive, blue_alive, outcome, reason, self.step_count)
+                red_alive, blue_alive, outcome, reason, self.step_count,
+                self._heterogeneous_episode_summary_metrics() if self._heterogeneous else None)
 
         red_success = episode_summary["red_complete_elimination_success"] if episode_summary else False
         blue_success = episode_summary["blue_complete_elimination_success"] if episode_summary else False
@@ -434,6 +610,8 @@ class Homogeneous3v3AirCombatEnv:
             "control_diagnostics": control_diagnostics, "reward_components": reward_components,
             "reward_targets": reward_targets,
             "nearest_enemy_geometry": nearest_enemy_geom,
+            "heterogeneous_metrics": self._heterogeneous_step_metrics(coverage, shared_kills),
+            "visibility": self._visibility_snapshot(),
             "blue_targets": {}, "global_state": self.global_state(),
             "episode_summary": episode_summary,
         }
@@ -854,12 +1032,219 @@ class Homogeneous3v3AirCombatEnv:
         reward_targets = {**red_targets, **blue_targets}
         return rewards, reward_components, reward_targets
 
+    # -- functional_heterogeneous_team_v1 rewards ----------------------
+
+    def _nearest_effective_visible_enemy(self, own: Aircraft, enemies: list[Aircraft]) -> Aircraft | None:
+        visible = self._effective_visible_enemy_ids(own)
+        candidates = [
+            enemy for enemy in enemies
+            if enemy.state.alive and enemy.aircraft_id in visible
+        ]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda enemy: (
+            float(np.linalg.norm(own.state.as_array()[:3] - enemy.state.as_array()[:3])),
+            enemy.aircraft_id,
+        ))
+
+    def _compute_functional_heterogeneous_dense(
+        self,
+        team: str,
+        old_states: dict[str, AircraftState],
+        cfg: dict[str, Any],
+        support_coverage: float,
+    ) -> tuple[dict[str, float], dict[str, str | None]]:
+        bf = self.config["battlefield"]
+        own_team = [a for a in self.aircraft if a.team == team]
+        enemies = [a for a in self.aircraft if a.team == self._enemy_team(team)]
+        combat_count = int(cfg["combat_count"])
+        sums = {"approach": 0.0, "attack": 0.0, "threat": 0.0, "combat_boundary": 0.0}
+        support_boundary = 0.0
+        support_alive = False
+        targets: dict[str, str | None] = {}
+
+        for own in own_team:
+            if not own.state.alive:
+                targets[own.aircraft_id] = None
+                continue
+            boundary = soft_boundary_risk(
+                own.state, bf["x_limit"], bf["y_limit"],
+                bf["altitude_min"], bf["altitude_max"],
+                cfg["horizontal_soft_ratio"], cfg["altitude_soft_margin"]
+            )["total_risk"]
+
+            if own.role == "support":
+                support_alive = True
+                support_boundary += boundary
+                targets[own.aircraft_id] = None
+                continue
+
+            sums["combat_boundary"] += boundary
+            target = self._nearest_effective_visible_enemy(own, enemies)
+            targets[own.aircraft_id] = target.aircraft_id if target is not None else None
+            if target is None:
+                continue
+
+            prev_own = old_states.get(own.aircraft_id, own.state)
+            prev_target = old_states.get(target.aircraft_id, target.state)
+            sums["approach"] += approach_progress_reward(
+                prev_own, own.state, prev_target, target.state,
+                cfg["approach_distance_threshold"], cfg["approach_distance_normalizer"]
+            )
+            sums["attack"] += coupled_attack_advantage(
+                own.state, target.state, cfg["preferred_distance"],
+                cfg["distance_sigma"], cfg["ata_sigma"], cfg["aa_sigma"]
+            )
+            sums["threat"] += coupled_attack_advantage(
+                target.state, own.state, cfg["preferred_distance"],
+                cfg["distance_sigma"], cfg["ata_sigma"], cfg["aa_sigma"]
+            )
+
+        combat_dense_raw = (
+            cfg["approach_weight"] * sums["approach"]
+            + cfg["attack_advantage_weight"] * sums["attack"]
+            - cfg["threat_weight"] * sums["threat"]
+            - cfg["combat_boundary_weight"] * sums["combat_boundary"]
+        ) / combat_count
+        support_dense_raw = 0.0
+        if support_alive:
+            support_dense_raw = (
+                cfg["support_information_weight"] * support_coverage
+                - cfg["support_boundary_weight"] * support_boundary
+            )
+        dense_raw = combat_dense_raw + support_dense_raw - cfg["time_penalty"]
+        dense = float(np.clip(dense_raw, cfg["dense_reward_min"], cfg["dense_reward_max"]))
+        components = {
+            "approach_reward": cfg["approach_weight"] * sums["approach"] / combat_count,
+            "attack_advantage_reward": cfg["attack_advantage_weight"] * sums["attack"] / combat_count,
+            "threat_penalty": cfg["threat_weight"] * sums["threat"] / combat_count,
+            "soft_boundary_penalty": (
+                cfg["combat_boundary_weight"] * sums["combat_boundary"] / combat_count
+                + (cfg["support_boundary_weight"] * support_boundary if support_alive else 0.0)
+            ),
+            "friendly_separation_penalty": 0.0,
+            "head_on_risk_penalty": 0.0,
+            "time_penalty": cfg["time_penalty"],
+            "dense_reward": dense,
+        }
+        return components, targets
+
+    def _compute_heterogeneous_rewards(
+        self,
+        old_states: dict[str, AircraftState],
+        attack_kills: dict[str, int],
+        step_death_causes: dict[str, int],
+        terminated: bool,
+        truncated: bool,
+        outcome: str | None,
+        reason: str | None,
+        red_alive: int,
+        blue_alive: int,
+        coverage: dict[str, tuple[float, int]],
+    ) -> tuple[dict[str, float], dict[str, Any], dict[str, str | None]]:
+        cfg = self.config.get("reward_heterogeneous_v1", {})
+        if not cfg:
+            raise KeyError("functional_heterogeneous_team_v1 requires reward_heterogeneous_v1 config")
+
+        red_dense_parts, red_targets = self._compute_functional_heterogeneous_dense(
+            "red", old_states, cfg, float(coverage["red"][0])
+        )
+        blue_dense_parts, blue_targets = self._compute_functional_heterogeneous_dense(
+            "blue", old_states, cfg, float(coverage["blue"][0])
+        )
+
+        def _losses(team: str, causes: tuple[int, ...]) -> int:
+            return sum(
+                1 for aid, cause in step_death_causes.items()
+                if self._aircraft_by_id(aid).team == team and cause in causes
+            )
+
+        red_atk_losses = _losses("red", (DEATH_ATTACK,))
+        red_bdy_losses = _losses("red", (DEATH_BOUNDARY_ALTITUDE, DEATH_BOUNDARY_XY))
+        red_col_losses = _losses("red", (DEATH_COLLISION_FRIENDLY, DEATH_COLLISION_CROSS))
+        blue_atk_losses = _losses("blue", (DEATH_ATTACK,))
+        blue_bdy_losses = _losses("blue", (DEATH_BOUNDARY_ALTITUDE, DEATH_BOUNDARY_XY))
+        blue_col_losses = _losses("blue", (DEATH_COLLISION_FRIENDLY, DEATH_COLLISION_CROSS))
+
+        red_event = (
+            cfg["kill_reward"] * attack_kills["red"]
+            - cfg["attack_death_penalty"] * red_atk_losses
+            - cfg["boundary_death_penalty"] * red_bdy_losses
+            - cfg["collision_death_penalty"] * red_col_losses
+        )
+        blue_event = (
+            cfg["kill_reward"] * attack_kills["blue"]
+            - cfg["attack_death_penalty"] * blue_atk_losses
+            - cfg["boundary_death_penalty"] * blue_bdy_losses
+            - cfg["collision_death_penalty"] * blue_col_losses
+        )
+
+        red_terminal = 0.0
+        blue_terminal = 0.0
+        if terminated or truncated:
+            red_succ = (self._episode_attack_kills["red"] == 3 and red_alive > 0)
+            blue_succ = (self._episode_attack_kills["blue"] == 3 and blue_alive > 0)
+            if red_succ:
+                red_terminal += cfg["complete_elimination_bonus"]
+            if blue_succ:
+                blue_terminal += cfg["complete_elimination_bonus"]
+            if reason == "max_steps":
+                red_terminal -= cfg["max_steps_red_failure_penalty"]
+                blue_terminal += cfg["max_steps_blue_success_bonus"]
+            elif red_alive == 0 and blue_alive == 0:
+                red_terminal -= cfg["mutual_elimination_penalty"]
+                blue_terminal -= cfg["mutual_elimination_penalty"]
+            elif red_alive == 0:
+                red_terminal -= cfg["team_eliminated_penalty"]
+            elif blue_alive == 0:
+                blue_terminal -= cfg["team_eliminated_penalty"]
+
+        red_total = red_dense_parts["dense_reward"] + red_event + red_terminal
+        blue_total = blue_dense_parts["dense_reward"] + blue_event + blue_terminal
+        rewards = {aid: float(red_total) for aid in RED_IDS}
+        rewards.update({aid: float(blue_total) for aid in BLUE_IDS})
+        reward_components = {
+            "red_approach_reward": red_dense_parts["approach_reward"],
+            "red_attack_advantage_reward": red_dense_parts["attack_advantage_reward"],
+            "red_threat_penalty": red_dense_parts["threat_penalty"],
+            "red_soft_boundary_penalty": red_dense_parts["soft_boundary_penalty"],
+            "red_friendly_separation_penalty": 0.0,
+            "red_head_on_risk_penalty": 0.0,
+            "red_time_penalty": red_dense_parts["time_penalty"],
+            "red_dense_reward": red_dense_parts["dense_reward"],
+            "red_kill_reward": cfg["kill_reward"] * attack_kills["red"],
+            "red_attack_death_penalty": cfg["attack_death_penalty"] * red_atk_losses,
+            "red_boundary_death_penalty": cfg["boundary_death_penalty"] * red_bdy_losses,
+            "red_collision_death_penalty": cfg["collision_death_penalty"] * red_col_losses,
+            "red_terminal_reward": red_terminal,
+            "red_team_total_reward": red_total,
+            "blue_approach_reward": blue_dense_parts["approach_reward"],
+            "blue_attack_advantage_reward": blue_dense_parts["attack_advantage_reward"],
+            "blue_threat_penalty": blue_dense_parts["threat_penalty"],
+            "blue_soft_boundary_penalty": blue_dense_parts["soft_boundary_penalty"],
+            "blue_friendly_separation_penalty": 0.0,
+            "blue_head_on_risk_penalty": 0.0,
+            "blue_time_penalty": blue_dense_parts["time_penalty"],
+            "blue_dense_reward": blue_dense_parts["dense_reward"],
+            "blue_kill_reward": cfg["kill_reward"] * attack_kills["blue"],
+            "blue_attack_death_penalty": cfg["attack_death_penalty"] * blue_atk_losses,
+            "blue_boundary_death_penalty": cfg["boundary_death_penalty"] * blue_bdy_losses,
+            "blue_collision_death_penalty": cfg["collision_death_penalty"] * blue_col_losses,
+            "blue_terminal_reward": blue_terminal,
+            "blue_team_total_reward": blue_total,
+        }
+        if not np.all(np.isfinite(list(reward_components.values()) + list(rewards.values()))):
+            raise FloatingPointError("non-finite functional_heterogeneous_team_v1 reward")
+        return rewards, reward_components, {**red_targets, **blue_targets}
+
     # -- observations ---------------------------------------------------
 
     def _all_observations(self) -> dict[str, np.ndarray]:
         return {own.aircraft_id: self._agent_observation(own) for own in self.aircraft}
 
     def _agent_observation(self, own: Aircraft) -> np.ndarray:
+        if self._heterogeneous:
+            return self._heterogeneous_agent_observation(own)
         if not own.state.alive:
             return np.zeros(OBS_DIM, dtype=np.float32)
         bf = self.config["battlefield"]
@@ -892,6 +1277,46 @@ class Homogeneous3v3AirCombatEnv:
                              + [self._entity_block(own, a, xs, ys, zs, ds) for a in enemies[:3]]
                              + [np.zeros(12, np.float32)] * max(0, 3 - len(enemies[:3])))
         return _normalize_obs(obs)
+
+    def _heterogeneous_agent_observation(self, own: Aircraft) -> np.ndarray:
+        if not own.state.alive:
+            return np.zeros(OBS_DIM, dtype=np.float32)
+        bf = self.config["battlefield"]
+        xs, ys, zs = bf["x_limit"], bf["y_limit"], bf["altitude_max"] - bf["altitude_min"]
+        ds = float(np.sqrt(xs**2 + ys**2 + zs**2))
+        ps = max(abs(own.spec.theta_min), abs(own.spec.theta_max))
+        self_block = np.array([
+            own.state.x / xs, own.state.y / ys,
+            2.0 * (own.state.altitude - bf["altitude_min"]) / zs - 1.0,
+            2.0 * (own.state.v - own.spec.v_min) / (own.spec.v_max - own.spec.v_min) - 1.0,
+            own.state.theta / ps, np.sin(own.state.psi), np.cos(own.state.psi), 1.0,
+        ], dtype=np.float32)
+        team_ids = RED_IDS if own.team == "red" else BLUE_IDS
+        enemy_ids = BLUE_IDS if own.team == "red" else RED_IDS
+        teammates = [self._aircraft_by_id(aid) for aid in team_ids if aid != own.aircraft_id]
+        enemies = [self._aircraft_by_id(aid) for aid in enemy_ids]
+        visible = self._effective_visible_enemy_ids(own)
+        enemy_blocks = [
+            self._heterogeneous_enemy_block(own, enemy, xs, ys, zs, ds, enemy.aircraft_id in visible)
+            for enemy in enemies
+        ]
+        obs = np.concatenate(
+            [self_block]
+            + [self._entity_block(own, mate, xs, ys, zs, ds) for mate in teammates]
+            + enemy_blocks
+        )
+        return _normalize_obs(obs)
+
+    def _heterogeneous_enemy_block(self, own, enemy, xs, ys, zs, ds, visible: bool) -> np.ndarray:
+        if not enemy.state.alive:
+            block = np.zeros(12, dtype=np.float32)
+            block[-1] = -1.0
+            return block
+        if not visible:
+            return np.zeros(12, dtype=np.float32)
+        block = self._entity_block(own, enemy, xs, ys, zs, ds)
+        block[-1] = 1.0
+        return block
 
     def _entity_block(self, own, other, xs, ys, zs, ds):
         if not other.state.alive:

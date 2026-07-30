@@ -104,6 +104,24 @@ def episode_stats(records: list[dict]) -> dict:
         "mean_red_collision_deaths": float(np.mean([
             r["red_friendly_collision_deaths"] + r["red_cross_collision_deaths"] for r in records
         ])),
+        "mean_red_kills_with_shared_observation": float(np.mean([
+            r.get("red_kills_with_shared_observation", 0) for r in records
+        ])),
+        "mean_blue_kills_with_shared_observation": float(np.mean([
+            r.get("blue_kills_with_shared_observation", 0) for r in records
+        ])),
+        "mean_red_support_coverage_ratio": float(np.mean([
+            r.get("red_mean_support_coverage_ratio", 0.0) for r in records
+        ])),
+        "mean_blue_support_coverage_ratio": float(np.mean([
+            r.get("blue_mean_support_coverage_ratio", 0.0) for r in records
+        ])),
+        "red_support_survival_rate": float(np.mean([
+            bool(r.get("red_support_survived", False)) for r in records
+        ])),
+        "blue_support_survival_rate": float(np.mean([
+            bool(r.get("blue_support_survived", False)) for r in records
+        ])),
         "max_steps_rate": sum(r["termination_reason"] == "max_steps" for r in records) / n,
         "mean_episode_length": float(np.mean([r["episode_length"] for r in records])),
         "mean_episode_return": float(np.mean([r["episode_return"] for r in records])),
@@ -232,6 +250,7 @@ def main() -> None:
         "actual_environment_steps": trainer.env_steps,
         "updates": trainer.update_count,
         "rule_policy_mapping_modes": trainer.rule_policy_mapping_modes,
+        "environment_metadata": trainer.environment_metadata,
         "best_checkpoint": trainer.best_checkpoint_name,
         "best_score": list(trainer.best_score) if trainer.best_score else None,
         "final_evaluation": final_eval,

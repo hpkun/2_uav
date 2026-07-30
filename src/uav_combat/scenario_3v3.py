@@ -30,6 +30,48 @@ class Homogeneous3v3Scenario:
         if ts != 3:
             raise ValueError(f"Homogeneous3v3Scenario only supports team_size=3, got {ts}")
 
+        heterogeneous = config.get("heterogeneous", {})
+        self.heterogeneous_enabled = bool(heterogeneous.get("enabled", False))
+        self._roles: dict[str, str] = {}
+        self._sensor_ranges: dict[str, float] = {}
+        self._attack_permissions: dict[str, bool] = {}
+        if self.heterogeneous_enabled:
+            roles = heterogeneous.get("roles", {})
+            missing = sorted(set(ALL_IDS) - set(roles))
+            extra = sorted(set(roles) - set(ALL_IDS))
+            if missing or extra:
+                raise ValueError(
+                    f"heterogeneous.roles must exactly cover {ALL_IDS}; "
+                    f"missing={missing}, extra={extra}"
+                )
+            sensor_range = heterogeneous.get("sensor_range", {})
+            can_attack = heterogeneous.get("can_attack", {})
+            for aid in ALL_IDS:
+                role = str(roles[aid])
+                if role not in ("support", "combat"):
+                    raise ValueError(f"invalid role for {aid}: {role!r}")
+                if role not in sensor_range or role not in can_attack:
+                    raise KeyError(f"missing heterogeneous capability for role {role!r}")
+                sr = float(sensor_range[role])
+                if not np.isfinite(sr) or sr < 0.0:
+                    raise ValueError(f"sensor_range for {role!r} must be finite and non-negative")
+                self._roles[aid] = role
+                self._sensor_ranges[aid] = sr
+                self._attack_permissions[aid] = bool(can_attack[role])
+
+    def _aircraft(self, aircraft_id: str, team: str, state: AircraftState) -> Aircraft:
+        if not self.heterogeneous_enabled:
+            return Aircraft(aircraft_id, team, self.spec, state)
+        return Aircraft(
+            aircraft_id,
+            team,
+            self.spec,
+            state,
+            role=self._roles[aircraft_id],
+            sensor_range=self._sensor_ranges[aircraft_id],
+            can_attack=self._attack_permissions[aircraft_id],
+        )
+
     def reset(self, seed: int | None = None) -> list[Aircraft]:
         rng = np.random.default_rng(seed)
         settings = self.config["scenario"]
@@ -77,7 +119,7 @@ class Homogeneous3v3Scenario:
             rhdg = wrap_angle(0.0 + pair_hdg_jitter[i] + rotation)
             rstate = AircraftState(float(rxy[0]), float(rxy[1]), -pair_altitude[i],
                                    pair_speed[i], 0.0, rhdg)
-            aircraft_list.append(Aircraft(RED_IDS[i], "red", self.spec, rstate))
+            aircraft_list.append(self._aircraft(RED_IDS[i], "red", rstate))
 
             # blue_i: slot i, paired with red_{blue_pair_idx[i]}
             bi = blue_pair_idx[i]
@@ -100,6 +142,6 @@ class Homogeneous3v3Scenario:
             # For i=2,bi=0: base_slots[2]=+400, red_slots[0]=-400-offset/2=-500, blue_slots[2]=+400+offset/2=+500 ✓
             bstate = AircraftState(float(bxy[0]), float(bxy[1]), -pair_altitude[bi],
                                    pair_speed[bi], 0.0, bhdg)
-            aircraft_list.append(Aircraft(BLUE_IDS[i], "blue", self.spec, bstate))
+            aircraft_list.append(self._aircraft(BLUE_IDS[i], "blue", bstate))
 
         return aircraft_list

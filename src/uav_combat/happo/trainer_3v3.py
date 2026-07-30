@@ -11,6 +11,7 @@ import torch
 from torch import nn
 
 from ..environment_3v3 import GS_DIM, OBS_DIM
+from ..config import load_config
 from ..mappo.trainer_3v3 import compute_best_score, linear_schedule, resolve_device
 from ..mappo.vector_env_3v3 import (
     RED_REWARD_COMPONENT_KEYS_3V3,
@@ -182,7 +183,20 @@ class HAPPO3v3Trainer:
         self.evaluation_history: list[dict[str, Any]] = []
         self.last_rollout_reward_means: dict[str, float] = {}
         self.rule_policy_mapping_modes = self.vector_env.policy_modes()
+        self.environment_metadata = self._environment_metadata()
         self.reset_environments()
+
+    def _environment_metadata(self) -> dict[str, Any]:
+        env_cfg = load_config(self.env_config)
+        heterogeneous = env_cfg.get("heterogeneous", {})
+        return {
+            "env_config_sha256": sha256_file(self.env_config),
+            "heterogeneous_enabled": bool(heterogeneous.get("enabled", False)),
+            "role_mapping": deepcopy(heterogeneous.get("roles", {})),
+            "sensor_range": deepcopy(heterogeneous.get("sensor_range", {})),
+            "can_attack": deepcopy(heterogeneous.get("can_attack", {})),
+            "support_rule": deepcopy(heterogeneous.get("support_rule", {})),
+        }
 
     def reset_environments(self) -> None:
         specs = [{"seed": int(self.rng.integers(0, 2**31 - 1))} for _ in range(self.num_envs)]
@@ -251,6 +265,12 @@ class HAPPO3v3Trainer:
                         "blue_friendly_collision_deaths": int(r.episode_blue_friendly_collision_deaths[idx]),
                         "red_cross_collision_deaths": int(r.episode_red_cross_collision_deaths[idx]),
                         "blue_cross_collision_deaths": int(r.episode_blue_cross_collision_deaths[idx]),
+                        "red_kills_with_shared_observation": int(r.episode_red_kills_with_shared_observation[idx]),
+                        "blue_kills_with_shared_observation": int(r.episode_blue_kills_with_shared_observation[idx]),
+                        "red_mean_support_coverage_ratio": float(r.episode_red_mean_support_coverage_ratio[idx]),
+                        "blue_mean_support_coverage_ratio": float(r.episode_blue_mean_support_coverage_ratio[idx]),
+                        "red_support_survived": bool(r.episode_red_support_survived[idx]),
+                        "blue_support_survived": bool(r.episode_blue_support_survived[idx]),
                     }
                     validate_episode_accounting_3v3(rec, int(idx))
                     completed.append(rec)
@@ -480,6 +500,7 @@ class HAPPO3v3Trainer:
             "best_checkpoint_name": self.best_checkpoint_name,
             "evaluation_history": self.evaluation_history,
             "rule_policy_mapping_modes": self.rule_policy_mapping_modes,
+            "environment_metadata": self.environment_metadata,
             "numpy_rng_state": self.rng.bit_generator.state,
             "torch_cpu_rng_state": torch.get_rng_state(),
             "torch_cuda_rng_state": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
