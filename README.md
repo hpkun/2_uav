@@ -52,6 +52,8 @@ The default fixed-blue rule policy remains `paper_nearest_pursuit_v1`: each airc
 
 `configs/homogeneous_3v3_learnable_v5_greedy_blue.yaml` keeps the v4 dynamics, reward, attack model, initial conditions, and `rate_aligned_v1` action mapping, but sets blue to `greedy_team_pursuit_v1`. This rule first performs a deterministic team-level greedy one-to-one target assignment using only current 3-D distance and aircraft-id tie-breaks, then reuses the same pure-pursuit controller. It is a simple fixed training opponent, not an optimal policy or a complex expert system.
 
+`configs/homogeneous_3v3_learnable_v6_task_aligned.yaml` keeps the v5 dynamics, action mapping, attack parameters, initial conditions, and greedy fixed-blue opponent, but changes the task semantics and dense reward target consistency. Its `target_consistent_team_v3` reward gives each alive aircraft one nearest-alive-enemy reward target per step and uses that same target for approach progress, attack advantage, and reverse-threat terms. Max-step timeout is treated as red task failure and a blue environment outcome, while `blue_complete_elimination_success` still requires three blue attack kills. The attack envelope remains the project-defined deterministic distance + ATA + AA model; v6 is not a strict reproduction of the MADSAC paper's ATA + HA probabilistic weapon model.
+
 ### Architecture
 
 | Component | Dim | Notes |
