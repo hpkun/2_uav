@@ -460,6 +460,9 @@ def _make_functional_heterogeneous_team_policy_3v3(config: dict) -> FunctionalHe
     act_cfg = config["action"]
     ac_cfg = config["aircraft"]
     support_cfg = config.get("heterogeneous", {}).get("support_rule", {})
+    support_mode = support_cfg.get("mode")
+    if support_mode != "rear_formation_hold_v1":
+        raise ValueError(f"unsupported support rule mode: {support_mode!r}")
     return FunctionalHeterogeneousTeamPolicy3v3(
         act_cfg["delta_yaw_max"],
         act_cfg["delta_pitch_max"],

@@ -7,6 +7,8 @@ This environment is a small, isolated extension of `homogeneous_3v3_learnable_v6
 - `red_0` and `blue_0`: support.
 - `red_1`, `red_2`, `blue_1`, `blue_2`: combat.
 - Support and combat aircraft share the same `AircraftSpec`; heterogeneity is only role, sensor range, weapon permission, information sharing, reward contribution, and fixed rule behavior.
+- In heterogeneous mode, logical `red_i` and `blue_i` are same-role physical mirror pairs with the same sampled speed, altitude, heading jitter, sensor range, weapon permission, and spec. This opt-in branch does not change v4/v5/v6 historical ID-to-slot behavior.
+- V1 supports only the fixed mapping `red_0/blue_0` support and all other 3v3 slots combat.
 
 ## Visibility
 
@@ -33,6 +35,8 @@ effective_visible(combat, enemy) =
 
 For a support aircraft, effective visibility is direct visibility only. Combat aircraft do not share detections with each other.
 
+`support_to_combat` is the only information-sharing switch retained in the v1 config. Immediate sharing, no combat-to-combat sharing, fixed enemy slots, hidden continuous fields equal to zero, and enemy status `+1/0/-1` are fixed environment semantics rather than YAML options.
+
 ## Attack Gate
 
 An attack intent requires all of:
@@ -43,6 +47,8 @@ An attack intent requires all of:
 - existing distance + ATA + AA attack model returns true.
 
 Support aircraft never generate attack intents. Hidden targets cannot be attacked even when physically inside the geometric attack envelope.
+
+`red_kills_with_shared_observation` and `blue_kills_with_shared_observation` count only same-step kills where the attacker could not directly detect the target but could attack because live support shared that target. With default `combat sensor range = 3000 m` and `attack distance max = 1000 m`, this diagnostic is structurally expected to be zero. The main support contribution metrics are support coverage, support survival, and the `support_to_combat` on/off ablation.
 
 ## Observation
 
@@ -113,9 +119,14 @@ Coverage is zero if support is dead, no combat is alive, or no enemy is alive.
 
 `functional_heterogeneous_team_v1` is deterministic:
 
-- combat aircraft build legal `(own combat, visible enemy)` pairs and greedily assign by distance and ID tie-break;
+- combat aircraft build legal `(own combat, visible enemy)` pairs and use visible-pair distance-greedy assignment with ID tie-breaks;
 - support aircraft ignore enemies and follow a point `follow_distance` behind the live combat centroid along the mean combat heading;
 - no state machine, prediction, evasion, formation roles, communication action, ammunition, or missile model is added.
+- `rear_formation_hold_v1` is currently the only supported support rule mode; unknown modes fail during configuration or policy construction.
+
+## Outcome Accounting
+
+The v6 timeout convention is retained: max-step timeout is encoded as a blue environment outcome. This does not mean blue achieved complete attack elimination; complete elimination still requires three attack kills and at least one surviving attacker.
 
 ## TAM-HAPPO Alignment Boundary
 

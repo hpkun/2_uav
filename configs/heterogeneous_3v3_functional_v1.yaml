@@ -131,14 +131,6 @@ heterogeneous:
     combat: true
   information_sharing:
     support_to_combat: true
-    combat_to_combat: false
-    instantaneous: true
-  observation:
-    fixed_entity_slots: true
-    hidden_enemy_fields_zero: true
-    enemy_status_observed_alive: 1.0
-    enemy_status_hidden_alive: 0.0
-    enemy_status_dead: -1.0
   support_rule:
     mode: rear_formation_hold_v1
     follow_distance: 1200.0

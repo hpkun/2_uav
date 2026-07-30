@@ -10,6 +10,69 @@ from .models import Aircraft, AircraftState
 RED_IDS = ("red_0", "red_1", "red_2")
 BLUE_IDS = ("blue_0", "blue_1", "blue_2")
 ALL_IDS = RED_IDS + BLUE_IDS
+FIXED_FUNCTIONAL_ROLES = {
+    "red_0": "support",
+    "red_1": "combat",
+    "red_2": "combat",
+    "blue_0": "support",
+    "blue_1": "combat",
+    "blue_2": "combat",
+}
+SUPPORTED_SUPPORT_RULE_MODES = {"rear_formation_hold_v1"}
+
+
+def _validate_heterogeneous_config(config: dict[str, Any]) -> None:
+    """Validate the deliberately narrow functional-heterogeneous v1 contract."""
+    heterogeneous = config.get("heterogeneous", {})
+    roles = heterogeneous.get("roles", {})
+    missing = sorted(set(ALL_IDS) - set(roles))
+    extra = sorted(set(roles) - set(ALL_IDS))
+    if missing or extra:
+        raise ValueError(
+            f"heterogeneous.roles must exactly cover {ALL_IDS}; missing={missing}, extra={extra}"
+        )
+    if roles != FIXED_FUNCTIONAL_ROLES:
+        raise ValueError(
+            "functional heterogeneous v1 requires fixed roles: "
+            "red_0/blue_0 support and red_1/red_2/blue_1/blue_2 combat"
+        )
+    for team, ids in (("red", RED_IDS), ("blue", BLUE_IDS)):
+        counts = {"support": 0, "combat": 0}
+        for aid in ids:
+            role = roles[aid]
+            if role not in counts:
+                raise ValueError(f"invalid role for {aid}: {role!r}")
+            counts[role] += 1
+        if counts != {"support": 1, "combat": 2}:
+            raise ValueError(f"{team} must have exactly one support and two combat aircraft, got {counts}")
+
+    sensor_range = heterogeneous.get("sensor_range", {})
+    can_attack = heterogeneous.get("can_attack", {})
+    for role in ("support", "combat"):
+        if role not in sensor_range:
+            raise KeyError(f"missing heterogeneous.sensor_range.{role}")
+        sr = float(sensor_range[role])
+        if not np.isfinite(sr) or sr <= 0.0:
+            raise ValueError(f"sensor_range for {role!r} must be finite and positive")
+        if role not in can_attack:
+            raise KeyError(f"missing heterogeneous.can_attack.{role}")
+        if not isinstance(can_attack[role], bool):
+            raise ValueError(f"can_attack for {role!r} must be bool")
+
+    sharing = heterogeneous.get("information_sharing", {})
+    if not isinstance(sharing.get("support_to_combat"), bool):
+        raise ValueError("heterogeneous.information_sharing.support_to_combat must be bool")
+
+    support_rule = heterogeneous.get("support_rule", {})
+    mode = support_rule.get("mode")
+    if mode not in SUPPORTED_SUPPORT_RULE_MODES:
+        raise ValueError(f"unsupported support rule mode: {mode!r}")
+    follow_distance = float(support_rule.get("follow_distance"))
+    if not np.isfinite(follow_distance) or follow_distance < 0.0:
+        raise ValueError("heterogeneous.support_rule.follow_distance must be finite and non-negative")
+
+    if config.get("combat", {}).get("reward_mode") != "functional_heterogeneous_team_v1":
+        raise ValueError("functional heterogeneous v1 requires combat.reward_mode=functional_heterogeneous_team_v1")
 
 
 class Homogeneous3v3Scenario:
@@ -36,28 +99,16 @@ class Homogeneous3v3Scenario:
         self._sensor_ranges: dict[str, float] = {}
         self._attack_permissions: dict[str, bool] = {}
         if self.heterogeneous_enabled:
+            _validate_heterogeneous_config(config)
             roles = heterogeneous.get("roles", {})
-            missing = sorted(set(ALL_IDS) - set(roles))
-            extra = sorted(set(roles) - set(ALL_IDS))
-            if missing or extra:
-                raise ValueError(
-                    f"heterogeneous.roles must exactly cover {ALL_IDS}; "
-                    f"missing={missing}, extra={extra}"
-                )
             sensor_range = heterogeneous.get("sensor_range", {})
             can_attack = heterogeneous.get("can_attack", {})
             for aid in ALL_IDS:
                 role = str(roles[aid])
-                if role not in ("support", "combat"):
-                    raise ValueError(f"invalid role for {aid}: {role!r}")
-                if role not in sensor_range or role not in can_attack:
-                    raise KeyError(f"missing heterogeneous capability for role {role!r}")
                 sr = float(sensor_range[role])
-                if not np.isfinite(sr) or sr < 0.0:
-                    raise ValueError(f"sensor_range for {role!r} must be finite and non-negative")
                 self._roles[aid] = role
                 self._sensor_ranges[aid] = sr
-                self._attack_permissions[aid] = bool(can_attack[role])
+                self._attack_permissions[aid] = can_attack[role]
 
     def _aircraft(self, aircraft_id: str, team: str, state: AircraftState) -> Aircraft:
         if not self.heterogeneous_enabled:
@@ -91,8 +142,11 @@ class Homogeneous3v3Scenario:
         red_slots = base_slots - offset / 2.0
         blue_slots = base_slots + offset / 2.0
 
-        # Reverse pairing: red_0<->blue_2, red_1<->blue_1, red_2<->blue_0
-        blue_pair_idx = [2, 1, 0]  # blue_i paired with red_{blue_pair_idx[i]}
+        # Homogeneous configs keep the historical reverse ID pairing.  In
+        # functional heterogeneous mode, only the blue ID-to-physical-slot
+        # assignment changes so red_i and blue_i are same-role mirror pairs.
+        blue_pair_idx = [0, 1, 2] if self.heterogeneous_enabled else [2, 1, 0]
+        blue_slot_idx = [2, 1, 0] if self.heterogeneous_enabled else [0, 1, 2]
 
         # Per-pair shared jitter (3 pairs, based on red index)
         pair_speed = np.zeros(team_size, dtype=float)
@@ -123,7 +177,7 @@ class Homogeneous3v3Scenario:
 
             # blue_i: slot i, paired with red_{blue_pair_idx[i]}
             bi = blue_pair_idx[i]
-            bpos = blue_centre + np.array([0.0, blue_slots[i]])
+            bpos = blue_centre + np.array([0.0, blue_slots[blue_slot_idx[i]]])
             bxy = matrix @ bpos
             # blue_i heading = red_(paired) heading + pi
             bhdg = wrap_angle(np.pi + pair_hdg_jitter[bi] + rotation)

@@ -452,6 +452,11 @@ class Homogeneous3v3AirCombatEnv:
                 best = min(attackable, key=lambda e: (
                     float(np.linalg.norm(aircraft.state.as_array()[:3] - e.state.as_array()[:3])), e.aircraft_id))
                 attack_intents[aircraft.aircraft_id] = best.aircraft_id
+                # This diagnostic counts same-step kills where the attacker
+                # could not directly sense the target but received it from a
+                # live support aircraft. With the default combat sensor range
+                # (3000 m) above attack max range (1000 m), it is structurally
+                # expected to remain zero unless tests/configs shrink sensors.
                 if best.aircraft_id not in direct_visible_ids[aircraft.aircraft_id]:
                     shared_attackers[aircraft.team].add(best.aircraft_id)
             else:
