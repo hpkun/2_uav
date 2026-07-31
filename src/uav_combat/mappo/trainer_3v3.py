@@ -224,13 +224,22 @@ class FixedBlue3v3MAPPOTrainer:
                     reward_component_sum / reward_component_count,
                 )
             }
-            event_reward = (
-                means["red_kill_reward"]
-                - means["red_attack_death_penalty"]
-                - means["red_boundary_death_penalty"]
-                - means["red_collision_death_penalty"]
+            death_components = (
+                means["red_attack_death_penalty"],
+                means["red_boundary_death_penalty"],
+                means["red_collision_death_penalty"],
+            )
+            if any(value < 0.0 for value in death_components):
+                event_reward = means["red_kill_reward"] + sum(death_components)
+            else:
+                event_reward = means["red_kill_reward"] - sum(death_components)
+            threat_term = (
+                means["red_threat_penalty"]
+                if means["red_threat_penalty"] < 0.0
+                else -means["red_threat_penalty"]
             )
             self.last_rollout_reward_means = {
+                **{f"mean_rollout_{key}": value for key, value in means.items()},
                 "mean_rollout_approach_reward": means["red_approach_reward"],
                 "mean_rollout_attack_advantage_reward": means["red_attack_advantage_reward"],
                 "mean_rollout_threat_penalty": means["red_threat_penalty"],
@@ -244,7 +253,7 @@ class FixedBlue3v3MAPPOTrainer:
                 "mean_rollout_tactical_reward": (
                     means["red_approach_reward"]
                     + means["red_attack_advantage_reward"]
-                    - means["red_threat_penalty"]
+                    + threat_term
                 ),
                 "mean_rollout_safety_penalty": (
                     means["red_soft_boundary_penalty"]

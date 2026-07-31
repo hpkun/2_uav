@@ -180,3 +180,146 @@ def head_on_collision_risk(
     if red_to_blue.ata >= head_on_angle or blue_to_red.ata >= head_on_angle:
         return 0.0
     return float(np.clip(1.0 - dist / head_on_distance, 0.0, 1.0)) ** 2
+
+
+# ===================================================================
+# Homogeneous 3v3 paper-segmented team v4 reward
+# ===================================================================
+
+PAPER_SEGMENTED_V4_REQUIRED_KEYS = (
+    "team_size",
+    "guide_reward",
+    "guide_angle_max",
+    "advantage_aspect_max",
+    "coarse_angle",
+    "medium_angle",
+    "fine_angle",
+    "coarse_attack_reward",
+    "medium_attack_reward",
+    "fine_attack_reward",
+    "coarse_threat_penalty",
+    "medium_threat_penalty",
+    "fine_threat_penalty",
+    "kill_reward",
+    "aircraft_loss_penalty",
+    "mission_failure_penalty_per_survivor",
+    "mutual_elimination_penalty",
+)
+
+
+def validate_paper_segmented_v4_config(
+    cfg: dict[str, Any],
+    attack_distance_min: float,
+    attack_distance_max: float,
+) -> None:
+    """Validate the isolated homogeneous 3v3 Eq. (25) reward adaptation."""
+    missing = [key for key in PAPER_SEGMENTED_V4_REQUIRED_KEYS if key not in cfg]
+    if missing:
+        raise ValueError(f"paper_segmented_team_v4 missing reward config keys: {missing}")
+    if int(cfg["team_size"]) != 3:
+        raise ValueError("paper_segmented_team_v4 requires reward_paper_segmented_v4.team_size == 3")
+    if not (np.isfinite(attack_distance_min) and np.isfinite(attack_distance_max) and 0.0 <= attack_distance_min < attack_distance_max):
+        raise ValueError("paper_segmented_team_v4 requires finite attack_distance_min < attack_distance_max")
+
+    angle_keys = (
+        "guide_angle_max",
+        "advantage_aspect_max",
+        "coarse_angle",
+        "medium_angle",
+        "fine_angle",
+    )
+    for key in angle_keys:
+        value = float(cfg[key])
+        if not np.isfinite(value) or value < 0.0:
+            raise ValueError(f"paper_segmented_team_v4 angle {key} must be finite and non-negative")
+    if not (float(cfg["fine_angle"]) < float(cfg["medium_angle"]) < float(cfg["coarse_angle"])):
+        raise ValueError("paper_segmented_team_v4 requires fine_angle < medium_angle < coarse_angle")
+    if float(cfg["coarse_angle"]) > np.pi or float(cfg["advantage_aspect_max"]) > np.pi:
+        raise ValueError("paper_segmented_team_v4 coarse/advantage angles must be <= pi")
+
+    reward_keys = (
+        "guide_reward",
+        "coarse_attack_reward",
+        "medium_attack_reward",
+        "fine_attack_reward",
+        "coarse_threat_penalty",
+        "medium_threat_penalty",
+        "fine_threat_penalty",
+        "kill_reward",
+        "aircraft_loss_penalty",
+        "mission_failure_penalty_per_survivor",
+        "mutual_elimination_penalty",
+    )
+    for key in reward_keys:
+        value = float(cfg[key])
+        if not np.isfinite(value) or value < 0.0:
+            raise ValueError(f"paper_segmented_team_v4 reward/penalty {key} must be finite and non-negative")
+    if not (float(cfg["fine_attack_reward"]) > float(cfg["medium_attack_reward"]) > float(cfg["coarse_attack_reward"])):
+        raise ValueError("paper_segmented_team_v4 requires fine_attack_reward > medium_attack_reward > coarse_attack_reward")
+    if not (float(cfg["fine_threat_penalty"]) > float(cfg["medium_threat_penalty"]) > float(cfg["coarse_threat_penalty"])):
+        raise ValueError("paper_segmented_team_v4 requires fine_threat_penalty > medium_threat_penalty > coarse_threat_penalty")
+    for key in (
+        "kill_reward",
+        "aircraft_loss_penalty",
+        "mission_failure_penalty_per_survivor",
+        "mutual_elimination_penalty",
+    ):
+        if float(cfg[key]) <= 0.0:
+            raise ValueError(f"paper_segmented_team_v4 requires positive {key}")
+
+
+def _tiered_segment(value: float, cfg: dict[str, Any], prefix: str) -> float:
+    if value <= float(cfg["fine_angle"]):
+        return float(cfg[f"fine_{prefix}"])
+    if value <= float(cfg["medium_angle"]):
+        return float(cfg[f"medium_{prefix}"])
+    if value <= float(cfg["coarse_angle"]):
+        return float(cfg[f"coarse_{prefix}"])
+    return 0.0
+
+
+def paper_segmented_local_reward(
+    own_state: AircraftState,
+    target_state: AircraftState,
+    attack_distance_min: float,
+    attack_distance_max: float,
+    cfg: dict[str, Any],
+) -> dict[str, float]:
+    """Eq. (25)-style local R3/R41/R42 terms for one own-target pair.
+
+    The project adaptation uses current 3D ATA for the paper's azimuth/elevation
+    attack-angle tiers, and uses the configured attack range as the near/far gate.
+    """
+    geometry = compute_pairwise_geometry(own_state, target_state)
+    reverse = compute_pairwise_geometry(target_state, own_state)
+    tolerance = 1e-12
+
+    guide = 0.0
+    if geometry.distance + tolerance >= attack_distance_max and geometry.ata <= float(cfg["guide_angle_max"]) + tolerance:
+        guide = float(cfg["guide_reward"])
+
+    attack_advantage = 0.0
+    in_near_gate = (
+        attack_distance_min - tolerance <= geometry.distance <= attack_distance_max + tolerance
+        and geometry.aa <= float(cfg["advantage_aspect_max"]) + tolerance
+    )
+    if in_near_gate:
+        attack_advantage = _tiered_segment(geometry.ata, cfg, "attack_reward")
+
+    threat = 0.0
+    reverse_near_gate = (
+        attack_distance_min - tolerance <= reverse.distance <= attack_distance_max + tolerance
+        and reverse.aa <= float(cfg["advantage_aspect_max"]) + tolerance
+    )
+    if reverse_near_gate:
+        threat = -_tiered_segment(reverse.ata, cfg, "threat_penalty")
+
+    result = {
+        "guide": float(guide),
+        "attack_advantage": float(attack_advantage),
+        "threat": float(threat),
+        "dense_total": float(guide + attack_advantage + threat),
+    }
+    if not np.isfinite(list(result.values())).all():
+        raise FloatingPointError("non-finite paper_segmented_team_v4 local reward")
+    return result

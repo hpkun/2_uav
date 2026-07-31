@@ -19,6 +19,8 @@ from .rewards import (
     soft_boundary_risk,
     friendly_separation_risk,
     head_on_collision_risk,
+    paper_segmented_local_reward,
+    validate_paper_segmented_v4_config,
 )
 from .scenario_3v3 import ALL_IDS, BLUE_IDS, RED_IDS, Homogeneous3v3Scenario
 
@@ -159,6 +161,12 @@ class Homogeneous3v3AirCombatEnv:
         self.attack_model = SimplifiedAttackModel(
             combat["attack_distance_min"], combat["attack_distance_max"],
             combat["attack_ata_max"], combat["attack_aa_max"])
+        if combat.get("reward_mode") == "paper_segmented_team_v4":
+            validate_paper_segmented_v4_config(
+                self.config.get("reward_paper_segmented_v4", {}),
+                float(combat["attack_distance_min"]),
+                float(combat["attack_distance_max"]),
+            )
         self.aircraft: list[Aircraft] = []
         self.step_count = 0
         self._running = False
@@ -560,6 +568,10 @@ class Homogeneous3v3AirCombatEnv:
         elif reward_mode == "target_consistent_team_v3":
             rewards, reward_components, reward_targets = self._compute_v3_rewards(
                 old_states, attack_kills, step_death_causes, terminated, truncated,
+                outcome, reason, red_alive, blue_alive)
+        elif reward_mode == "paper_segmented_team_v4":
+            rewards, reward_components, reward_targets = self._compute_paper_segmented_v4_rewards(
+                attack_kills, step_death_causes, terminated, truncated,
                 outcome, reason, red_alive, blue_alive)
         elif reward_mode == "functional_heterogeneous_team_v1":
             rewards, reward_components, reward_targets = self._compute_heterogeneous_rewards(
@@ -1034,6 +1046,152 @@ class Homogeneous3v3AirCombatEnv:
         }
         if not np.all(np.isfinite(list(reward_components.values()) + list(rewards.values()))):
             raise FloatingPointError("non-finite target_consistent_team_v3 reward")
+        reward_targets = {**red_targets, **blue_targets}
+        return rewards, reward_components, reward_targets
+
+    # -- paper_segmented_team_v4 rewards --------------------------------
+
+    def _compute_paper_segmented_v4_dense(
+        self, team: str, cfg: dict[str, Any],
+    ) -> tuple[dict[str, float], dict[str, str | None]]:
+        combat = self.config["combat"]
+        own_team = [a for a in self.aircraft if a.team == team]
+        enemies = [a for a in self.aircraft if a.team == self._enemy_team(team)]
+        team_size = int(cfg["team_size"])
+        sums = {"guide": 0.0, "attack_advantage": 0.0, "threat": 0.0}
+        targets: dict[str, str | None] = {}
+
+        for own in own_team:
+            if not own.state.alive:
+                targets[own.aircraft_id] = None
+                continue
+            target = self._nearest_alive_enemy(own, enemies)
+            targets[own.aircraft_id] = target.aircraft_id if target is not None else None
+            if target is None:
+                continue
+            local = paper_segmented_local_reward(
+                own.state,
+                target.state,
+                float(combat["attack_distance_min"]),
+                float(combat["attack_distance_max"]),
+                cfg,
+            )
+            sums["guide"] += local["guide"]
+            sums["attack_advantage"] += local["attack_advantage"]
+            sums["threat"] += local["threat"]
+
+        components = {
+            "approach_reward": float(sums["guide"] / team_size),
+            "attack_advantage_reward": float(sums["attack_advantage"] / team_size),
+            "threat_penalty": float(sums["threat"] / team_size),
+        }
+        components["dense_reward"] = float(
+            components["approach_reward"]
+            + components["attack_advantage_reward"]
+            + components["threat_penalty"]
+        )
+        return components, targets
+
+    def _team_step_death_counts(
+        self, team: str, step_death_causes: dict[str, int],
+    ) -> tuple[int, int, int]:
+        attack_losses = sum(
+            1 for a_id, cause in step_death_causes.items()
+            if self._aircraft_by_id(a_id).team == team and cause == DEATH_ATTACK
+        )
+        boundary_losses = sum(
+            1 for a_id, cause in step_death_causes.items()
+            if self._aircraft_by_id(a_id).team == team
+            and cause in (DEATH_BOUNDARY_ALTITUDE, DEATH_BOUNDARY_XY)
+        )
+        collision_losses = sum(
+            1 for a_id, cause in step_death_causes.items()
+            if self._aircraft_by_id(a_id).team == team
+            and cause in (DEATH_COLLISION_FRIENDLY, DEATH_COLLISION_CROSS)
+        )
+        return attack_losses, boundary_losses, collision_losses
+
+    def _paper_segmented_v4_terminal(
+        self, team: str, alive_count: int, opponent_alive_count: int, cfg: dict[str, Any],
+        terminated: bool, truncated: bool,
+    ) -> float:
+        if not (terminated or truncated):
+            return 0.0
+        complete_attack_success = (
+            self._episode_attack_kills[team] == int(cfg["team_size"])
+            and alive_count > 0
+        )
+        terminal = 0.0
+        if not complete_attack_success:
+            terminal -= float(cfg["mission_failure_penalty_per_survivor"]) * alive_count
+        if alive_count == 0 and opponent_alive_count == 0:
+            terminal -= float(cfg["mutual_elimination_penalty"])
+        return float(terminal)
+
+    def _compute_paper_segmented_v4_rewards(
+        self, attack_kills: dict[str, int], step_death_causes: dict[str, int],
+        terminated: bool, truncated: bool,
+        outcome: str | None, reason: str | None, red_alive: int, blue_alive: int,
+    ) -> tuple[dict[str, float], dict[str, Any], dict[str, str | None]]:
+        cfg = self.config.get("reward_paper_segmented_v4", {})
+        if not cfg:
+            raise KeyError("paper_segmented_team_v4 requires reward_paper_segmented_v4 config")
+
+        red_dense_parts, red_targets = self._compute_paper_segmented_v4_dense("red", cfg)
+        blue_dense_parts, blue_targets = self._compute_paper_segmented_v4_dense("blue", cfg)
+
+        red_atk_losses, red_bdy_losses, red_col_losses = self._team_step_death_counts("red", step_death_causes)
+        blue_atk_losses, blue_bdy_losses, blue_col_losses = self._team_step_death_counts("blue", step_death_causes)
+
+        loss = float(cfg["aircraft_loss_penalty"])
+        red_terminal = self._paper_segmented_v4_terminal(
+            "red", red_alive, blue_alive, cfg, terminated, truncated)
+        blue_terminal = self._paper_segmented_v4_terminal(
+            "blue", blue_alive, red_alive, cfg, terminated, truncated)
+
+        red_components = {
+            "approach_reward": red_dense_parts["approach_reward"],
+            "attack_advantage_reward": red_dense_parts["attack_advantage_reward"],
+            "threat_penalty": red_dense_parts["threat_penalty"],
+            "soft_boundary_penalty": 0.0,
+            "friendly_separation_penalty": 0.0,
+            "head_on_risk_penalty": 0.0,
+            "time_penalty": 0.0,
+            "dense_reward": red_dense_parts["dense_reward"],
+            "kill_reward": float(cfg["kill_reward"]) * int(attack_kills["red"]),
+            "attack_death_penalty": -loss * red_atk_losses,
+            "boundary_death_penalty": -loss * red_bdy_losses,
+            "collision_death_penalty": -loss * red_col_losses,
+            "terminal_reward": red_terminal,
+        }
+        blue_components = {
+            "approach_reward": blue_dense_parts["approach_reward"],
+            "attack_advantage_reward": blue_dense_parts["attack_advantage_reward"],
+            "threat_penalty": blue_dense_parts["threat_penalty"],
+            "soft_boundary_penalty": 0.0,
+            "friendly_separation_penalty": 0.0,
+            "head_on_risk_penalty": 0.0,
+            "time_penalty": 0.0,
+            "dense_reward": blue_dense_parts["dense_reward"],
+            "kill_reward": float(cfg["kill_reward"]) * int(attack_kills["blue"]),
+            "attack_death_penalty": -loss * blue_atk_losses,
+            "boundary_death_penalty": -loss * blue_bdy_losses,
+            "collision_death_penalty": -loss * blue_col_losses,
+            "terminal_reward": blue_terminal,
+        }
+        red_total = float(sum(red_components.values()))
+        blue_total = float(sum(blue_components.values()))
+        red_components["team_total_reward"] = red_total
+        blue_components["team_total_reward"] = blue_total
+
+        rewards = {aid: red_total for aid in RED_IDS}
+        rewards.update({aid: blue_total for aid in BLUE_IDS})
+        reward_components = {
+            **{f"red_{key}": value for key, value in red_components.items()},
+            **{f"blue_{key}": value for key, value in blue_components.items()},
+        }
+        if not np.all(np.isfinite(list(reward_components.values()) + list(rewards.values()))):
+            raise FloatingPointError("non-finite paper_segmented_team_v4 reward")
         reward_targets = {**red_targets, **blue_targets}
         return rewards, reward_components, reward_targets
 

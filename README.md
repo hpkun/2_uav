@@ -155,6 +155,12 @@ The default `madsac_segmented` mode adapts segmented geometric shaping and actua
 
 `configs/homogeneous_1v1_crdrl.yaml` enables the independent `crdrl_coupled` ablation. Its distance/ATA/AA dense formula, parameters, strict sparse thresholds, and sparse value 2 follow CR-DRL. Reusing this project's unified kill/boundary/collision terminal semantics is the project adaptation. The paper emphasizes maintaining advantageous tail-attack position, while this project measures actual kills; the ablation must be compared experimentally before it can be considered as a default.
 
+### Homogeneous 3v3 v7: MADSAC paper-segmented reward
+
+`configs/homogeneous_3v3_learnable_v7_paper_segmented.yaml` adds the isolated `paper_segmented_team_v4` reward mode. It keeps the v6 homogeneous 3v3 environment, dynamics, attack envelope, observations, 600-step timeout, and fixed greedy blue rule policy, but replaces the v6 target-consistent dense/terminal design with an Eq. (25)-style segmented R3/R41/R42 adaptation.
+
+The v7 dense reward uses nearest alive target selection, fixed division by team size 3, 30/15/5 degree attack tiers, signed reverse-threat penalties, `+10` attack kills, `-10` own aircraft deaths, non-success survivor penalties, and an extra mutual-elimination penalty. See `docs/paper_segmented_reward_v4.md` for the exact mapping and the differences from v6.
+
 ## Parallel environment
 
 Training throughput can be improved by running CPU environment steps across multiple persistent worker processes. This is a **runtime performance optimisation only**; it does not change the training algorithm, PPO targets, reward formula, or any other research behaviour.
