@@ -409,6 +409,15 @@ class Homogeneous3v3AirCombatEnv:
                 if aid2 not in step_death_causes:
                     step_death_causes[aid2] = DEATH_COLLISION_FRIENDLY if a1.team == a2.team else DEATH_COLLISION_CROSS
 
+        reward_mode = self.config["combat"].get("reward_mode", "madsac_segmented")
+        v7_pre_attack_dense_parts: dict[str, dict[str, float]] | None = None
+        v7_pre_attack_reward_targets: dict[str, str | None] | None = None
+        if reward_mode == "paper_segmented_team_v4":
+            (
+                v7_pre_attack_dense_parts,
+                v7_pre_attack_reward_targets,
+            ) = self._capture_paper_segmented_v4_pre_attack()
+
         # 9. Nearest-enemy geometry (post-integration, pre-attack, for still-alive)
         nearest_enemy_geom: dict[str, dict[str, Any]] = {}
         for aircraft in self.aircraft:
@@ -559,7 +568,6 @@ class Homogeneous3v3AirCombatEnv:
         col_d = {"red": red_col_losses, "blue": blue_col_losses}
 
         # 13. Rewards
-        reward_mode = self.config["combat"].get("reward_mode", "madsac_segmented")
         reward_targets: dict[str, str | None] = {}
         if reward_mode == "paper_coupled_team_v2":
             rewards, reward_components = self._compute_v2_rewards(
@@ -572,7 +580,8 @@ class Homogeneous3v3AirCombatEnv:
         elif reward_mode == "paper_segmented_team_v4":
             rewards, reward_components, reward_targets = self._compute_paper_segmented_v4_rewards(
                 attack_kills, step_death_causes, terminated, truncated,
-                outcome, reason, red_alive, blue_alive)
+                outcome, reason, red_alive, blue_alive,
+                v7_pre_attack_dense_parts, v7_pre_attack_reward_targets)
         elif reward_mode == "functional_heterogeneous_team_v1":
             rewards, reward_components, reward_targets = self._compute_heterogeneous_rewards(
                 old_states, attack_kills, step_death_causes, terminated, truncated,
@@ -1051,6 +1060,25 @@ class Homogeneous3v3AirCombatEnv:
 
     # -- paper_segmented_team_v4 rewards --------------------------------
 
+    def _capture_paper_segmented_v4_pre_attack(
+        self,
+    ) -> tuple[dict[str, dict[str, float]], dict[str, str | None]]:
+        """Capture v7 dense terms after motion/boundary/collision and before attack.
+
+        This snapshot is intentionally local to the current step. Aircraft already
+        removed by boundary or collision do not contribute; aircraft killed later
+        by attack may still contribute their pre-attack dense terms for this step.
+        """
+        cfg = self.config.get("reward_paper_segmented_v4", {})
+        if not cfg:
+            raise KeyError("paper_segmented_team_v4 requires reward_paper_segmented_v4 config")
+        red_dense_parts, red_targets = self._compute_paper_segmented_v4_dense("red", cfg)
+        blue_dense_parts, blue_targets = self._compute_paper_segmented_v4_dense("blue", cfg)
+        return (
+            {"red": red_dense_parts, "blue": blue_dense_parts},
+            {**red_targets, **blue_targets},
+        )
+
     def _compute_paper_segmented_v4_dense(
         self, team: str, cfg: dict[str, Any],
     ) -> tuple[dict[str, float], dict[str, str | None]]:
@@ -1132,13 +1160,16 @@ class Homogeneous3v3AirCombatEnv:
         self, attack_kills: dict[str, int], step_death_causes: dict[str, int],
         terminated: bool, truncated: bool,
         outcome: str | None, reason: str | None, red_alive: int, blue_alive: int,
+        pre_attack_dense_parts: dict[str, dict[str, float]] | None,
+        pre_attack_reward_targets: dict[str, str | None] | None,
     ) -> tuple[dict[str, float], dict[str, Any], dict[str, str | None]]:
         cfg = self.config.get("reward_paper_segmented_v4", {})
         if not cfg:
             raise KeyError("paper_segmented_team_v4 requires reward_paper_segmented_v4 config")
-
-        red_dense_parts, red_targets = self._compute_paper_segmented_v4_dense("red", cfg)
-        blue_dense_parts, blue_targets = self._compute_paper_segmented_v4_dense("blue", cfg)
+        if pre_attack_dense_parts is None or pre_attack_reward_targets is None:
+            raise ValueError("paper_segmented_team_v4 requires pre-attack dense snapshot")
+        red_dense_parts = pre_attack_dense_parts["red"]
+        blue_dense_parts = pre_attack_dense_parts["blue"]
 
         red_atk_losses, red_bdy_losses, red_col_losses = self._team_step_death_counts("red", step_death_causes)
         blue_atk_losses, blue_bdy_losses, blue_col_losses = self._team_step_death_counts("blue", step_death_causes)
@@ -1192,8 +1223,7 @@ class Homogeneous3v3AirCombatEnv:
         }
         if not np.all(np.isfinite(list(reward_components.values()) + list(rewards.values()))):
             raise FloatingPointError("non-finite paper_segmented_team_v4 reward")
-        reward_targets = {**red_targets, **blue_targets}
-        return rewards, reward_components, reward_targets
+        return rewards, reward_components, dict(pre_attack_reward_targets)
 
     # -- functional_heterogeneous_team_v1 rewards ----------------------
 

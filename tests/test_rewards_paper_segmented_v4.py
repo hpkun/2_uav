@@ -12,6 +12,7 @@ from uav_combat.environment_3v3 import (
     BLUE_IDS,
     RED_IDS,
     DEATH_ATTACK,
+    DEATH_BOUNDARY_ALTITUDE,
     DEATH_BOUNDARY_XY,
     DEATH_COLLISION_CROSS,
     Homogeneous3v3AirCombatEnv,
@@ -32,8 +33,8 @@ CONFIG_V6 = ROOT / "configs" / "homogeneous_3v3_learnable_v6_task_aligned.yaml"
 CONFIG_V7 = ROOT / "configs" / "homogeneous_3v3_learnable_v7_paper_segmented.yaml"
 
 
-def _state(x=0.0, y=0.0, z=-3000.0, psi=0.0, theta=0.0, alive=True):
-    return AircraftState(x, y, z, 150.0, theta, psi, alive)
+def _state(x=0.0, y=0.0, z=-3000.0, psi=0.0, theta=0.0, alive=True, v=150.0):
+    return AircraftState(x, y, z, v, theta, psi, alive)
 
 
 def _polar_target(distance: float, angle: float) -> AircraftState:
@@ -45,11 +46,12 @@ def _cfg():
     return cfg, cfg["reward_paper_segmented_v4"], cfg["combat"]
 
 
-def _set(env, aid, x, y, z=-3000.0, psi=0.0, theta=0.0, alive=True):
+def _set(env, aid, x, y, z=-3000.0, psi=0.0, theta=0.0, alive=True, v=150.0):
     ac = env._aircraft_by_id(aid)
     ac.state.x = x
     ac.state.y = y
     ac.state.z = z
+    ac.state.v = v
     ac.state.psi = psi
     ac.state.theta = theta
     ac.state.alive = alive
@@ -72,7 +74,47 @@ def _write_tmp_config(tmp_path, config):
 
 def _assert_red_component_sum(rc):
     subtotal = sum(rc[key] for key in RED_REWARD_COMPONENT_KEYS_3V3[:-1])
-    assert np.isclose(subtotal, rc["red_team_total_reward"])
+    assert np.isclose(subtotal, rc["red_team_total_reward"], atol=1e-8)
+
+
+def _v7_rewards(env, attack_kills=None, step_deaths=None, terminated=False, truncated=False,
+                outcome=None, reason=None, red_alive=3, blue_alive=3):
+    dense, targets = env._capture_paper_segmented_v4_pre_attack()
+    return env._compute_paper_segmented_v4_rewards(
+        attack_kills or {"red": 0, "blue": 0},
+        step_deaths or {},
+        terminated,
+        truncated,
+        outcome,
+        reason,
+        red_alive,
+        blue_alive,
+        dense,
+        targets,
+    )
+
+
+def _prepare_single_pair_env(angle_deg=4.0, distance=500.0):
+    env = Homogeneous3v3AirCombatEnv(CONFIG_V7)
+    env.reset(123)
+    for aid in RED_IDS + BLUE_IDS:
+        _set(env, aid, 9000.0, 9000.0, alive=False)
+    angle = np.deg2rad(angle_deg)
+    _set(env, "red_0", 0.0, 0.0, psi=0.0, alive=True)
+    # Same velocity as red keeps relative geometry stable through integration.
+    _set(env, "blue_0", distance * np.cos(angle), distance * np.sin(angle), psi=0.0, alive=True)
+    return env
+
+
+def _prepare_r42_env(reverse_ata_deg=4.0, distance=500.0):
+    env = Homogeneous3v3AirCombatEnv(CONFIG_V7)
+    env.reset(456)
+    for aid in RED_IDS + BLUE_IDS:
+        _set(env, aid, 9000.0, 9000.0, alive=False)
+    angle = np.deg2rad(reverse_ata_deg)
+    _set(env, "red_0", 0.0, 0.0, psi=np.pi, alive=True)
+    _set(env, "blue_0", distance * np.cos(angle), distance * np.sin(angle), psi=np.pi, alive=True)
+    return env
 
 
 def test_v7_is_isolated_and_history_configs_are_unchanged():
@@ -167,8 +209,7 @@ def test_fixed_team_denominator_and_reward_targets_for_both_teams():
         _set(env, aid, 9000.0, 9000.0, alive=False)
     _set(env, "red_0", 0.0, 0.0, psi=0.0, alive=True)
     _set(env, "blue_0", 800.0, 0.0, psi=0.0, alive=True)
-    rewards, rc, targets = env._compute_paper_segmented_v4_rewards(
-        {"red": 0, "blue": 0}, {}, False, False, None, None, 1, 1)
+    rewards, rc, targets = _v7_rewards(env, red_alive=1, blue_alive=1)
     assert targets["red_0"] == "blue_0"
     assert targets["blue_0"] == "red_0"
     assert rc["red_attack_advantage_reward"] == pytest.approx(0.10 / 3.0)
@@ -186,8 +227,7 @@ def test_event_rewards_use_single_negative_loss_penalty_per_death_cause():
         "red_1": DEATH_BOUNDARY_XY,
         "red_2": DEATH_COLLISION_CROSS,
     }
-    _, rc, _ = env._compute_paper_segmented_v4_rewards(
-        {"red": 2, "blue": 1}, step_deaths, False, False, None, None, 0, 1)
+    _, rc, _ = _v7_rewards(env, {"red": 2, "blue": 1}, step_deaths, red_alive=0, blue_alive=1)
     assert rc["red_kill_reward"] == 20.0
     assert rc["red_attack_death_penalty"] == -10.0
     assert rc["red_boundary_death_penalty"] == -10.0
@@ -202,8 +242,8 @@ def test_terminal_mission_failure_penalizes_surviving_aircraft(step_kills, red_a
     env.reset(4)
     _disable_dense_geometry(env)
     env._episode_attack_kills["red"] = step_kills
-    _, rc, _ = env._compute_paper_segmented_v4_rewards(
-        {"red": step_kills, "blue": 0}, {}, False, True, "blue", "max_steps", red_alive, 3)
+    _, rc, _ = _v7_rewards(
+        env, {"red": step_kills, "blue": 0}, {}, False, True, "blue", "max_steps", red_alive, 3)
     assert rc["red_terminal_reward"] == pytest.approx(-10.0 * red_alive)
     assert rc["red_team_total_reward"] == pytest.approx(expected_total)
     _assert_red_component_sum(rc)
@@ -214,7 +254,8 @@ def test_complete_attack_elimination_has_no_bonus_and_preserves_loss_arithmetic(
     env.reset(5)
     _disable_dense_geometry(env)
     env._episode_attack_kills["red"] = 3
-    _, rc, _ = env._compute_paper_segmented_v4_rewards(
+    _, rc, _ = _v7_rewards(
+        env,
         {"red": 3, "blue": 0},
         {"red_0": DEATH_ATTACK, "red_1": DEATH_BOUNDARY_XY},
         True, False, "red", "red_elimination", red_alive=1, blue_alive=0)
@@ -228,13 +269,14 @@ def test_mutual_elimination_extra_penalty_and_non_attack_opponent_elimination_is
     env.reset(6)
     _disable_dense_geometry(env)
     env._episode_attack_kills["red"] = 3
-    _, rc_mutual, _ = env._compute_paper_segmented_v4_rewards(
-        {"red": 0, "blue": 0}, {}, True, False, "draw", "mutual_elimination", 0, 0)
+    _, rc_mutual, _ = _v7_rewards(
+        env, {"red": 0, "blue": 0}, {}, True, False, "draw", "mutual_elimination", 0, 0)
     assert rc_mutual["red_terminal_reward"] == -10.0
     assert rc_mutual["red_team_total_reward"] == -10.0
 
     env._episode_attack_kills["red"] = 0
-    _, rc_non_attack, _ = env._compute_paper_segmented_v4_rewards(
+    _, rc_non_attack, _ = _v7_rewards(
+        env,
         {"red": 0, "blue": 0}, {"blue_0": DEATH_BOUNDARY_XY, "blue_1": DEATH_BOUNDARY_XY, "blue_2": DEATH_BOUNDARY_XY},
         True, False, "red", "red_elimination", 3, 0)
     assert rc_non_attack["red_terminal_reward"] == -30.0
@@ -257,6 +299,148 @@ def test_v7_config_validation_rejects_missing_and_invalid_fields(tmp_path):
     bad["reward_paper_segmented_v4"]["fine_threat_penalty"] = 0.01
     with pytest.raises(ValueError, match="fine_threat_penalty"):
         Homogeneous3v3AirCombatEnv(_write_tmp_config(tmp_path, bad))
+
+
+@pytest.mark.parametrize("angle_deg,expected", [(4.0, 0.10), (10.0, 0.02), (25.0, 0.01)])
+def test_v7_env_step_records_r41_and_kill_same_step(angle_deg, expected):
+    env = _prepare_single_pair_env(angle_deg=angle_deg, distance=500.0)
+    _, cfg, combat = _cfg()
+    before = paper_segmented_local_reward(
+        env._aircraft_by_id("red_0").state,
+        env._aircraft_by_id("blue_0").state,
+        combat["attack_distance_min"],
+        combat["attack_distance_max"],
+        cfg,
+    )
+    assert before["attack_advantage"] == pytest.approx(expected)
+    assert env.attack_model.can_attack(env._aircraft_by_id("red_0").state, env._aircraft_by_id("blue_0").state)
+
+    _, _, _, _, info = env.step(_zero_actions(env))
+    rc = info["reward_components"]
+    assert info["attacks"]["red_0"] == "blue_0"
+    assert env._aircraft_by_id("blue_0").state.alive is False
+    assert info["attack_kills"]["red"] == 1
+    assert rc["red_attack_advantage_reward"] == pytest.approx(expected / 3.0)
+    assert rc["red_kill_reward"] == 10.0
+    assert info["reward_targets"]["red_0"] == "blue_0"
+    _assert_red_component_sum(rc)
+
+
+@pytest.mark.parametrize("angle_deg,expected", [(5.0, 0.10), (15.0 - 1e-10, 0.02), (30.0, 0.01)])
+def test_v7_env_step_r41_angle_boundaries(angle_deg, expected):
+    env = _prepare_single_pair_env(angle_deg=angle_deg, distance=500.0)
+    _, _, _, _, info = env.step(_zero_actions(env))
+    rc = info["reward_components"]
+    assert rc["red_attack_advantage_reward"] == pytest.approx(expected / 3.0)
+    assert rc["red_kill_reward"] == 10.0
+    assert info["reward_targets"]["red_0"] == "blue_0"
+    _assert_red_component_sum(rc)
+
+
+@pytest.mark.parametrize("distance,expected_guide", [(100.0 + 1e-9, 0.0), (1000.0, 0.001)])
+def test_v7_env_step_r41_distance_boundaries_and_r3_at_dmax(distance, expected_guide):
+    env = _prepare_single_pair_env(angle_deg=4.0, distance=distance)
+    _, _, _, _, info = env.step(_zero_actions(env))
+    rc = info["reward_components"]
+    assert rc["red_attack_advantage_reward"] == pytest.approx(0.10 / 3.0)
+    assert rc["red_approach_reward"] == pytest.approx(expected_guide / 3.0)
+    assert rc["red_kill_reward"] == 10.0
+    assert info["reward_targets"]["red_0"] == "blue_0"
+    _assert_red_component_sum(rc)
+
+
+@pytest.mark.parametrize("reverse_ata_deg,expected", [(4.0, -0.150), (10.0, -0.025), (25.0, -0.015)])
+def test_v7_env_step_records_r42_and_death_same_step(reverse_ata_deg, expected):
+    env = _prepare_r42_env(reverse_ata_deg=reverse_ata_deg, distance=500.0)
+    _, cfg, combat = _cfg()
+    before = paper_segmented_local_reward(
+        env._aircraft_by_id("red_0").state,
+        env._aircraft_by_id("blue_0").state,
+        combat["attack_distance_min"],
+        combat["attack_distance_max"],
+        cfg,
+    )
+    assert before["threat"] == pytest.approx(expected)
+    assert env.attack_model.can_attack(env._aircraft_by_id("blue_0").state, env._aircraft_by_id("red_0").state)
+    assert not env.attack_model.can_attack(env._aircraft_by_id("red_0").state, env._aircraft_by_id("blue_0").state)
+
+    _, _, _, _, info = env.step(_zero_actions(env))
+    rc = info["reward_components"]
+    assert info["attacks"]["blue_0"] == "red_0"
+    assert env._aircraft_by_id("red_0").state.alive is False
+    assert info["attack_kills"]["blue"] == 1
+    assert rc["red_threat_penalty"] == pytest.approx(expected / 3.0)
+    assert rc["red_attack_death_penalty"] == -10.0
+    assert info["reward_targets"]["red_0"] == "blue_0"
+    _assert_red_component_sum(rc)
+
+
+def test_v7_reward_target_preserved_on_kill_step_and_recomputed_next_step():
+    env = Homogeneous3v3AirCombatEnv(CONFIG_V7)
+    env.reset(700)
+    for aid in RED_IDS + BLUE_IDS:
+        _set(env, aid, 9000.0, 9000.0, alive=False)
+    _set(env, "red_0", 0.0, 0.0, psi=0.0, alive=True)
+    _set(env, "blue_0", 500.0, 0.0, psi=0.0, alive=True)
+    _set(env, "blue_1", 2000.0, 0.0, psi=0.0, alive=True)
+
+    _, _, terminated, truncated, info = env.step(_zero_actions(env))
+    assert not terminated and not truncated
+    assert info["reward_targets"]["red_0"] == "blue_0"
+    assert env._aircraft_by_id("blue_0").state.alive is False
+
+    _, _, _, _, info2 = env.step(_zero_actions(env))
+    assert info2["reward_targets"]["red_0"] == "blue_1"
+
+
+def test_v7_boundary_and_collision_deaths_do_not_enter_pre_attack_dense():
+    env = Homogeneous3v3AirCombatEnv(CONFIG_V7)
+    env.reset(701)
+    for aid in RED_IDS + BLUE_IDS:
+        _set(env, aid, 9000.0, 9000.0, alive=False)
+    _set(env, "red_0", 0.0, 0.0, z=-7000.0, psi=0.0, alive=True)
+    _set(env, "blue_0", 500.0, 0.0, psi=0.0, alive=True)
+    _, _, _, _, info = env.step(_zero_actions(env))
+    rc = info["reward_components"]
+    assert info["death_causes"]["red_0"] == DEATH_BOUNDARY_ALTITUDE
+    assert info["reward_targets"]["red_0"] is None
+    assert rc["red_attack_advantage_reward"] == 0.0
+    assert rc["red_threat_penalty"] == 0.0
+
+    env = Homogeneous3v3AirCombatEnv(CONFIG_V7)
+    env.reset(702)
+    for aid in RED_IDS + BLUE_IDS:
+        _set(env, aid, 9000.0, 9000.0, alive=False)
+    _set(env, "red_0", 0.0, 0.0, psi=0.0, alive=True)
+    _set(env, "red_1", 0.0, 0.0, psi=0.0, alive=True)
+    _set(env, "blue_0", 500.0, 0.0, psi=0.0, alive=True)
+    _, _, _, _, info = env.step(_zero_actions(env))
+    rc = info["reward_components"]
+    assert info["reward_targets"]["red_0"] is None
+    assert info["reward_targets"]["red_1"] is None
+    assert rc["red_attack_advantage_reward"] == 0.0
+    assert rc["red_collision_death_penalty"] == -20.0
+    _assert_red_component_sum(rc)
+
+
+def test_v7_same_step_cross_team_attack_kills_keep_dense_and_ledger():
+    env = Homogeneous3v3AirCombatEnv(CONFIG_V7)
+    env.reset(703)
+    for aid in RED_IDS + BLUE_IDS:
+        _set(env, aid, 9000.0, 9000.0, alive=False)
+    _set(env, "red_0", 0.0, 0.0, psi=0.0, alive=True)
+    _set(env, "blue_0", 500.0, 0.0, psi=0.0, alive=True)
+    _set(env, "red_1", 0.0, 2000.0, z=-3100.0, psi=np.pi, alive=True)
+    _set(env, "blue_1", 500.0, 2000.0, z=-3100.0, psi=np.pi, alive=True)
+    _, _, _, _, info = env.step(_zero_actions(env))
+    rc = info["reward_components"]
+    assert info["attack_kills"]["red"] == 1
+    assert info["attack_kills"]["blue"] == 1
+    assert rc["red_attack_advantage_reward"] > 0.0
+    assert rc["red_threat_penalty"] < 0.0
+    assert rc["red_kill_reward"] == 10.0
+    assert rc["red_attack_death_penalty"] == -10.0
+    _assert_red_component_sum(rc)
 
 
 @pytest.mark.parametrize("env_cls,kwargs", [

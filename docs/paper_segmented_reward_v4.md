@@ -12,6 +12,8 @@ Project mapping:
 - Each alive aircraft uses its nearest currently alive enemy, with aircraft ID as deterministic tie-break.
 - Dead own aircraft contribute zero.
 - Team dense reward is divided by fixed `team_size = 3`, not alive count.
+- Dense terms are evaluated from the post-motion, post-boundary, post-collision, pre-attack state.
+- Event and terminal terms are evaluated after attack resolution from the real death ledger.
 
 Dense terms:
 
@@ -27,5 +29,13 @@ Event and terminal terms:
 - Non-success termination adds `-10 * own_survivors`.
 - Mutual elimination adds an extra `-10`.
 - Complete success has no additional terminal bonus; its value comes from the three attack kills minus any own losses.
+
+Timing semantics:
+
+- `R41` and an attack kill may occur in the same step. `R41` rewards the pre-attack advantageous geometry; the kill reward records the completed attack event.
+- `R42` and an own attack death may occur in the same step. `R42` penalizes the pre-attack threat geometry; the death penalty records the actual aircraft loss.
+- A target killed during the current step can remain the current step's `reward_targets` entry because the target was alive in the pre-attack snapshot.
+- The next step recomputes reward targets from the then-current alive aircraft, so dead targets are not carried across steps.
+- This timing is the current project's adaptation for step-order details not specified by the MADSAC paper; it is not a claim about the paper's original source-code execution order.
 
 The existing 14 red reward component slots are preserved. For this mode, death penalty components are signed negative values, and `red_team_total_reward` equals the sum of the previous 13 red components. v6 remains `target_consistent_team_v3`; v4/v5 remain `paper_coupled_team_v2`.
