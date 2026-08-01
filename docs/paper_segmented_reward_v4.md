@@ -38,4 +38,12 @@ Timing semantics:
 - The next step recomputes reward targets from the then-current alive aircraft, so dead targets are not carried across steps.
 - This timing is the current project's adaptation for step-order details not specified by the MADSAC paper; it is not a claim about the paper's original source-code execution order.
 
-The existing 14 red reward component slots are preserved. For this mode, death penalty components are signed negative values, and `red_team_total_reward` equals the sum of the previous 13 red components. v6 remains `target_consistent_team_v3`; v4/v5 remain `paper_coupled_team_v2`.
+Reward accounting:
+
+- `approach_reward`, `attack_advantage_reward`, and `threat_penalty` are diagnostic subcomponents of `dense_reward`.
+- `dense_reward = R3 + R41 + R42`.
+- `team_total_reward = dense_reward + kill_reward + attack_death_penalty + boundary_death_penalty + collision_death_penalty + terminal_reward`.
+- The diagnostic dense subcomponents are not added again when computing `team_total_reward`.
+- The 14-component vector intentionally contains both decomposition fields and aggregate fields, so callers must not unconditionally sum the first 13 columns.
+
+The existing 14 red reward component slots are preserved. For this mode, death penalty components are signed negative values. v6 remains `target_consistent_team_v3`; v4/v5 remain `paper_coupled_team_v2`.

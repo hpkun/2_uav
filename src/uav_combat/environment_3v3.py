@@ -1210,8 +1210,20 @@ class Homogeneous3v3AirCombatEnv:
             "collision_death_penalty": -loss * blue_col_losses,
             "terminal_reward": blue_terminal,
         }
-        red_total = float(sum(red_components.values()))
-        blue_total = float(sum(blue_components.values()))
+        red_event = (
+            red_components["kill_reward"]
+            + red_components["attack_death_penalty"]
+            + red_components["boundary_death_penalty"]
+            + red_components["collision_death_penalty"]
+        )
+        blue_event = (
+            blue_components["kill_reward"]
+            + blue_components["attack_death_penalty"]
+            + blue_components["boundary_death_penalty"]
+            + blue_components["collision_death_penalty"]
+        )
+        red_total = float(red_components["dense_reward"] + red_event + red_components["terminal_reward"])
+        blue_total = float(blue_components["dense_reward"] + blue_event + blue_components["terminal_reward"])
         red_components["team_total_reward"] = red_total
         blue_components["team_total_reward"] = blue_total
 
