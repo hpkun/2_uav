@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+import hashlib
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -19,8 +20,12 @@ from .vector_env_3v3 import (
     RED_REWARD_COMPONENT_KEYS_3V3,
 )
 
-CHECKPOINT_VERSION_3V3 = 1
+CHECKPOINT_VERSION_3V3 = 2
 CHECKPOINT_FAMILY = "homogeneous_3v3_fixed_blue"
+
+
+def sha256_file(path: str | Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 def resolve_device(requested: str) -> torch.device:
@@ -405,6 +410,7 @@ class FixedBlue3v3MAPPOTrainer:
         sc["training"].pop("evaluation_interval_env_steps", None); sc["training"].pop("quick_evaluation_episodes", None)
         sc["experiment"].pop("device", None); sc["experiment"].pop("output_dir", None)
         return {"checkpoint_family": CHECKPOINT_FAMILY, "checkpoint_version": CHECKPOINT_VERSION_3V3,
+                "env_config_sha256": sha256_file(self.env_config),
                 "observation_dim": OBS_DIM, "global_state_dim": GS_DIM, "team_size": 3,
                 "network": deepcopy(nc),
                 "ppo": {k: tc[k] for k in ("learning_rate","gamma","gae_lambda","clip_coef",

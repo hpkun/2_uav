@@ -67,3 +67,20 @@ component 向量同时包含 dense decomposition 和 dense aggregate，调用方
 
 这些问题不应通过直接调奖励系数或扩大网络来猜测解决，建议先用 `scripts/audit_mappo_v7_10m_failure.py` 做固定 seed 离线诊断。
 
+## 第二轮审计修正说明
+
+- MAPPO 3v3 checkpoint signature 现在包含 `env_config_sha256`，即环境 YAML 文件内容的 SHA-256。严格 resume 同时检查 family、version 和完整 training signature；环境路径改变但内容相同可以恢复，内容改变必须失败。旧 checkpoint 缺少该字段，不能作为严格 resume 使用。
+- `scripts/audit_mappo_v7_10m_failure.py` 的 v2 版本只把旧 checkpoint 当作 audit-only Actor 权重读取，不等价于训练恢复。它不会修改 10M 原始输出目录。
+- 环境新增默认关闭的 `audit_trace_enabled`。仅当审计脚本显式打开时，`info["audit"]["paper_segmented_v4_pre_attack"]` 会记录与 v7 reward 同一步、同一 pre-attack snapshot 对齐的目标、距离、ATA、AA、可见性、attack-window 和 R3/R41/R42 局部项。
+- `altitude_death_pre100.csv` 现在保存历史缓冲中每一步当时已经对齐的动作、控制、几何和 reward，不再把死亡发生那一步的 R3/R41/R42 批量复制到此前 100 步。
+- observation bank 来自 initial/best/latest/final checkpoint 的确定性真实访问轨迹，并按类别去重和限额；缺失类别会在 `audit_summary.json` 中报告为 absent，不人工伪造样本。
+
+## MAPPO entropy 字段含义
+
+当前 MAPPO/HAPPO 的训练 loss 使用 `loss = policy_loss - entropy_coef * entropy`，其中 `entropy` 是未经过 tanh 变换前的 raw Gaussian entropy。实际执行动作来自 tanh-squashed Gaussian，因此 raw entropy 与有界动作空间中的 squashed entropy 不是同一个量：当 policy mean 已经很大、`tanh(mean)` 接近 ±1 时，raw entropy 仍可能有限甚至偏高，但 deterministic action 已饱和。第二轮审计新增 `raw_gaussian_entropy`、`estimated_squashed_entropy`、`sampled_action_saturation` 和 `deterministic_action_saturation` 诊断；本轮不改变 entropy bonus 公式。
+
+## HAPPO 论文/官方实现对照结论
+
+对照 HAPPO 论文的 sequential agent update 思路与 HARL 官方实现主干逻辑后，当前项目 HAPPO 的核心顺序更新保持一致：每轮使用一个 agent 顺序，`factor` 初始为 1；每个 agent 用 `factor * advantage` 进入 PPO clipped objective；该 agent 更新完成后，用同一批 old log probability 与更新后的 new log probability 比率更新 preceding-policy ratio factor，并 detach，避免跨 agent 反向传播；critic 在顺序 actor 更新后更新。当前 per-agent active-mask advantage normalization 是项目针对死亡/无效样本的工程适配，已有单元测试覆盖 inactive 样本，不在本轮认定为论文违背。
+
+参考：HAPPO 论文 arXiv 页面 `https://arxiv.org/abs/2109.11251`；HARL 官方实现仓库 `https://github.com/PKU-MARL/HARL`。

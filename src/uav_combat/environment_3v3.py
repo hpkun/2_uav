@@ -176,6 +176,7 @@ class Homogeneous3v3AirCombatEnv:
         self._episode_support_coverage_sum: dict[str, float] = {}
         self._episode_support_coverage_step_count: dict[str, int] = {}
         self._episode_shared_kills: dict[str, int] = {}
+        self.audit_trace_enabled = False
 
     def _aircraft_by_id(self, aid: str) -> Aircraft:
         return next(a for a in self.aircraft if a.aircraft_id == aid)
@@ -412,11 +413,14 @@ class Homogeneous3v3AirCombatEnv:
         reward_mode = self.config["combat"].get("reward_mode", "madsac_segmented")
         v7_pre_attack_dense_parts: dict[str, dict[str, float]] | None = None
         v7_pre_attack_reward_targets: dict[str, str | None] | None = None
+        audit_pre_attack: dict[str, Any] | None = None
         if reward_mode == "paper_segmented_team_v4":
             (
                 v7_pre_attack_dense_parts,
                 v7_pre_attack_reward_targets,
             ) = self._capture_paper_segmented_v4_pre_attack()
+            if self.audit_trace_enabled:
+                audit_pre_attack = self._capture_paper_segmented_v4_pre_attack_audit()
 
         # 9. Nearest-enemy geometry (post-integration, pre-attack, for still-alive)
         nearest_enemy_geom: dict[str, dict[str, Any]] = {}
@@ -641,6 +645,8 @@ class Homogeneous3v3AirCombatEnv:
             "blue_targets": {}, "global_state": self.global_state(),
             "episode_summary": episode_summary,
         }
+        if audit_pre_attack is not None:
+            info["audit"] = {"paper_segmented_v4_pre_attack": audit_pre_attack}
         return observations, rewards, terminated, truncated, info
 
     # -- paper_coupled_team_v2 rewards -----------------------------------
@@ -1119,6 +1125,94 @@ class Homogeneous3v3AirCombatEnv:
             + components["threat_penalty"]
         )
         return components, targets
+
+    def _paper_segmented_v4_pair_audit(
+        self,
+        own: Aircraft,
+        target: Aircraft | None,
+        cfg: dict[str, Any],
+    ) -> dict[str, Any]:
+        if target is None or not own.state.alive:
+            return {
+                "target_id": None,
+                "distance": None,
+                "ata": None,
+                "aa": None,
+                "visible": False,
+                "distance_window": False,
+                "ata_window": False,
+                "aa_window": False,
+                "attack_window": False,
+                "r3_active": False,
+                "r41_tier": "none",
+                "r42_tier": "none",
+                "r3": 0.0,
+                "r41": 0.0,
+                "r42": 0.0,
+                "dense_total": 0.0,
+            }
+        combat = self.config["combat"]
+        attack_min = float(combat["attack_distance_min"])
+        attack_max = float(combat["attack_distance_max"])
+        local = paper_segmented_local_reward(own.state, target.state, attack_min, attack_max, cfg)
+        geo = compute_pairwise_geometry(own.state, target.state)
+        rev = compute_pairwise_geometry(target.state, own.state)
+        eps = 1e-12
+
+        def _tier(angle: float, prefix: str) -> str:
+            if angle <= float(cfg["fine_angle"]) + eps:
+                return "fine"
+            if angle <= float(cfg["medium_angle"]) + eps:
+                return "medium"
+            if angle <= float(cfg["coarse_angle"]) + eps:
+                return "coarse"
+            return "none"
+
+        distance_window = attack_min - eps <= geo.distance <= attack_max + eps
+        ata_window = geo.ata <= float(combat["attack_ata_max"]) + eps
+        aa_window = geo.aa <= float(combat["attack_aa_max"]) + eps
+        return {
+            "target_id": target.aircraft_id,
+            "distance": float(geo.distance),
+            "ata": float(geo.ata),
+            "aa": float(geo.aa),
+            "visible": target.aircraft_id in self._effective_visible_enemy_ids(own),
+            "distance_window": bool(distance_window),
+            "ata_window": bool(ata_window),
+            "aa_window": bool(aa_window),
+            "attack_window": bool(distance_window and ata_window and aa_window),
+            "r3_active": bool(local["guide"] > 0.0),
+            "r41_tier": _tier(geo.ata, "attack_reward") if (
+                distance_window and geo.aa <= float(cfg["advantage_aspect_max"]) + eps and local["attack_advantage"] > 0.0
+            ) else "none",
+            "r42_tier": _tier(rev.ata, "threat_penalty") if (local["threat"] < 0.0) else "none",
+            "r3": float(local["guide"]),
+            "r41": float(local["attack_advantage"]),
+            "r42": float(local["threat"]),
+            "dense_total": float(local["dense_total"]),
+        }
+
+    def _capture_paper_segmented_v4_pre_attack_audit(self) -> dict[str, Any]:
+        cfg = self.config.get("reward_paper_segmented_v4", {})
+        out: dict[str, Any] = {}
+        for own in self.aircraft:
+            enemies = [a for a in self.aircraft if a.team == self._enemy_team(own.team)]
+            target = self._nearest_alive_enemy(own, enemies) if own.state.alive else None
+            state = own.state
+            out[own.aircraft_id] = {
+                "state": {
+                    "x": float(state.x),
+                    "y": float(state.y),
+                    "z": float(state.z),
+                    "altitude": float(state.altitude),
+                    "speed": float(state.v),
+                    "theta": float(state.theta),
+                    "psi": float(state.psi),
+                    "alive": bool(state.alive),
+                },
+                **self._paper_segmented_v4_pair_audit(own, target, cfg),
+            }
+        return out
 
     def _team_step_death_counts(
         self, team: str, step_death_causes: dict[str, int],
