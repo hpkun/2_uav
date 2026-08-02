@@ -236,10 +236,11 @@ class HAPPO3v3Trainer:
             with torch.no_grad():
                 value = self.critic(torch.as_tensor(self.current_global_states, device=self.device)).cpu().numpy()
             actions, log_probs = self._select_actions()
-            flat_actions = actions.reshape(-1, 3)
-            action_sum += flat_actions.sum(axis=0)
-            action_sat_sum += (np.abs(flat_actions) >= 0.95).sum(axis=0)
-            action_count += flat_actions.shape[0]
+            alive_actions = actions[red_alive.astype(bool)]
+            if alive_actions.size:
+                action_sum += alive_actions.sum(axis=0)
+                action_sat_sum += (np.abs(alive_actions) >= 0.95).sum(axis=0)
+                action_count += alive_actions.shape[0]
             r: VectorStepResult3v3 = self.vector_env.step(actions)
             reward_component_sum += r.red_reward_components.sum(axis=0)
             reward_component_count += self.num_envs
@@ -278,18 +279,8 @@ class HAPPO3v3Trainer:
                         "blue_mean_support_coverage_ratio": float(r.episode_blue_mean_support_coverage_ratio[idx]),
                         "red_support_survived": bool(r.episode_red_support_survived[idx]),
                         "blue_support_survived": bool(r.episode_blue_support_survived[idx]),
-                        "red_attack_window_agent_steps": int(r.episode_red_attack_window_agent_steps[idx]),
-                        "blue_attack_window_agent_steps": int(r.episode_blue_attack_window_agent_steps[idx]),
-                        "red_alive_agent_steps": int(r.episode_red_alive_agent_steps[idx]),
-                        "blue_alive_agent_steps": int(r.episode_blue_alive_agent_steps[idx]),
-                        "red_attack_window_fraction": float(r.episode_red_attack_window_fraction[idx]),
-                        "blue_attack_window_fraction": float(r.episode_blue_attack_window_fraction[idx]),
-                        "red_any_attack_window": bool(r.episode_red_any_attack_window[idx]),
-                        "blue_any_attack_window": bool(r.episode_blue_any_attack_window[idx]),
                         "red_any_attack_kill": bool(r.episode_red_any_attack_kill[idx]),
                         "blue_any_attack_kill": bool(r.episode_blue_any_attack_kill[idx]),
-                        "red_target_switch_count": int(r.episode_red_target_switch_count[idx]),
-                        "blue_target_switch_count": int(r.episode_blue_target_switch_count[idx]),
                     }
                     validate_episode_accounting_3v3(rec, int(idx))
                     completed.append(rec)
@@ -333,10 +324,6 @@ class HAPPO3v3Trainer:
                 "mean_rollout_approach_reward": means.get("red_approach_reward", 0.0),
                 "mean_rollout_attack_advantage_reward": means.get("red_attack_advantage_reward", 0.0),
                 "mean_rollout_threat_penalty": means.get("red_threat_penalty", 0.0),
-                "mean_rollout_altitude_boundary_penalty": means.get("red_altitude_boundary_penalty", 0.0),
-                "mean_rollout_xy_boundary_penalty": means.get("red_xy_boundary_penalty", 0.0),
-                "mean_rollout_soft_boundary_penalty": means.get("red_soft_boundary_penalty", 0.0),
-                "mean_rollout_support_information_reward": means.get("red_support_information_reward", 0.0),
                 "mean_rollout_dense_reward": means.get("red_dense_reward", 0.0),
                 "mean_rollout_event_reward": means.get("red_event_reward", 0.0),
                 "mean_rollout_terminal_reward": means.get("red_terminal_reward", 0.0),

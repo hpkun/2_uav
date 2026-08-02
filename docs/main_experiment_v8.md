@@ -1,83 +1,111 @@
 # Main experiment v8
 
-v8 is an isolated main-experiment configuration for the current 3DOF NED
-point-mass 3v3 air-combat environment. It does not replace the historical
-v3/v4/v6/v7 or functional-heterogeneous v1 configs.
+v8 is the simplified main-experiment environment for the current 3DOF NED point-mass 3v3 air-combat project.  This version intentionally removes the engineering-heavy v8 shaping used in the previous iteration and moves the main experiment closer to the simplified multi-UAV setting of Li et al. 2023 MADSAC.
 
-## Environment variants
+## What v8 keeps
 
-- `configs/homogeneous_3v3_main_v8.yaml` keeps the validated homogeneous 3v3
-  dynamics, controller, attack envelope and 600-step limit, uses
-  `rate_aligned_v1`, and uses fixed blue `greedy_team_pursuit_v1`.
-- `configs/heterogeneous_3v3_main_v8.yaml` keeps the functional heterogeneous
-  structure: one support and two combat aircraft per side, support sensor
-  range 6000 m, combat sensor range 3000 m, support-to-combat sharing, and
-  support aircraft cannot attack.
+- 3DOF NED point-mass dynamics with RK4 integration.
+- Continuous `rate_aligned_v1` action mapping.
+- Deterministic attack envelope from the existing combat model.
+- Fixed 600-step episode limit.
+- MAPPO and HAPPO algorithm structures and stability settings.
+- Homogeneous 3v3 and functional heterogeneous 3v3 variants.
 
-## Reward and target consistency
+## Observation contract
 
-Homogeneous v8 uses `task_aligned_continuous_team_v8`; heterogeneous v8 uses
-`task_aligned_heterogeneous_team_v8`.
+v8 follows the Equation (24) idea: each agent observes self state, teammate state, and enemy state blocks in its own coordinate frame.  It does not add target IDs, target flags, persistent engagement labels, or target-first ordering.
 
-The team reward is:
+Enemy observation blocks use deterministic stateless ordering at every step:
+
+1. alive enemies first, sorted by current 3D distance;
+2. equal-distance ties broken by `aircraft_id`;
+3. dead or invisible enemies are zero blocks;
+4. no persistent target state is stored.
+
+The observation dimension remains 68.
+
+## Target and attack causality
+
+v8 uses a stateless nearest-target rule for both reward targeting and attack intent:
+
+- every attack-capable aircraft selects the current nearest alive enemy each step;
+- ties are deterministic by `aircraft_id`;
+- in the heterogeneous environment, combat aircraft select only currently effective-visible enemies;
+- if the nearest selected target is outside the attack envelope, the aircraft does not attack another target in the same step;
+- support aircraft never attack.
+
+The homogeneous fixed blue opponent in v8 is `paper_nearest_pursuit_v1`, not the one-to-one greedy team matcher.
+
+## Reward
+
+v8 uses the existing tested paper-segmented local helper for Equation (25)-style `R1 + R2 + R3 + R4` terms.
+
+For each team:
 
 ```text
-R_team = R_progress + R_attack_geometry - R_threat
-         - R_boundary - R_time + R_event + R_terminal
+R_team = sum(local paper rewards for the team) / fixed_team_size
 ```
 
-Dense terms are normalized by the fixed team size of 3, not by alive count.
-Progress is continuous inside the attack range and is zero on the first step
-after a target switch. Attack geometry and threat use opposite directions of
-the same coupled Gaussian geometry score. Altitude and horizontal soft-boundary
-risk are recorded separately.
+with `fixed_team_size = 3`.
 
-Only v8 modes use persistent engagement targets. At reset, each aircraft chooses
-the nearest alive enemy. It keeps that target while the target is alive, and
-reselects the nearest alive enemy only after target death. The same engagement
-target is used for progress, attack geometry, threat, reward target reporting
-and v8 attack selection.
+Local terms:
 
-## Training configs
+- `R1`: +10 for an attack kill by this team, -10 when one own aircraft is killed by attack.
+- `R2`: -10 when one own aircraft leaves the combat boundary.
+- `R3`: +0.001 guide reward from the existing paper-segmented helper.
+- `R41`: +0.01 / +0.02 / +0.10 for coarse / medium / fine own attack geometry.
+- `R42`: -0.015 / -0.025 / -0.150 for coarse / medium / fine reverse threat geometry.
 
-- `configs/mappo_3v3_main_v8.yaml`
-- `configs/happo_3v3_main_v8.yaml`
-- `configs/happo_heterogeneous_3v3_main_v8.yaml`
+There is no extra terminal reward, timeout penalty, complete-elimination bonus, time penalty, soft-boundary shaping, continuous distance progress, Gaussian geometry reward, or support-information shaping in v8.  Timeout affects outcome/statistics and best-checkpoint selection only.
 
-These configs align MAPPO and HAPPO rollout/GAE/PPO settings and use the v8
-exploration bounds:
+## Heterogeneous v8
 
-```yaml
-log_std_init: -1.0
-log_std_min: -3.0
-log_std_max: -0.3
-```
+The heterogeneous variant keeps only capability and observation differences:
 
-The default `total_env_steps: 1000000` is for later formal runs. Short smoke
-checks should continue to use the scripts' `--smoke` mode or an explicit small
-step override.
+- one support and two combat aircraft per team;
+- support sensor range is 6000 m;
+- combat sensor range is 3000 m;
+- support cannot attack;
+- combat can attack;
+- support-to-combat information sharing remains enabled;
+- HAPPO uses separate actors for support/combat slots;
+- fixed blue support keeps the simple rear-formation hold rule.
+
+Support aircraft can receive shared team reward, can be killed, and can incur boundary loss.  They do not produce R3/R41/R42 attack-geometry rewards and do not receive a support-information shaping reward.
+
+Support coverage, support survival, and shared-observation kill metrics may be logged for analysis, but they do not enter the reward.
 
 ## Main metrics
 
-Episode and evaluation summaries include attack kills, survivors, complete
-elimination success, any attack kill, deterministic attack-window agent steps,
-alive agent steps, attack-window fraction, any attack-window episode, altitude
-and XY boundary deaths, collision deaths, timeouts, target switches and episode
-length. Heterogeneous summaries keep support survival, support coverage, and
-kills with shared observation.
+The main training/evaluation path keeps:
 
-Best-checkpoint ranking for v8 is lexicographic:
+- episode return;
+- red/blue complete-elimination success rates;
+- red/blue attack kills and any-attack-kill rates;
+- red/blue survivors;
+- attack, altitude-boundary, XY-boundary, and collision deaths;
+- timeout rate and mean episode length;
+- R1 kill/death, R2 boundary, R3, R41, R42, and total team reward;
+- actor loss, critic loss, entropy, approximate KL, effective log-std/std;
+- compact action mean/saturation diagnostics over alive red slots only.
 
-1. red complete-elimination success rate
-2. red any-attack-kill rate
-3. mean red attack kills
-4. red any-attack-window rate
-5. mean red attack-window fraction
-6. lower mean blue survivors
-7. mean red survivors
-8. lower mean red boundary deaths
-9. lower max-step rate
-10. shorter mean episode length
+Heterogeneous evaluation additionally keeps support survival, mean support coverage, kills with shared observation, and shared-observation kill fraction as analysis metrics only.
 
-This is an engineering main-experiment target alignment, not a JSBSim, missile,
-radar, curriculum, expert-blue or new-algorithm change.
+## Best checkpoint
+
+v8 best checkpoint selection uses the simplified lexicographic score:
+
+1. `red_complete_elimination_success_rate`
+2. `red_any_attack_kill_rate`
+3. `mean_red_attack_kills`
+4. `mean_red_survivors`
+5. `-mean_red_boundary_deaths`
+6. `-mean_red_collision_deaths`
+7. `-max_steps_rate`
+8. `-mean_episode_length`
+
+This preserves the project rule that red only wins after complete blue elimination; timeout/draw is not a red success.
+
+## Running long experiments
+
+Short smoke tests are for executable-contract checks only.  Long 1M probe or larger runs should be launched by the user in Ubuntu/WSL with the desired v8 config.

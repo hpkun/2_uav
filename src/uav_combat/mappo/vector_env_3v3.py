@@ -55,15 +55,7 @@ RED_REWARD_COMPONENT_KEYS_3V3 = (
     "red_approach_reward",
     "red_attack_advantage_reward",
     "red_threat_penalty",
-    "red_altitude_boundary_penalty",
-    "red_xy_boundary_penalty",
-    "red_soft_boundary_penalty",
-    "red_friendly_separation_penalty",
-    "red_head_on_risk_penalty",
-    "red_time_penalty",
-    "red_support_information_reward",
     "red_dense_reward",
-    "red_dense_unclipped_reward",
     "red_kill_reward",
     "red_attack_death_penalty",
     "red_boundary_death_penalty",
@@ -125,18 +117,8 @@ class VectorStepResult3v3(NamedTuple):
     episode_blue_mean_support_coverage_ratio: np.ndarray    # [N] float32
     episode_red_support_survived: np.ndarray          # [N] bool
     episode_blue_support_survived: np.ndarray         # [N] bool
-    episode_red_attack_window_agent_steps: np.ndarray # [N] int32
-    episode_blue_attack_window_agent_steps: np.ndarray# [N] int32
-    episode_red_alive_agent_steps: np.ndarray         # [N] int32
-    episode_blue_alive_agent_steps: np.ndarray        # [N] int32
-    episode_red_attack_window_fraction: np.ndarray    # [N] float32
-    episode_blue_attack_window_fraction: np.ndarray   # [N] float32
-    episode_red_any_attack_window: np.ndarray         # [N] bool
-    episode_blue_any_attack_window: np.ndarray        # [N] bool
     episode_red_any_attack_kill: np.ndarray           # [N] bool
     episode_blue_any_attack_kill: np.ndarray          # [N] bool
-    episode_red_target_switch_count: np.ndarray       # [N] int32
-    episode_blue_target_switch_count: np.ndarray      # [N] int32
 
 
 def _extract_diagnostics_3v3(diag):
@@ -202,18 +184,8 @@ def _episode_fields(info, L, i):
     arrays["ep_bcov"][idx] = es.get("blue_mean_support_coverage_ratio", 0.0)
     arrays["ep_rsup"][idx] = es.get("red_support_survived", False)
     arrays["ep_bsup"][idx] = es.get("blue_support_survived", False)
-    arrays["ep_raws"][idx] = es.get("red_attack_window_agent_steps", 0)
-    arrays["ep_baws"][idx] = es.get("blue_attack_window_agent_steps", 0)
-    arrays["ep_rals"][idx] = es.get("red_alive_agent_steps", 0)
-    arrays["ep_bals"][idx] = es.get("blue_alive_agent_steps", 0)
-    arrays["ep_rawf"][idx] = es.get("red_attack_window_fraction", 0.0)
-    arrays["ep_bawf"][idx] = es.get("blue_attack_window_fraction", 0.0)
-    arrays["ep_raww"][idx] = es.get("red_any_attack_window", False)
-    arrays["ep_baww"][idx] = es.get("blue_any_attack_window", False)
     arrays["ep_raak"][idx] = es.get("red_any_attack_kill", False)
     arrays["ep_baak"][idx] = es.get("blue_any_attack_kill", False)
-    arrays["ep_rtsc"][idx] = es.get("red_target_switch_count", 0)
-    arrays["ep_btsc"][idx] = es.get("blue_target_switch_count", 0)
 
 
 def _make_episode_arrays(L):
@@ -231,12 +203,7 @@ def _make_episode_arrays(L):
         "ep_rks": np.zeros(L, dtype=np.int8), "ep_bks": np.zeros(L, dtype=np.int8),
         "ep_rcov": np.zeros(L, dtype=np.float32), "ep_bcov": np.zeros(L, dtype=np.float32),
         "ep_rsup": np.zeros(L, dtype=bool), "ep_bsup": np.zeros(L, dtype=bool),
-        "ep_raws": np.zeros(L, dtype=np.int32), "ep_baws": np.zeros(L, dtype=np.int32),
-        "ep_rals": np.zeros(L, dtype=np.int32), "ep_bals": np.zeros(L, dtype=np.int32),
-        "ep_rawf": np.zeros(L, dtype=np.float32), "ep_bawf": np.zeros(L, dtype=np.float32),
-        "ep_raww": np.zeros(L, dtype=bool), "ep_baww": np.zeros(L, dtype=bool),
         "ep_raak": np.zeros(L, dtype=bool), "ep_baak": np.zeros(L, dtype=bool),
-        "ep_rtsc": np.zeros(L, dtype=np.int32), "ep_btsc": np.zeros(L, dtype=np.int32),
     }
 
 
@@ -284,18 +251,8 @@ def _build_result(L, obs, gs, team_rew, term, trunc, am, atg, dc, tac,
         episode_blue_mean_support_coverage_ratio=ep_arrs["ep_bcov"],
         episode_red_support_survived=ep_arrs["ep_rsup"],
         episode_blue_support_survived=ep_arrs["ep_bsup"],
-        episode_red_attack_window_agent_steps=ep_arrs["ep_raws"],
-        episode_blue_attack_window_agent_steps=ep_arrs["ep_baws"],
-        episode_red_alive_agent_steps=ep_arrs["ep_rals"],
-        episode_blue_alive_agent_steps=ep_arrs["ep_bals"],
-        episode_red_attack_window_fraction=ep_arrs["ep_rawf"],
-        episode_blue_attack_window_fraction=ep_arrs["ep_bawf"],
-        episode_red_any_attack_window=ep_arrs["ep_raww"],
-        episode_blue_any_attack_window=ep_arrs["ep_baww"],
         episode_red_any_attack_kill=ep_arrs["ep_raak"],
         episode_blue_any_attack_kill=ep_arrs["ep_baak"],
-        episode_red_target_switch_count=ep_arrs["ep_rtsc"],
-        episode_blue_target_switch_count=ep_arrs["ep_btsc"],
     )
 
 

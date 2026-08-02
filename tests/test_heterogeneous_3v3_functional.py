@@ -291,7 +291,7 @@ def test_heterogeneous_observation_fixed_enemy_slots_and_status_values():
     assert np.all(enemy2[:-1] == 0.0)
 
 
-def test_support_shared_visibility_changes_combat_enemy_slot_but_not_support_slot():
+def test_support_shared_visibility_changes_combat_enemy_visibility_but_not_support_slot():
     env = _env()
     _spread_defaults(env)
     _set_state(env, "red_0", 0.0, 0.0)
@@ -299,11 +299,11 @@ def test_support_shared_visibility_changes_combat_enemy_slot_but_not_support_slo
     _set_state(env, "blue_1", 5000.0, 0.0)
     combat_obs = env._agent_observation(env._aircraft_by_id("red_1"))
     support_obs = env._agent_observation(env._aircraft_by_id("red_0"))
-    assert combat_obs[44 + 11] == 1.0
-    assert support_obs[44 + 11] == 1.0
+    assert 1.0 in combat_obs[[43, 55, 67]]
+    assert 1.0 in support_obs[[43, 55, 67]]
     env._aircraft_by_id("red_0").state.alive = False
     combat_obs = env._agent_observation(env._aircraft_by_id("red_1"))
-    assert combat_obs[44 + 11] == 0.0
+    assert 1.0 not in combat_obs[[43, 55, 67]]
 
 
 def test_support_cannot_attack_even_in_attack_envelope():

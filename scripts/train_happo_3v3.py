@@ -107,16 +107,6 @@ def episode_stats(records: list[dict]) -> dict:
         ])),
         "red_any_attack_kill_rate": sum(r.get("red_any_attack_kill", False) for r in records) / n,
         "blue_any_attack_kill_rate": sum(r.get("blue_any_attack_kill", False) for r in records) / n,
-        "red_any_attack_window_rate": sum(r.get("red_any_attack_window", False) for r in records) / n,
-        "blue_any_attack_window_rate": sum(r.get("blue_any_attack_window", False) for r in records) / n,
-        "mean_red_attack_window_agent_steps": float(np.mean([r.get("red_attack_window_agent_steps", 0) for r in records])),
-        "mean_blue_attack_window_agent_steps": float(np.mean([r.get("blue_attack_window_agent_steps", 0) for r in records])),
-        "mean_red_alive_agent_steps": float(np.mean([r.get("red_alive_agent_steps", 0) for r in records])),
-        "mean_blue_alive_agent_steps": float(np.mean([r.get("blue_alive_agent_steps", 0) for r in records])),
-        "mean_red_attack_window_fraction": float(np.mean([r.get("red_attack_window_fraction", 0.0) for r in records])),
-        "mean_blue_attack_window_fraction": float(np.mean([r.get("blue_attack_window_fraction", 0.0) for r in records])),
-        "mean_red_target_switch_count": float(np.mean([r.get("red_target_switch_count", 0) for r in records])),
-        "mean_blue_target_switch_count": float(np.mean([r.get("blue_target_switch_count", 0) for r in records])),
         "mean_red_kills_with_shared_observation": float(np.mean([
             r.get("red_kills_with_shared_observation", 0) for r in records
         ])),

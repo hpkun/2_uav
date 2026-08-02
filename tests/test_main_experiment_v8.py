@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 from copy import deepcopy
@@ -9,14 +10,12 @@ import torch
 import yaml
 
 from uav_combat.config import load_config
-from uav_combat.environment_3v3 import ALL_IDS, Homogeneous3v3AirCombatEnv
-from uav_combat.geometry import compute_pairwise_geometry
+from uav_combat.environment_3v3 import OBS_DIM, Homogeneous3v3AirCombatEnv
 from uav_combat.happo.trainer_3v3 import HAPPO3v3Trainer
-from uav_combat.mappo.trainer_3v3 import FixedBlue3v3MAPPOTrainer, compute_best_score
+from uav_combat.mappo.trainer_3v3 import FixedBlue3v3MAPPOTrainer, compute_best_score, compute_best_score_fields
 from uav_combat.mappo.vector_env_3v3 import LocalCombatVectorEnv3v3, SubprocessCombatVectorEnv3v3
 from uav_combat.models import AircraftState
-from uav_combat.rewards import continuous_distance_progress, coupled_attack_advantage, soft_boundary_risk
-
+from uav_combat.rewards import paper_segmented_local_reward
 
 ROOT = Path(__file__).parents[1]
 HOMO_V8 = ROOT / "configs" / "homogeneous_3v3_main_v8.yaml"
@@ -24,23 +23,18 @@ HETERO_V8 = ROOT / "configs" / "heterogeneous_3v3_main_v8.yaml"
 MAPPO_V8 = ROOT / "configs" / "mappo_3v3_main_v8.yaml"
 HAPPO_V8 = ROOT / "configs" / "happo_3v3_main_v8.yaml"
 HAPPO_HETERO_V8 = ROOT / "configs" / "happo_heterogeneous_3v3_main_v8.yaml"
+V4 = ROOT / "configs" / "homogeneous_3v3_learnable_v4.yaml"
 V7 = ROOT / "configs" / "homogeneous_3v3_learnable_v7_paper_segmented.yaml"
 
 
-def _state(x: float, y: float, altitude: float = 3000.0, psi: float = 0.0) -> AircraftState:
-    return AircraftState(x=x, y=y, z=-altitude, v=150.0, theta=0.0, psi=psi, alive=True)
+def _state(x: float, y: float, psi: float, altitude: float = 3000.0, alive: bool = True) -> AircraftState:
+    return AircraftState(x=x, y=y, z=-altitude, v=150.0, theta=0.0, psi=psi, alive=alive)
 
 
-def _set(env: Homogeneous3v3AirCombatEnv, aid: str, x: float, y: float, altitude: float = 3000.0,
-         psi: float = 0.0, alive: bool = True) -> None:
+def _set(env: Homogeneous3v3AirCombatEnv, aid: str, x: float, y: float, psi: float = 0.0,
+         altitude: float = 3000.0, alive: bool = True) -> None:
     ac = env._aircraft_by_id(aid)
-    ac.state.x = float(x)
-    ac.state.y = float(y)
-    ac.state.z = -float(altitude)
-    ac.state.v = 150.0
-    ac.state.theta = 0.0
-    ac.state.psi = float(psi)
-    ac.state.alive = bool(alive)
+    ac.state = _state(x, y, psi, altitude, alive)
 
 
 def _zero_actions(env: Homogeneous3v3AirCombatEnv) -> dict[str, np.ndarray]:
@@ -55,172 +49,8 @@ def _rewrite_config(tmp_path: Path, base: Path, mutate) -> Path:
     return path
 
 
-def test_v8_config_is_independent_and_v7_unchanged():
-    v8 = load_config(HOMO_V8)
-    v7 = load_config(V7)
-    assert v8["combat"]["reward_mode"] == "task_aligned_continuous_team_v8"
-    assert v8["blue_rule_policy"]["mode"] == "greedy_team_pursuit_v1"
-    assert v8["action"]["mapping_mode"] == "rate_aligned_v1"
-    assert v7["combat"]["reward_mode"] == "paper_segmented_team_v4"
-
-
-def test_continuous_progress_sign_and_inside_attack_range():
-    assert continuous_distance_progress(800.0, 770.0, 30.0) > 0.0
-    assert continuous_distance_progress(770.0, 800.0, 30.0) < 0.0
-    assert continuous_distance_progress(500.0, 470.0, 30.0) > 0.0
-    assert continuous_distance_progress(None, 470.0, 30.0) == 0.0
-
-
-def test_attack_geometry_preferred_distance_and_angle_monotonicity():
-    own = _state(0.0, 0.0, psi=0.0)
-    preferred = _state(600.0, 0.0, psi=0.0)
-    far = _state(1800.0, 0.0, psi=0.0)
-    near = _state(80.0, 0.0, psi=0.0)
-    off_ata = _state(600.0, 600.0, psi=0.0)
-    bad_aspect = _state(600.0, 0.0, psi=np.pi)
-    cfg = load_config(HOMO_V8)["reward_v8"]
-    score_pref = coupled_attack_advantage(own, preferred, cfg["preferred_distance"], cfg["distance_sigma"], cfg["ata_sigma"], cfg["aa_sigma"])
-    assert score_pref > coupled_attack_advantage(own, far, cfg["preferred_distance"], cfg["distance_sigma"], cfg["ata_sigma"], cfg["aa_sigma"])
-    assert score_pref > coupled_attack_advantage(own, near, cfg["preferred_distance"], cfg["distance_sigma"], cfg["ata_sigma"], cfg["aa_sigma"])
-    assert score_pref > coupled_attack_advantage(own, off_ata, cfg["preferred_distance"], cfg["distance_sigma"], cfg["ata_sigma"], cfg["aa_sigma"])
-    assert score_pref > coupled_attack_advantage(own, bad_aspect, cfg["preferred_distance"], cfg["distance_sigma"], cfg["ata_sigma"], cfg["aa_sigma"])
-
-
-def test_reverse_threat_direction_is_not_same_geometry():
-    red = _state(0.0, 0.0, psi=0.0)
-    blue = _state(-600.0, 0.0, psi=0.0)
-    cfg = load_config(HOMO_V8)["reward_v8"]
-    attack = coupled_attack_advantage(red, blue, cfg["preferred_distance"], cfg["distance_sigma"], cfg["ata_sigma"], cfg["aa_sigma"])
-    threat = coupled_attack_advantage(blue, red, cfg["preferred_distance"], cfg["distance_sigma"], cfg["ata_sigma"], cfg["aa_sigma"])
-    assert attack != threat
-    assert threat > attack
-
-
-def test_soft_boundary_risk_separates_safe_altitude_and_xy():
-    cfg = load_config(HOMO_V8)
-    bf, rv = cfg["battlefield"], cfg["reward_v8"]
-    safe = soft_boundary_risk(_state(0.0, 0.0, altitude=3000.0), bf["x_limit"], bf["y_limit"], bf["altitude_min"], bf["altitude_max"], rv["horizontal_soft_ratio"], rv["altitude_soft_margin"])
-    xy_edge = soft_boundary_risk(_state(19500.0, 0.0, altitude=3000.0), bf["x_limit"], bf["y_limit"], bf["altitude_min"], bf["altitude_max"], rv["horizontal_soft_ratio"], rv["altitude_soft_margin"])
-    alt_edge = soft_boundary_risk(_state(0.0, 0.0, altitude=550.0), bf["x_limit"], bf["y_limit"], bf["altitude_min"], bf["altitude_max"], rv["horizontal_soft_ratio"], rv["altitude_soft_margin"])
-    assert safe["total_risk"] == 0.0
-    assert xy_edge["xy_risk"] > safe["xy_risk"]
-    assert alt_edge["altitude_risk"] > safe["altitude_risk"]
-
-
-def test_engagement_target_reset_keep_reselect_and_progress_first_switch_zero():
-    env = Homogeneous3v3AirCombatEnv(HOMO_V8)
-    env.reset(0)
-    _set(env, "red_0", 0, 0)
-    _set(env, "blue_0", 800, 0, psi=np.pi, alive=True)
-    _set(env, "blue_1", 1200, 0, psi=np.pi, alive=True)
-    _set(env, "blue_2", 2000, 0, psi=np.pi, alive=False)
-    for aid in ("red_1", "red_2"):
-        _set(env, aid, -5000, 0, alive=False)
-    env._reset_v8_tracking()
-    env._initialize_v8_engagement_targets()
-    assert env._select_v8_engagement_target(env._aircraft_by_id("red_0")).aircraft_id == "blue_0"
-    _set(env, "blue_0", 900, 0, psi=np.pi, alive=True)
-    assert env._select_v8_engagement_target(env._aircraft_by_id("red_0")).aircraft_id == "blue_0"
-    env._aircraft_by_id("blue_0").state.alive = False
-    assert env._select_v8_engagement_target(env._aircraft_by_id("red_0")).aircraft_id == "blue_1"
-    assert env._previous_engagement_distances["red_0"] is None
-    parts, targets = env._capture_v8_pre_attack_dense(
-        {aid: {e for e in ALL_IDS if e.startswith("blue")} for aid in ALL_IDS},
-        {"red": (0.0, 0), "blue": (0.0, 0)},
-    )
-    assert targets["red_0"] == "blue_1"
-    assert parts["red"]["approach_reward"] == pytest.approx(0.0)
-
-
-def test_v8_reward_target_and_attack_target_consistency():
-    env = Homogeneous3v3AirCombatEnv(HOMO_V8)
-    env.reset(0)
-    _set(env, "red_0", 0, 0, psi=0.0, alive=True)
-    _set(env, "blue_0", 80, 0, psi=np.pi, alive=True)       # engagement target, too near to attack
-    _set(env, "blue_1", 600, 0, psi=np.pi, alive=True)      # attackable but not engagement target
-    _set(env, "blue_2", 2000, 0, psi=np.pi, alive=False)
-    for aid in ("red_1", "red_2"):
-        _set(env, aid, -5000, 0, alive=False)
-    env._reset_v8_tracking()
-    env._initialize_v8_engagement_targets()
-    _, _, _, _, info = env.step(_zero_actions(env))
-    assert info["reward_targets"]["red_0"] == "blue_0"
-    assert info["attacks"]["red_0"] is None
-
-
-def test_support_cannot_attack_and_information_reward_requires_useful_shared_target(tmp_path):
-    path = _rewrite_config(
-        tmp_path,
-        HETERO_V8,
-        lambda cfg: (
-            cfg["heterogeneous"]["sensor_range"].update({"combat": 500.0, "support": 6000.0})
-        ),
-    )
-    env = Homogeneous3v3AirCombatEnv(path)
-    env.reset(0)
-    _set(env, "red_0", 0, 0, psi=0.0, alive=True)
-    _set(env, "red_1", 0, 1000, psi=0.0, alive=True)
-    _set(env, "red_2", 0, -1000, psi=0.0, alive=False)
-    _set(env, "blue_0", 3500, 0, psi=np.pi, alive=True)
-    _set(env, "blue_1", 3500, 1000, psi=np.pi, alive=True)
-    _set(env, "blue_2", 9000, 0, psi=np.pi, alive=False)
-    env._reset_v8_tracking()
-    env._initialize_v8_engagement_targets()
-    _, rewards, _, _, info = env.step(_zero_actions(env))
-    assert info["attacks"]["red_0"] is None
-    assert info["reward_components"]["red_support_information_reward"] > 0.0
-    assert np.isfinite(rewards["red_0"])
-
-
-def test_v8_team_reward_equals_component_sum_without_double_counting():
-    env = Homogeneous3v3AirCombatEnv(HOMO_V8)
-    env.reset(1)
-    _, rewards, _, _, info = env.step(_zero_actions(env))
-    rc = info["reward_components"]
-    expected = rc["red_dense_reward"] + rc["red_event_reward"] + rc["red_terminal_reward"]
-    assert rc["red_team_total_reward"] == pytest.approx(expected)
-    assert rewards["red_0"] == pytest.approx(rc["red_team_total_reward"])
-
-
-def test_v8_timeout_terminal_truth_table(tmp_path):
-    path = _rewrite_config(tmp_path, HOMO_V8, lambda cfg: cfg["simulation"].update({"max_steps": 1}))
-    env = Homogeneous3v3AirCombatEnv(path)
-    env.reset(2)
-    _, _, terminated, truncated, info = env.step(_zero_actions(env))
-    assert not terminated
-    assert truncated
-    assert info["termination_reason"] == "max_steps"
-    assert info["reward_components"]["red_terminal_reward"] < 0.0
-    assert info["reward_components"]["blue_terminal_reward"] > 0.0
-
-
-def test_attack_window_metrics_are_geometry_based():
-    env = Homogeneous3v3AirCombatEnv(HOMO_V8)
-    env.reset(0)
-    _set(env, "red_0", 0, 0, psi=0.0, alive=True)
-    _set(env, "blue_0", 600, 0, psi=0.0, alive=True)
-    for aid in ("red_1", "red_2", "blue_1", "blue_2"):
-        _set(env, aid, 5000, 5000, alive=False)
-    env._reset_v8_tracking()
-    env._initialize_v8_engagement_targets()
-    _, _, terminated, truncated, info = env.step(_zero_actions(env))
-    assert info["v8_metrics"]["red_attack_window_agent_steps"] >= 1
-    if terminated or truncated:
-        assert info["episode_summary"]["red_any_attack_window"] is True
-
-
-def test_best_score_orders_v8_primary_metrics():
-    better = {
-        "red_complete_elimination_success_rate": 0.0,
-        "red_any_attack_kill_rate": 1.0,
-        "mean_red_attack_kills": 1.0,
-    }
-    worse = {
-        "red_complete_elimination_success_rate": 0.0,
-        "red_any_attack_kill_rate": 0.0,
-        "mean_red_attack_kills": 2.0,
-    }
-    assert compute_best_score(better) > compute_best_score(worse)
+def _paper_cfg() -> dict:
+    return load_config(HOMO_V8)["reward_v8"]
 
 
 def _tiny_train_config(path: Path, tmp_path: Path) -> dict:
@@ -237,18 +67,151 @@ def _tiny_train_config(path: Path, tmp_path: Path) -> dict:
     return cfg
 
 
-def test_mappo_and_happo_v8_configs_construct_trainers(tmp_path):
-    mappo = FixedBlue3v3MAPPOTrainer(HOMO_V8, _tiny_train_config(MAPPO_V8, tmp_path))
-    happo = HAPPO3v3Trainer(HOMO_V8, _tiny_train_config(HAPPO_V8, tmp_path))
-    hetero_happo = HAPPO3v3Trainer(HETERO_V8, _tiny_train_config(HAPPO_HETERO_V8, tmp_path))
-    try:
-        assert mappo.training_signature()["env_config_sha256"]
-        assert happo.training_signature()["env_config_sha256"]
-        assert hetero_happo.training_signature()["env_config_sha256"]
-    finally:
-        mappo.close()
-        happo.close()
-        hetero_happo.close()
+def test_v8_configs_are_simplified_and_history_configs_unchanged():
+    homo = load_config(HOMO_V8)
+    hetero = load_config(HETERO_V8)
+    assert homo["combat"]["reward_mode"] == "task_aligned_paper_segmented_team_v8"
+    assert hetero["combat"]["reward_mode"] == "task_aligned_heterogeneous_paper_segmented_team_v8"
+    assert homo["blue_rule_policy"]["mode"] == "paper_nearest_pursuit_v1"
+    removed = {"progress_weight", "support_information_weight", "time_penalty", "dense_reward_min", "complete_elimination_bonus"}
+    assert not (removed & set(homo["reward_v8"]))
+    assert not (removed & set(hetero["reward_heterogeneous_v8"]))
+    assert load_config(V4)["combat"]["reward_mode"] == "paper_coupled_team_v2"
+    assert load_config(V7)["combat"]["reward_mode"] == "paper_segmented_team_v4"
+
+
+def test_v8_has_no_persistent_engagement_target_state_and_observation_is_68():
+    env = Homogeneous3v3AirCombatEnv(HOMO_V8)
+    obs, info = env.reset(0)
+    forbidden = ("_engagement_targets", "_previous_engagement_distances", "_episode_target_switch_count")
+    assert all(not hasattr(env, name) for name in forbidden)
+    assert obs["red_0"].shape == (OBS_DIM,)
+    assert OBS_DIM == 68
+    assert "v8_metrics" not in info
+
+
+def test_nearest_target_recomputed_each_step_and_tie_breaks_by_id():
+    env = Homogeneous3v3AirCombatEnv(HOMO_V8)
+    env.reset(0)
+    _set(env, "red_0", 0, 0)
+    _set(env, "blue_1", 1000, 0)
+    _set(env, "blue_0", -1000, 0)
+    _set(env, "blue_2", 3000, 0)
+    assert env._v8_nearest_reward_target(env._aircraft_by_id("red_0")).aircraft_id == "blue_0"
+    env._aircraft_by_id("blue_0").state.alive = False
+    assert env._v8_nearest_reward_target(env._aircraft_by_id("red_0")).aircraft_id == "blue_1"
+
+
+def test_nearest_target_attack_causality_does_not_attack_other_attackable_enemy():
+    env = Homogeneous3v3AirCombatEnv(HOMO_V8)
+    env.reset(0)
+    _set(env, "red_0", 0, 0, psi=0.0)
+    _set(env, "blue_0", 80, 0, psi=0.0)       # nearest, below attack_distance_min
+    _set(env, "blue_1", 600, 0, psi=0.0)      # attackable geometry, but not nearest
+    _set(env, "blue_2", 5000, 0, alive=False)
+    _set(env, "red_1", -5000, 0, alive=False)
+    _set(env, "red_2", -6000, 0, alive=False)
+    _, _, _, _, info = env.step(_zero_actions(env))
+    assert info["reward_targets"]["red_0"] == "blue_0"
+    assert info["attacks"]["red_0"] is None
+
+
+def test_paper_segmented_r3_and_r41_tiers_use_existing_helper():
+    cfg = _paper_cfg()
+    attack_min, attack_max = 100.0, 1000.0
+    r3 = paper_segmented_local_reward(_state(0, 0, 0), _state(1500, 0, 0), attack_min, attack_max, cfg)
+    assert r3["guide"] == pytest.approx(0.001)
+    coarse = paper_segmented_local_reward(
+        _state(0, 0, 0), _state(600 * np.cos(np.deg2rad(25)), 600 * np.sin(np.deg2rad(25)), np.deg2rad(25)), attack_min, attack_max, cfg)
+    medium = paper_segmented_local_reward(
+        _state(0, 0, 0), _state(600 * np.cos(np.deg2rad(10)), 600 * np.sin(np.deg2rad(10)), np.deg2rad(10)), attack_min, attack_max, cfg)
+    fine = paper_segmented_local_reward(_state(0, 0, 0), _state(600, 0, 0), attack_min, attack_max, cfg)
+    assert coarse["attack_advantage"] == pytest.approx(0.01)
+    assert medium["attack_advantage"] == pytest.approx(0.02)
+    assert fine["attack_advantage"] == pytest.approx(0.10)
+
+
+def test_paper_segmented_r42_tiers_use_existing_helper():
+    cfg = _paper_cfg()
+    attack_min, attack_max = 100.0, 1000.0
+    coarse = paper_segmented_local_reward(_state(0, 0, 0), _state(-600, 0, np.deg2rad(25)), attack_min, attack_max, cfg)
+    medium = paper_segmented_local_reward(_state(0, 0, 0), _state(-600, 0, np.deg2rad(10)), attack_min, attack_max, cfg)
+    fine = paper_segmented_local_reward(_state(0, 0, 0), _state(-600, 0, 0), attack_min, attack_max, cfg)
+    assert coarse["threat"] == pytest.approx(-0.015)
+    assert medium["threat"] == pytest.approx(-0.025)
+    assert fine["threat"] == pytest.approx(-0.150)
+
+
+def test_v8_team_reward_is_local_paper_sum_divided_by_fixed_three():
+    env = Homogeneous3v3AirCombatEnv(HOMO_V8)
+    env.reset(0)
+    _set(env, "red_0", 0, 0, psi=0.0)
+    _set(env, "blue_0", 600, 0, psi=0.0)
+    for aid in ("red_1", "red_2", "blue_1", "blue_2"):
+        env._aircraft_by_id(aid).state.alive = False
+    parts, targets = env._capture_v8_segmented_pre_attack({a.aircraft_id: env._effective_visible_enemy_ids(a) for a in env.aircraft})
+    assert targets["red_0"] == "blue_0"
+    assert parts["red"]["attack_advantage_reward"] == pytest.approx(0.10 / 3.0)
+    rewards, rc, _ = env._compute_v8_segmented_rewards({"red": 0, "blue": 0}, {}, parts, targets)
+    assert rc["red_team_total_reward"] == pytest.approx(rc["red_dense_reward"])
+    assert rewards["red_0"] == pytest.approx(rc["red_team_total_reward"])
+
+
+def test_v8_event_rewards_are_paper_scale_and_no_terminal_timeout_bonus(tmp_path):
+    env = Homogeneous3v3AirCombatEnv(HOMO_V8)
+    env.reset(0)
+    parts = {"red": {"approach_reward": 0.0, "attack_advantage_reward": 0.0, "threat_penalty": 0.0, "dense_reward": 0.0},
+             "blue": {"approach_reward": 0.0, "attack_advantage_reward": 0.0, "threat_penalty": 0.0, "dense_reward": 0.0}}
+    rewards, rc, _ = env._compute_v8_segmented_rewards({"red": 1, "blue": 0}, {"red_0": 5, "red_1": 1}, parts, {})
+    assert rc["red_kill_reward"] == pytest.approx(10.0 / 3.0)
+    assert rc["red_attack_death_penalty"] == pytest.approx(-10.0 / 3.0)
+    assert rc["red_boundary_death_penalty"] == pytest.approx(-10.0 / 3.0)
+    assert rc["red_terminal_reward"] == 0.0
+    path = _rewrite_config(tmp_path, HOMO_V8, lambda cfg: cfg["simulation"].update({"max_steps": 1}))
+    env2 = Homogeneous3v3AirCombatEnv(path)
+    env2.reset(1)
+    _, _, terminated, truncated, info = env2.step(_zero_actions(env2))
+    assert not terminated and truncated
+    assert info["reward_components"]["red_terminal_reward"] == 0.0
+
+
+def test_heterogeneous_support_has_capability_not_reward_shaping():
+    env = Homogeneous3v3AirCombatEnv(HETERO_V8)
+    env.reset(0)
+    _set(env, "red_0", 0, 0, psi=0.0)      # support
+    _set(env, "red_1", 0, 1000, psi=0.0)   # combat
+    _set(env, "red_2", 0, -1000, alive=False)
+    _set(env, "blue_0", 600, 0, psi=0.0)
+    _set(env, "blue_1", 600, 1000, psi=0.0)
+    _set(env, "blue_2", 5000, 0, alive=False)
+    parts, targets = env._capture_v8_segmented_pre_attack({a.aircraft_id: env._effective_visible_enemy_ids(a) for a in env.aircraft})
+    assert targets["red_0"] == "blue_0"
+    assert "red_support_information_reward" not in env.step(_zero_actions(env))[4]["reward_components"]
+    assert parts["red"]["attack_advantage_reward"] == pytest.approx(0.10 / 3.0)
+
+
+def test_heterogeneous_combat_selects_nearest_effective_visible_enemy(tmp_path):
+    path = _rewrite_config(tmp_path, HETERO_V8, lambda cfg: cfg["heterogeneous"]["sensor_range"].update({"combat": 500.0, "support": 6000.0}))
+    env = Homogeneous3v3AirCombatEnv(path)
+    env.reset(0)
+    _set(env, "red_0", 0, 0)
+    _set(env, "red_1", 0, 0)
+    _set(env, "blue_0", 3500, 0)
+    _set(env, "blue_1", 450, 0, alive=True)
+    target = env._v8_nearest_reward_target(env._aircraft_by_id("red_1"), {a.aircraft_id: env._effective_visible_enemy_ids(a) for a in env.aircraft})
+    assert target.aircraft_id == "blue_1"
+
+
+def test_best_score_simplified_lexicographic_order():
+    complete = {"red_complete_elimination_success_rate": 1.0, "mean_red_attack_kills": 0.0}
+    kills = {"red_complete_elimination_success_rate": 0.0, "red_any_attack_kill_rate": 1.0, "mean_red_attack_kills": 1.0}
+    no_kills = {"red_complete_elimination_success_rate": 0.0, "red_any_attack_kill_rate": 0.0, "mean_red_attack_kills": 2.0}
+    assert compute_best_score(complete) > compute_best_score(kills) > compute_best_score(no_kills)
+    assert list(compute_best_score_fields(kills)) == [
+        "red_complete_elimination_success_rate", "red_any_attack_kill_rate", "mean_red_attack_kills",
+        "mean_red_survivors", "neg_mean_red_boundary_deaths", "neg_mean_red_collision_deaths",
+        "neg_max_steps_rate", "neg_mean_episode_length",
+    ]
 
 
 def test_local_and_worker_v8_policy_and_step_consistency():
@@ -259,27 +222,40 @@ def test_local_and_worker_v8_policy_and_step_consistency():
         lo = local.reset(specs)
         wo = worker.reset(specs)
         assert np.allclose(lo[0], wo[0])
+        assert set(local.policy_modes()["blue_policy"]) == {"paper_nearest_pursuit_v1"}
         assert local.policy_modes()["blue_policy"] == worker.policy_modes()["blue_policy"]
         actions = np.zeros((2, 3, 3), dtype=np.float32)
         lr = local.step(actions)
         wr = worker.step(actions)
         assert np.all(np.isfinite(lr.team_rewards))
-        assert np.all(np.isfinite(wr.team_rewards))
         assert np.allclose(lr.team_rewards, wr.team_rewards)
-        assert np.all(lr.episode_red_attack_window_agent_steps == wr.episode_red_attack_window_agent_steps)
     finally:
-        local.close()
-        worker.close()
+        local.close(); worker.close()
 
 
-def test_fixed_seed_v8_rollout_and_loss_are_finite(tmp_path):
+def test_mappo_happo_and_heterogeneous_happo_trainers_construct(tmp_path):
+    trainers = [
+        FixedBlue3v3MAPPOTrainer(HOMO_V8, _tiny_train_config(MAPPO_V8, tmp_path)),
+        HAPPO3v3Trainer(HOMO_V8, _tiny_train_config(HAPPO_V8, tmp_path)),
+        HAPPO3v3Trainer(HETERO_V8, _tiny_train_config(HAPPO_HETERO_V8, tmp_path)),
+    ]
+    try:
+        assert all(t.training_signature()["env_config_sha256"] for t in trainers)
+    finally:
+        for t in trainers:
+            t.close()
+
+
+def test_fixed_seed_v8_rollout_reward_state_and_loss_are_finite(tmp_path):
     trainer = FixedBlue3v3MAPPOTrainer(HOMO_V8, _tiny_train_config(MAPPO_V8, tmp_path))
     try:
         completed = trainer.collect_rollout(remaining=1)
         metrics = trainer.update()
         assert isinstance(completed, list)
+        assert np.all(np.isfinite(trainer.current_observations))
+        assert np.all(np.isfinite(trainer.current_global_states))
         numeric = [v for v in metrics.values() if isinstance(v, (int, float, np.integer, np.floating))]
         assert np.all(np.isfinite(numeric))
-        assert trainer.last_rollout_reward_means
+        assert trainer.last_rollout_reward_means["mean_rollout_terminal_reward"] == 0.0
     finally:
         trainer.close()
