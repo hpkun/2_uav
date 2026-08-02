@@ -55,6 +55,30 @@ def compute_best_score(es: dict[str, Any]) -> tuple[float, ...]:
     )
 
 
+def _signature_differences(checkpoint: Any, current: Any, prefix: str = "signature") -> list[str]:
+    """Return human-readable differences between checkpoint and current signatures."""
+    diffs: list[str] = []
+    if isinstance(checkpoint, dict) and isinstance(current, dict):
+        keys = sorted(set(checkpoint) | set(current))
+        for key in keys:
+            child = f"{prefix}.{key}"
+            if key not in checkpoint:
+                diffs.append(f"- {child}: missing in checkpoint, current={current[key]!r}")
+            elif key not in current:
+                diffs.append(f"- {child}: checkpoint={checkpoint[key]!r}, missing in current")
+            else:
+                diffs.extend(_signature_differences(checkpoint[key], current[key], child))
+    elif isinstance(checkpoint, list) and isinstance(current, list):
+        if len(checkpoint) != len(current):
+            diffs.append(f"- {prefix}: checkpoint length={len(checkpoint)} current length={len(current)}")
+        else:
+            for i, (a, b) in enumerate(zip(checkpoint, current)):
+                diffs.extend(_signature_differences(a, b, f"{prefix}[{i}]"))
+    elif checkpoint != current:
+        diffs.append(f"- {prefix}: checkpoint={checkpoint!r} current={current!r}")
+    return diffs
+
+
 class FixedBlue3v3MAPPOTrainer:
     def __init__(self, env_config: str | Path, config: dict[str, Any]) -> None:
         self.env_config = str(env_config)
@@ -417,6 +441,18 @@ class FixedBlue3v3MAPPOTrainer:
         ckpt = torch.load(path, map_location="cpu", weights_only=False)
         if ckpt.get("checkpoint_family") != CHECKPOINT_FAMILY:
             raise RuntimeError(f"Expected {CHECKPOINT_FAMILY}, got {ckpt.get('checkpoint_family')}")
+        if int(ckpt.get("checkpoint_version", -1)) != CHECKPOINT_VERSION_3V3:
+            raise RuntimeError(
+                f"Expected checkpoint_version={CHECKPOINT_VERSION_3V3}, "
+                f"got {ckpt.get('checkpoint_version')}"
+            )
+        if "training_signature" not in ckpt:
+            raise RuntimeError("checkpoint missing training_signature")
+        diffs = _signature_differences(ckpt["training_signature"], self.training_signature())
+        if diffs:
+            preview = "\n".join(diffs[:20])
+            extra = "" if len(diffs) <= 20 else f"\n... {len(diffs) - 20} more differences"
+            raise RuntimeError(f"checkpoint signature mismatch:\n{preview}{extra}")
         self.red_actor.load_state_dict(ckpt["shared_red_actor"])
         self.team_critic.load_state_dict(ckpt["centralized_team_critic"])
         self.actor_optimizer.load_state_dict(ckpt["actor_optimizer"])
@@ -427,13 +463,16 @@ class FixedBlue3v3MAPPOTrainer:
         self.best_checkpoint_name = ckpt.get("best_checkpoint_name")
         self.evaluation_history = ckpt.get("evaluation_history", [])
         self.total_evaluation_seconds = float(ckpt.get("total_evaluation_seconds", 0.0))
+        # Restore LR/entropy schedule state (will be recalculated on next update)
+        self.current_learning_rate = float(ckpt.get("current_learning_rate", self.initial_learning_rate))
+        self.current_entropy_coef = float(ckpt.get("current_entropy_coef", self.initial_entropy_coef))
+        # The project checkpoint does not persist the physical VectorEnv state.
+        # Recreate fresh episodes first, then restore algorithm RNG states so
+        # reset seed generation cannot consume the checkpointed RNG position.
+        self.reset_environments()
         self.rng.bit_generator.state = ckpt["numpy_rng_state"]
         torch.set_rng_state(ckpt["torch_cpu_rng_state"])
         if torch.cuda.is_available() and ckpt.get("torch_cuda_rng_state") is not None:
             torch.cuda.set_rng_state_all(ckpt["torch_cuda_rng_state"])
-        # Restore LR/entropy schedule state (will be recalculated on next update)
-        self.current_learning_rate = float(ckpt.get("current_learning_rate", self.initial_learning_rate))
-        self.current_entropy_coef = float(ckpt.get("current_entropy_coef", self.initial_entropy_coef))
-        self.reset_environments()
 
     def close(self): self.vector_env.close()
