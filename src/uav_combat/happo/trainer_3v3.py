@@ -12,7 +12,7 @@ from torch import nn
 
 from ..environment_3v3 import GS_DIM, OBS_DIM
 from ..config import load_config
-from ..mappo.trainer_3v3 import compute_best_score, linear_schedule, resolve_device
+from ..mappo.trainer_3v3 import compute_best_score, compute_best_score_fields, linear_schedule, resolve_device
 from ..mappo.vector_env_3v3 import (
     RED_REWARD_COMPONENT_KEYS_3V3,
     VectorStepResult3v3,
@@ -226,6 +226,9 @@ class HAPPO3v3Trainer:
         completed: list[dict[str, Any]] = []
         reward_component_sum = np.zeros(len(RED_REWARD_COMPONENT_KEYS_3V3), dtype=np.float64)
         reward_component_count = 0
+        action_sum = np.zeros(3, dtype=np.float64)
+        action_sat_sum = np.zeros(3, dtype=np.float64)
+        action_count = 0
 
         for _ in range(steps):
             red_obs = self.current_observations[:, :3, :].copy()
@@ -233,6 +236,10 @@ class HAPPO3v3Trainer:
             with torch.no_grad():
                 value = self.critic(torch.as_tensor(self.current_global_states, device=self.device)).cpu().numpy()
             actions, log_probs = self._select_actions()
+            flat_actions = actions.reshape(-1, 3)
+            action_sum += flat_actions.sum(axis=0)
+            action_sat_sum += (np.abs(flat_actions) >= 0.95).sum(axis=0)
+            action_count += flat_actions.shape[0]
             r: VectorStepResult3v3 = self.vector_env.step(actions)
             reward_component_sum += r.red_reward_components.sum(axis=0)
             reward_component_count += self.num_envs
@@ -271,6 +278,18 @@ class HAPPO3v3Trainer:
                         "blue_mean_support_coverage_ratio": float(r.episode_blue_mean_support_coverage_ratio[idx]),
                         "red_support_survived": bool(r.episode_red_support_survived[idx]),
                         "blue_support_survived": bool(r.episode_blue_support_survived[idx]),
+                        "red_attack_window_agent_steps": int(r.episode_red_attack_window_agent_steps[idx]),
+                        "blue_attack_window_agent_steps": int(r.episode_blue_attack_window_agent_steps[idx]),
+                        "red_alive_agent_steps": int(r.episode_red_alive_agent_steps[idx]),
+                        "blue_alive_agent_steps": int(r.episode_blue_alive_agent_steps[idx]),
+                        "red_attack_window_fraction": float(r.episode_red_attack_window_fraction[idx]),
+                        "blue_attack_window_fraction": float(r.episode_blue_attack_window_fraction[idx]),
+                        "red_any_attack_window": bool(r.episode_red_any_attack_window[idx]),
+                        "blue_any_attack_window": bool(r.episode_blue_any_attack_window[idx]),
+                        "red_any_attack_kill": bool(r.episode_red_any_attack_kill[idx]),
+                        "blue_any_attack_kill": bool(r.episode_blue_any_attack_kill[idx]),
+                        "red_target_switch_count": int(r.episode_red_target_switch_count[idx]),
+                        "blue_target_switch_count": int(r.episode_blue_target_switch_count[idx]),
                     }
                     validate_episode_accounting_3v3(rec, int(idx))
                     completed.append(rec)
@@ -304,10 +323,31 @@ class HAPPO3v3Trainer:
             last_values, float(self.config["training"]["gamma"]), float(self.config["training"]["gae_lambda"])
         )
         if reward_component_count > 0:
-            self.last_rollout_reward_means = {
+            means = {
                 key: float(value)
                 for key, value in zip(RED_REWARD_COMPONENT_KEYS_3V3, reward_component_sum / reward_component_count)
             }
+            self.last_rollout_reward_means = {
+                **means,
+                **{f"mean_rollout_{key}": value for key, value in means.items()},
+                "mean_rollout_approach_reward": means.get("red_approach_reward", 0.0),
+                "mean_rollout_attack_advantage_reward": means.get("red_attack_advantage_reward", 0.0),
+                "mean_rollout_threat_penalty": means.get("red_threat_penalty", 0.0),
+                "mean_rollout_altitude_boundary_penalty": means.get("red_altitude_boundary_penalty", 0.0),
+                "mean_rollout_xy_boundary_penalty": means.get("red_xy_boundary_penalty", 0.0),
+                "mean_rollout_soft_boundary_penalty": means.get("red_soft_boundary_penalty", 0.0),
+                "mean_rollout_support_information_reward": means.get("red_support_information_reward", 0.0),
+                "mean_rollout_dense_reward": means.get("red_dense_reward", 0.0),
+                "mean_rollout_event_reward": means.get("red_event_reward", 0.0),
+                "mean_rollout_terminal_reward": means.get("red_terminal_reward", 0.0),
+                "mean_rollout_total_step_reward": means.get("red_team_total_reward", 0.0),
+            }
+            if action_count > 0:
+                action_mean = action_sum / action_count
+                action_sat = action_sat_sum / action_count
+                for dim, name in enumerate(("yaw", "pitch", "speed")):
+                    self.last_rollout_reward_means[f"sampled_action_mean_{name}"] = float(action_mean[dim])
+                    self.last_rollout_reward_means[f"sampled_action_saturation_rate_{name}"] = float(action_sat[dim])
         else:
             self.last_rollout_reward_means = {}
         return completed
@@ -416,6 +456,7 @@ class HAPPO3v3Trainer:
 
         self.update_count += 1
         metrics = self._summarize_update(actor_rows, critic_losses, value_preds_before, returns.detach().cpu().numpy())
+        metrics.update(self.last_rollout_reward_means)
         if not all(np.isfinite(float(v)) for v in metrics.values() if isinstance(v, (int, float, np.integer, np.floating))):
             raise FloatingPointError(f"non-finite HAPPO metrics: {metrics}")
         return metrics
@@ -430,6 +471,8 @@ class HAPPO3v3Trainer:
         nonempty = [r for r in actor_rows if int(r.get("active_samples", 0)) > 0]
         def mean(key: str) -> float:
             return float(np.mean([float(r[key]) for r in nonempty])) if nonempty else 0.0
+        log_std_dim = self.actors.effective_log_std_by_dim
+        std_dim = self.actors.effective_std_by_dim
         return {
             "update": self.update_count,
             "agent_update_order": list(self.last_agent_order),
@@ -455,6 +498,12 @@ class HAPPO3v3Trainer:
             "current_actor_lr": self.current_actor_lr,
             "current_critic_lr": self.current_critic_lr,
             "current_entropy_coef": self.current_entropy_coef,
+            "effective_log_std_yaw": log_std_dim[0],
+            "effective_log_std_pitch": log_std_dim[1],
+            "effective_log_std_speed": log_std_dim[2],
+            "effective_std_yaw": std_dim[0],
+            "effective_std_pitch": std_dim[1],
+            "effective_std_speed": std_dim[2],
         }
 
     def training_signature(self) -> dict[str, Any]:
@@ -542,6 +591,7 @@ __all__ = [
     "CHECKPOINT_VERSION_HAPPO_3V3",
     "HAPPO3v3Trainer",
     "compute_best_score",
+    "compute_best_score_fields",
     "happo_preceding_factor_update",
     "normalize_advantages_for_agent",
     "ppo_clipped_policy_loss",

@@ -37,6 +37,16 @@ class HAPPOGaussianActor(nn.Module):
     def clamp_log_std_(self) -> None:
         self.log_std.clamp_(self.log_std_min, self.log_std_max)
 
+    @property
+    def effective_log_std_by_dim(self) -> list[float]:
+        with torch.no_grad():
+            return [float(v) for v in self.log_std.clamp(self.log_std_min, self.log_std_max).detach().cpu().tolist()]
+
+    @property
+    def effective_std_by_dim(self) -> list[float]:
+        with torch.no_grad():
+            return [float(v) for v in self.log_std.clamp(self.log_std_min, self.log_std_max).exp().detach().cpu().tolist()]
+
     def _distribution(self, observations: torch.Tensor) -> Normal:
         mean = self.network(observations)
         std = self.log_std.clamp(self.log_std_min, self.log_std_max).exp().expand_as(mean)
@@ -99,6 +109,22 @@ class IndependentHAPPOActors(nn.Module):
     @property
     def team_size(self) -> int:
         return len(self.actors)
+
+    @property
+    def effective_log_std_by_dim(self) -> list[float]:
+        vals = torch.stack([
+            actor.log_std.clamp(actor.log_std_min, actor.log_std_max).detach().cpu()
+            for actor in self.actors
+        ], dim=0)
+        return [float(v) for v in vals.mean(dim=0).tolist()]
+
+    @property
+    def effective_std_by_dim(self) -> list[float]:
+        vals = torch.stack([
+            actor.log_std.clamp(actor.log_std_min, actor.log_std_max).exp().detach().cpu()
+            for actor in self.actors
+        ], dim=0)
+        return [float(v) for v in vals.mean(dim=0).tolist()]
 
     def sample_actions(self, observations: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         actions, log_probs = [], []

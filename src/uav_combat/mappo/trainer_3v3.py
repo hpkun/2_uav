@@ -45,19 +45,34 @@ def linear_schedule(start: float, end: float, progress: float) -> float:
 
 def compute_best_score(es: dict[str, Any]) -> tuple[float, ...]:
     """Lexicographic checkpoint ranking centered on genuine red attack performance."""
-    red_col = (
-        es.get("mean_red_friendly_collision_deaths", 0.0)
-        + es.get("mean_red_cross_collision_deaths", 0.0)
-    )
     return (
         float(es.get("red_complete_elimination_success_rate", 0.0)),
+        float(es.get("red_any_attack_kill_rate", 1.0 if es.get("mean_red_attack_kills", 0.0) > 0.0 else 0.0)),
         float(es.get("mean_red_attack_kills", 0.0)),
+        float(es.get("red_any_attack_window_rate", 0.0)),
+        float(es.get("mean_red_attack_window_fraction", 0.0)),
         -float(es.get("mean_blue_survivors", 3.0)),
         float(es.get("mean_red_survivors", 0.0)),
         -float(es.get("mean_red_boundary_deaths", 0.0)),
-        -float(red_col),
+        -float(es.get("max_steps_rate", 1.0)),
         -float(es.get("mean_episode_length", 600.0)),
     )
+
+
+def compute_best_score_fields(es: dict[str, Any]) -> dict[str, float]:
+    names = (
+        "red_complete_elimination_success_rate",
+        "red_any_attack_kill_rate",
+        "mean_red_attack_kills",
+        "red_any_attack_window_rate",
+        "mean_red_attack_window_fraction",
+        "neg_mean_blue_survivors",
+        "mean_red_survivors",
+        "neg_mean_red_boundary_deaths",
+        "neg_max_steps_rate",
+        "neg_mean_episode_length",
+    )
+    return {name: value for name, value in zip(names, compute_best_score(es))}
 
 
 def _signature_differences(checkpoint: Any, current: Any, prefix: str = "signature") -> list[str]:
@@ -148,6 +163,9 @@ class FixedBlue3v3MAPPOTrainer:
         completed: list[dict[str, Any]] = []
         reward_component_sum = np.zeros(len(RED_REWARD_COMPONENT_KEYS_3V3), dtype=np.float64)
         reward_component_count = 0
+        action_sum = np.zeros(3, dtype=np.float64)
+        action_sat_sum = np.zeros(3, dtype=np.float64)
+        action_count = 0
         N = self.num_envs
 
         for _ in range(steps):
@@ -160,6 +178,9 @@ class FixedBlue3v3MAPPOTrainer:
                 team_val = self.team_critic(torch.as_tensor(self.current_global_states, device=self.device))
             red_actions = all_act.cpu().numpy().reshape(N, 3, 3)
             red_log_probs = all_lp.cpu().numpy().reshape(N, 3)
+            action_sum += red_actions.reshape(-1, 3).sum(axis=0)
+            action_sat_sum += (np.abs(red_actions.reshape(-1, 3)) >= 0.95).sum(axis=0)
+            action_count += red_actions.reshape(-1, 3).shape[0]
             t1 = time.perf_counter(); self._timing["policy_inference"] += t1 - t0
 
             t2 = time.perf_counter()
@@ -205,6 +226,18 @@ class FixedBlue3v3MAPPOTrainer:
                         "blue_friendly_collision_deaths": int(r.episode_blue_friendly_collision_deaths[idx]),
                         "red_cross_collision_deaths": int(r.episode_red_cross_collision_deaths[idx]),
                         "blue_cross_collision_deaths": int(r.episode_blue_cross_collision_deaths[idx]),
+                        "red_attack_window_agent_steps": int(r.episode_red_attack_window_agent_steps[idx]),
+                        "blue_attack_window_agent_steps": int(r.episode_blue_attack_window_agent_steps[idx]),
+                        "red_alive_agent_steps": int(r.episode_red_alive_agent_steps[idx]),
+                        "blue_alive_agent_steps": int(r.episode_blue_alive_agent_steps[idx]),
+                        "red_attack_window_fraction": float(r.episode_red_attack_window_fraction[idx]),
+                        "blue_attack_window_fraction": float(r.episode_blue_attack_window_fraction[idx]),
+                        "red_any_attack_window": bool(r.episode_red_any_attack_window[idx]),
+                        "blue_any_attack_window": bool(r.episode_blue_any_attack_window[idx]),
+                        "red_any_attack_kill": bool(r.episode_red_any_attack_kill[idx]),
+                        "blue_any_attack_kill": bool(r.episode_blue_any_attack_kill[idx]),
+                        "red_target_switch_count": int(r.episode_red_target_switch_count[idx]),
+                        "blue_target_switch_count": int(r.episode_blue_target_switch_count[idx]),
                     }
                     # Validate death ledger
                     for team, surv, atk_d, bdy_d, fr_c, cr_c in [
@@ -258,10 +291,12 @@ class FixedBlue3v3MAPPOTrainer:
                 means["red_boundary_death_penalty"],
                 means["red_collision_death_penalty"],
             )
-            if any(value < 0.0 for value in death_components):
-                event_reward = means["red_kill_reward"] + sum(death_components)
-            else:
-                event_reward = means["red_kill_reward"] - sum(death_components)
+            event_reward = means.get("red_event_reward", 0.0)
+            if event_reward == 0.0:
+                if any(value < 0.0 for value in death_components):
+                    event_reward = means["red_kill_reward"] + sum(death_components)
+                else:
+                    event_reward = means["red_kill_reward"] - sum(death_components)
             threat_term = (
                 means["red_threat_penalty"]
                 if means["red_threat_penalty"] < 0.0
@@ -273,6 +308,9 @@ class FixedBlue3v3MAPPOTrainer:
                 "mean_rollout_attack_advantage_reward": means["red_attack_advantage_reward"],
                 "mean_rollout_threat_penalty": means["red_threat_penalty"],
                 "mean_rollout_soft_boundary_penalty": means["red_soft_boundary_penalty"],
+                "mean_rollout_altitude_boundary_penalty": means.get("red_altitude_boundary_penalty", 0.0),
+                "mean_rollout_xy_boundary_penalty": means.get("red_xy_boundary_penalty", 0.0),
+                "mean_rollout_support_information_reward": means.get("red_support_information_reward", 0.0),
                 "mean_rollout_friendly_separation_penalty": means["red_friendly_separation_penalty"],
                 "mean_rollout_head_on_risk_penalty": means["red_head_on_risk_penalty"],
                 "mean_rollout_dense_reward": means["red_dense_reward"],
@@ -291,6 +329,12 @@ class FixedBlue3v3MAPPOTrainer:
                 ),
                 "mean_rollout_event_terminal_reward": event_reward + means["red_terminal_reward"],
             }
+            if action_count > 0:
+                action_mean = action_sum / action_count
+                action_sat = action_sat_sum / action_count
+                for dim, name in enumerate(("yaw", "pitch", "speed")):
+                    self.last_rollout_reward_means[f"sampled_action_mean_{name}"] = float(action_mean[dim])
+                    self.last_rollout_reward_means[f"sampled_action_saturation_rate_{name}"] = float(action_sat[dim])
         else:
             self.last_rollout_reward_means = {}
         return completed
@@ -380,6 +424,8 @@ class FixedBlue3v3MAPPOTrainer:
         self.update_count += 1
         self._timing["ppo_update"] += time.perf_counter() - t0
         v = np.asarray(actor_data) if actor_data else np.zeros((0, 6))
+        log_std_dim = self.red_actor.effective_log_std_by_dim
+        std_dim = self.red_actor.effective_std_by_dim
         return {
             "policy_loss": float(v[:, 0].mean()) if len(v) else 0.0,
             "entropy": float(v[:, 1].mean()) if len(v) else 0.0,
@@ -396,6 +442,12 @@ class FixedBlue3v3MAPPOTrainer:
             "current_entropy_coef": self.current_entropy_coef,
             "effective_log_std_mean": self.red_actor.effective_log_std_mean,
             "effective_std_mean": self.red_actor.effective_std_mean,
+            "effective_log_std_yaw": log_std_dim[0],
+            "effective_log_std_pitch": log_std_dim[1],
+            "effective_log_std_speed": log_std_dim[2],
+            "effective_std_yaw": std_dim[0],
+            "effective_std_pitch": std_dim[1],
+            "effective_std_speed": std_dim[2],
             "actor_epochs_completed": actor_epochs_done,
             "actor_minibatches_completed": actor_mb_done,
             "kl_early_stop": kl_early_stop,

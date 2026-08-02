@@ -94,7 +94,7 @@ def _assert_v7_reward_accounting(rc, team="red"):
 
 def _assert_old_double_dense_total_rejected(rc, team="red"):
     keys = [f"{team}_{key.removeprefix('red_')}" for key in RED_REWARD_COMPONENT_KEYS_3V3[:-1]]
-    old_incorrect_total = sum(rc[key] for key in keys)
+    old_incorrect_total = sum(rc.get(key, 0.0) for key in keys)
     duplicate_dense = (
         rc[f"{team}_approach_reward"]
         + rc[f"{team}_attack_advantage_reward"]
@@ -644,15 +644,20 @@ def test_v7_local_and_worker_step_finite_and_component_consistent(env_cls, kwarg
         assert np.isfinite(result.team_rewards).all()
         assert np.isfinite(result.red_reward_components).all()
         assert result.red_reward_components.shape == (2, len(RED_REWARD_COMPONENT_KEYS_3V3))
-        dense = result.red_reward_components[:, 0] + result.red_reward_components[:, 1] + result.red_reward_components[:, 2]
-        assert np.allclose(result.red_reward_components[:, 7], dense)
+        idx = {key: i for i, key in enumerate(RED_REWARD_COMPONENT_KEYS_3V3)}
+        dense = (
+            result.red_reward_components[:, idx["red_approach_reward"]]
+            + result.red_reward_components[:, idx["red_attack_advantage_reward"]]
+            + result.red_reward_components[:, idx["red_threat_penalty"]]
+        )
+        assert np.allclose(result.red_reward_components[:, idx["red_dense_reward"]], dense)
         expected_total = (
-            result.red_reward_components[:, 7]
-            + result.red_reward_components[:, 8]
-            + result.red_reward_components[:, 9]
-            + result.red_reward_components[:, 10]
-            + result.red_reward_components[:, 11]
-            + result.red_reward_components[:, 12]
+            result.red_reward_components[:, idx["red_dense_reward"]]
+            + result.red_reward_components[:, idx["red_kill_reward"]]
+            + result.red_reward_components[:, idx["red_attack_death_penalty"]]
+            + result.red_reward_components[:, idx["red_boundary_death_penalty"]]
+            + result.red_reward_components[:, idx["red_collision_death_penalty"]]
+            + result.red_reward_components[:, idx["red_terminal_reward"]]
         )
         assert np.allclose(result.red_reward_components[:, -1], expected_total)
         assert np.allclose(result.team_rewards, result.red_reward_components[:, -1])

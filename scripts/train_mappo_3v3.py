@@ -7,6 +7,7 @@ import os; os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from uav_combat.mappo.trainer_3v3 import (FixedBlue3v3MAPPOTrainer, compute_best_score,
+                                            compute_best_score_fields,
                                             CHECKPOINT_FAMILY, CHECKPOINT_VERSION_3V3)
 from uav_combat.mappo.evaluation_3v3 import evaluate_mappo_fixed_blue_3v3
 
@@ -14,10 +15,14 @@ ROLLOUT_REWARD_FIELDS = (
     "mean_rollout_approach_reward",
     "mean_rollout_attack_advantage_reward",
     "mean_rollout_threat_penalty",
+    "mean_rollout_altitude_boundary_penalty",
+    "mean_rollout_xy_boundary_penalty",
     "mean_rollout_soft_boundary_penalty",
+    "mean_rollout_support_information_reward",
     "mean_rollout_friendly_separation_penalty",
     "mean_rollout_head_on_risk_penalty",
     "mean_rollout_dense_reward",
+    "mean_rollout_dense_unclipped_reward",
     "mean_rollout_event_reward",
     "mean_rollout_terminal_reward",
     "mean_rollout_total_step_reward",
@@ -66,6 +71,20 @@ def _plot_curves(rows, output, prefix, title, ycols, ylabels):
     axes[-1].set_xlabel("Update")
     fig.suptitle(title, fontsize=11)
     fig.tight_layout(); fig.savefig(output / f"{prefix}.png", dpi=100); plt.close(fig)
+
+def _json_finite_or_none(value):
+    if isinstance(value, dict):
+        return {k: _json_finite_or_none(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_finite_or_none(v) for v in value]
+    if isinstance(value, (np.floating, float)):
+        v = float(value)
+        return v if np.isfinite(v) else None
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+    return value
 
 def main():
     args = parse_args(); config = load_config(args)
@@ -136,6 +155,18 @@ def main():
             "mean_blue_boundary_xy_deaths": float(np.mean([r["blue_boundary_xy_deaths"] for r in records])),
             "mean_red_collision_deaths": float(np.mean([
                 r["red_friendly_collision_deaths"] + r["red_cross_collision_deaths"] for r in records])),
+            "red_any_attack_kill_rate": sum(1 for r in records if r.get("red_any_attack_kill")) / n,
+            "blue_any_attack_kill_rate": sum(1 for r in records if r.get("blue_any_attack_kill")) / n,
+            "red_any_attack_window_rate": sum(1 for r in records if r.get("red_any_attack_window")) / n,
+            "blue_any_attack_window_rate": sum(1 for r in records if r.get("blue_any_attack_window")) / n,
+            "mean_red_attack_window_agent_steps": float(np.mean([r.get("red_attack_window_agent_steps", 0) for r in records])),
+            "mean_blue_attack_window_agent_steps": float(np.mean([r.get("blue_attack_window_agent_steps", 0) for r in records])),
+            "mean_red_alive_agent_steps": float(np.mean([r.get("red_alive_agent_steps", 0) for r in records])),
+            "mean_blue_alive_agent_steps": float(np.mean([r.get("blue_alive_agent_steps", 0) for r in records])),
+            "mean_red_attack_window_fraction": float(np.mean([r.get("red_attack_window_fraction", 0.0) for r in records])),
+            "mean_blue_attack_window_fraction": float(np.mean([r.get("blue_attack_window_fraction", 0.0) for r in records])),
+            "mean_red_target_switch_count": float(np.mean([r.get("red_target_switch_count", 0) for r in records])),
+            "mean_blue_target_switch_count": float(np.mean([r.get("blue_target_switch_count", 0) for r in records])),
             "max_steps_rate": sum(1 for r in records if r.get("termination_reason") == "max_steps") / n,
             "mean_episode_length": float(np.mean([r["episode_length"] for r in records])),
             "mean_episode_return": float(np.mean([r["episode_return"] for r in records])),
@@ -292,6 +323,9 @@ def main():
         "best_checkpoint": trainer.best_checkpoint_name,
         "final_evaluation": final_eval,
         "best_score": list(trainer.best_score) if trainer.best_score else None,
+        "best_score_fields": list(compute_best_score_fields(trainer.best_evaluation).keys()) if trainer.best_evaluation else None,
+        "best_score_values": compute_best_score_fields(trainer.best_evaluation) if trainer.best_evaluation else None,
+        "final_metrics": _json_finite_or_none(rows[-1]) if rows else None,
         "smoke_restore_and_continue_ok": restored_ok,
     }
     (output / "run_summary.json").write_text(json.dumps(summary, indent=2, default=str))

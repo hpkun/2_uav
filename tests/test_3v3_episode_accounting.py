@@ -510,7 +510,7 @@ class TestVectorEnv:
         _set_line_pair(env, closing=True, red_team=True)
         _, _, _, _, info = env.step(_all_actions(env))
         expected = np.array(
-            [info["reward_components"][key] for key in RED_REWARD_COMPONENT_KEYS_3V3],
+            [info["reward_components"].get(key, 0.0) for key in RED_REWARD_COMPONENT_KEYS_3V3],
             dtype=np.float32,
         )
 

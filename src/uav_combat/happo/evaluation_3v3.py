@@ -24,7 +24,7 @@ def _summarize(records: list[dict[str, Any]], elapsed: float) -> dict[str, Any]:
     rk = sum(r["red_attack_kills"] for r in records)
     bk = sum(r["blue_attack_kills"] for r in records)
     total_steps = sum(r["episode_length"] for r in records)
-    return {
+    base = {
         "episodes": n,
         "red_complete_elimination_success_rate": sum(r["red_complete_elimination_success"] for r in records) / n,
         "blue_complete_elimination_success_rate": sum(r["blue_complete_elimination_success"] for r in records) / n,
@@ -59,6 +59,21 @@ def _summarize(records: list[dict[str, Any]], elapsed: float) -> dict[str, Any]:
         "evaluation_seconds": elapsed,
         "environment_steps_per_second": total_steps / elapsed if elapsed > 0 else 0.0,
     }
+    base.update({
+        "red_any_attack_kill_rate": sum(1 for r in records if r.get("red_any_attack_kill")) / n,
+        "blue_any_attack_kill_rate": sum(1 for r in records if r.get("blue_any_attack_kill")) / n,
+        "red_any_attack_window_rate": sum(1 for r in records if r.get("red_any_attack_window")) / n,
+        "blue_any_attack_window_rate": sum(1 for r in records if r.get("blue_any_attack_window")) / n,
+        "mean_red_attack_window_agent_steps": float(np.mean([r.get("red_attack_window_agent_steps", 0) for r in records])),
+        "mean_blue_attack_window_agent_steps": float(np.mean([r.get("blue_attack_window_agent_steps", 0) for r in records])),
+        "mean_red_alive_agent_steps": float(np.mean([r.get("red_alive_agent_steps", 0) for r in records])),
+        "mean_blue_alive_agent_steps": float(np.mean([r.get("blue_alive_agent_steps", 0) for r in records])),
+        "mean_red_attack_window_fraction": float(np.mean([r.get("red_attack_window_fraction", 0.0) for r in records])),
+        "mean_blue_attack_window_fraction": float(np.mean([r.get("blue_attack_window_fraction", 0.0) for r in records])),
+        "mean_red_target_switch_count": float(np.mean([r.get("red_target_switch_count", 0) for r in records])),
+        "mean_blue_target_switch_count": float(np.mean([r.get("blue_target_switch_count", 0) for r in records])),
+    })
+    return base
 
 
 def evaluate_happo_fixed_blue_3v3(
@@ -78,12 +93,19 @@ def evaluate_happo_fixed_blue_3v3(
         obs, gs, am = vec_env.reset([{"seed": seed_start + i} for i in range(num_envs)])
         next_seed = seed_start + num_envs
         records: list[dict[str, Any]] = []
+        action_sum = np.zeros(3, dtype=np.float64)
+        action_sat_sum = np.zeros(3, dtype=np.float64)
+        action_count = 0
         t0 = time.perf_counter()
         while len(records) < episodes:
             red_obs = torch.as_tensor(obs[:, :3, :], device=device)
             with torch.no_grad():
                 actions = actors.deterministic_actions(red_obs).cpu().numpy().reshape(num_envs, 3, 3)
             actions *= am[:, :3, None]
+            flat_actions = actions.reshape(-1, 3)
+            action_sum += flat_actions.sum(axis=0)
+            action_sat_sum += (np.abs(flat_actions) >= 0.95).sum(axis=0)
+            action_count += flat_actions.shape[0]
             result = vec_env.step(actions)
             obs, gs, am = result.observations, result.global_states, result.alive_masks
             done_idx = np.where(result.episode_valid)[0]
@@ -111,6 +133,18 @@ def evaluate_happo_fixed_blue_3v3(
                     "blue_mean_support_coverage_ratio": float(result.episode_blue_mean_support_coverage_ratio[i]),
                     "red_support_survived": bool(result.episode_red_support_survived[i]),
                     "blue_support_survived": bool(result.episode_blue_support_survived[i]),
+                    "red_attack_window_agent_steps": int(result.episode_red_attack_window_agent_steps[i]),
+                    "blue_attack_window_agent_steps": int(result.episode_blue_attack_window_agent_steps[i]),
+                    "red_alive_agent_steps": int(result.episode_red_alive_agent_steps[i]),
+                    "blue_alive_agent_steps": int(result.episode_blue_alive_agent_steps[i]),
+                    "red_attack_window_fraction": float(result.episode_red_attack_window_fraction[i]),
+                    "blue_attack_window_fraction": float(result.episode_blue_attack_window_fraction[i]),
+                    "red_any_attack_window": bool(result.episode_red_any_attack_window[i]),
+                    "blue_any_attack_window": bool(result.episode_blue_any_attack_window[i]),
+                    "red_any_attack_kill": bool(result.episode_red_any_attack_kill[i]),
+                    "blue_any_attack_kill": bool(result.episode_blue_any_attack_kill[i]),
+                    "red_target_switch_count": int(result.episode_red_target_switch_count[i]),
+                    "blue_target_switch_count": int(result.episode_blue_target_switch_count[i]),
                     "episode_length": int(result.episode_length[i]),
                     "termination_reason": decode_3v3_termination_reason(int(result.termination_reason_codes[i])),
                     "environment_outcome": decode_3v3_outcome(int(result.outcome_codes[i])),
@@ -120,7 +154,14 @@ def evaluate_happo_fixed_blue_3v3(
                 next_seed += len(done_idx)
                 no, ng, na = vec_env.reset_at(done_idx, seeds)
                 obs[done_idx], gs[done_idx], am[done_idx] = no, ng, na
-        return _summarize(records[:episodes], time.perf_counter() - t0)
+        summary = _summarize(records[:episodes], time.perf_counter() - t0)
+        if action_count > 0:
+            action_mean = action_sum / action_count
+            action_sat = action_sat_sum / action_count
+            for dim, name in enumerate(("yaw", "pitch", "speed")):
+                summary[f"deterministic_action_mean_{name}"] = float(action_mean[dim])
+                summary[f"deterministic_action_saturation_rate_{name}"] = float(action_sat[dim])
+        return summary
     finally:
         vec_env.close()
         if was_training:

@@ -26,6 +26,16 @@ class GaussianActor(nn.Module):
         with torch.no_grad():
             return float(self.log_std.clamp(self.log_std_min, self.log_std_max).exp().mean().item())
 
+    @property
+    def effective_log_std_by_dim(self) -> list[float]:
+        with torch.no_grad():
+            return [float(v) for v in self.log_std.clamp(self.log_std_min, self.log_std_max).detach().cpu().tolist()]
+
+    @property
+    def effective_std_by_dim(self) -> list[float]:
+        with torch.no_grad():
+            return [float(v) for v in self.log_std.clamp(self.log_std_min, self.log_std_max).exp().detach().cpu().tolist()]
+
     @torch.no_grad()
     def clamp_log_std_(self) -> None:
         self.log_std.clamp_(self.log_std_min, self.log_std_max)

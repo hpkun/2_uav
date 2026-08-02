@@ -71,8 +71,14 @@ def _validate_heterogeneous_config(config: dict[str, Any]) -> None:
     if not np.isfinite(follow_distance) or follow_distance < 0.0:
         raise ValueError("heterogeneous.support_rule.follow_distance must be finite and non-negative")
 
-    if config.get("combat", {}).get("reward_mode") != "functional_heterogeneous_team_v1":
-        raise ValueError("functional heterogeneous v1 requires combat.reward_mode=functional_heterogeneous_team_v1")
+    if config.get("combat", {}).get("reward_mode") not in {
+        "functional_heterogeneous_team_v1",
+        "task_aligned_heterogeneous_team_v8",
+    }:
+        raise ValueError(
+            "functional heterogeneous v1 requires combat.reward_mode="
+            "functional_heterogeneous_team_v1 or task_aligned_heterogeneous_team_v8"
+        )
 
 
 class Homogeneous3v3Scenario:

@@ -111,6 +111,27 @@ def approach_progress_reward(
     return float(np.clip(score, -1.0, 1.0))
 
 
+def continuous_distance_progress(
+    previous_distance: float | None,
+    current_distance: float,
+    distance_normalizer: float,
+) -> float:
+    """Signed continuous closing-progress reward in [-1, 1].
+
+    Unlike :func:`approach_progress_reward`, this helper intentionally remains
+    active inside the attack range.  A missing previous distance represents a
+    freshly selected target and returns zero so target switches cannot create
+    artificial positive progress.
+    """
+    if previous_distance is None:
+        return 0.0
+    denom = max(float(distance_normalizer), 1e-6)
+    score = (float(previous_distance) - float(current_distance)) / denom
+    if not np.isfinite(score):
+        return 0.0
+    return float(np.clip(score, -1.0, 1.0))
+
+
 def soft_boundary_risk(
     state: AircraftState,
     x_limit: float, y_limit: float,

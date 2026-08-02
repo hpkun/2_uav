@@ -19,6 +19,7 @@ from uav_combat.happo.trainer_3v3 import (
     CHECKPOINT_VERSION_HAPPO_3V3,
     HAPPO3v3Trainer,
     compute_best_score,
+    compute_best_score_fields,
 )
 
 
@@ -104,6 +105,18 @@ def episode_stats(records: list[dict]) -> dict:
         "mean_red_collision_deaths": float(np.mean([
             r["red_friendly_collision_deaths"] + r["red_cross_collision_deaths"] for r in records
         ])),
+        "red_any_attack_kill_rate": sum(r.get("red_any_attack_kill", False) for r in records) / n,
+        "blue_any_attack_kill_rate": sum(r.get("blue_any_attack_kill", False) for r in records) / n,
+        "red_any_attack_window_rate": sum(r.get("red_any_attack_window", False) for r in records) / n,
+        "blue_any_attack_window_rate": sum(r.get("blue_any_attack_window", False) for r in records) / n,
+        "mean_red_attack_window_agent_steps": float(np.mean([r.get("red_attack_window_agent_steps", 0) for r in records])),
+        "mean_blue_attack_window_agent_steps": float(np.mean([r.get("blue_attack_window_agent_steps", 0) for r in records])),
+        "mean_red_alive_agent_steps": float(np.mean([r.get("red_alive_agent_steps", 0) for r in records])),
+        "mean_blue_alive_agent_steps": float(np.mean([r.get("blue_alive_agent_steps", 0) for r in records])),
+        "mean_red_attack_window_fraction": float(np.mean([r.get("red_attack_window_fraction", 0.0) for r in records])),
+        "mean_blue_attack_window_fraction": float(np.mean([r.get("blue_attack_window_fraction", 0.0) for r in records])),
+        "mean_red_target_switch_count": float(np.mean([r.get("red_target_switch_count", 0) for r in records])),
+        "mean_blue_target_switch_count": float(np.mean([r.get("blue_target_switch_count", 0) for r in records])),
         "mean_red_kills_with_shared_observation": float(np.mean([
             r.get("red_kills_with_shared_observation", 0) for r in records
         ])),
@@ -253,6 +266,8 @@ def main() -> None:
         "environment_metadata": trainer.environment_metadata,
         "best_checkpoint": trainer.best_checkpoint_name,
         "best_score": list(trainer.best_score) if trainer.best_score else None,
+        "best_score_fields": list(compute_best_score_fields(trainer.best_evaluation).keys()) if trainer.best_evaluation else None,
+        "best_score_values": compute_best_score_fields(trainer.best_evaluation) if trainer.best_evaluation else None,
         "final_evaluation": final_eval,
         "final_metrics": rows[-1] if rows else {},
         "total_seconds": time.perf_counter() - start,

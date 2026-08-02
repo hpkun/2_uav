@@ -35,7 +35,7 @@ def _summarize(summaries, elapsed):
                 s[f"{team}_boundary_altitude_deaths"] + s[f"{team}_boundary_xy_deaths"]
             ):
                 raise RuntimeError(f"Boundary death mismatch for {team}: {s}")
-    return {
+    base = {
         "episodes": n,
         "red_complete_elimination_success_rate": r("red_complete_elimination_success"),
         "blue_complete_elimination_success_rate": r("blue_complete_elimination_success"),
@@ -64,6 +64,21 @@ def _summarize(summaries, elapsed):
         "mean_episode_length": float(np.mean([s["episode_length"] for s in summaries])),
         "evaluation_seconds": elapsed,
     }
+    base.update({
+        "red_any_attack_kill_rate": sum(1 for s in summaries if s.get("red_any_attack_kill")) / n,
+        "blue_any_attack_kill_rate": sum(1 for s in summaries if s.get("blue_any_attack_kill")) / n,
+        "red_any_attack_window_rate": sum(1 for s in summaries if s.get("red_any_attack_window")) / n,
+        "blue_any_attack_window_rate": sum(1 for s in summaries if s.get("blue_any_attack_window")) / n,
+        "mean_red_attack_window_agent_steps": float(np.mean([s.get("red_attack_window_agent_steps", 0) for s in summaries])),
+        "mean_blue_attack_window_agent_steps": float(np.mean([s.get("blue_attack_window_agent_steps", 0) for s in summaries])),
+        "mean_red_alive_agent_steps": float(np.mean([s.get("red_alive_agent_steps", 0) for s in summaries])),
+        "mean_blue_alive_agent_steps": float(np.mean([s.get("blue_alive_agent_steps", 0) for s in summaries])),
+        "mean_red_attack_window_fraction": float(np.mean([s.get("red_attack_window_fraction", 0.0) for s in summaries])),
+        "mean_blue_attack_window_fraction": float(np.mean([s.get("blue_attack_window_fraction", 0.0) for s in summaries])),
+        "mean_red_target_switch_count": float(np.mean([s.get("red_target_switch_count", 0) for s in summaries])),
+        "mean_blue_target_switch_count": float(np.mean([s.get("blue_target_switch_count", 0) for s in summaries])),
+    })
+    return base
 
 
 def evaluate_mappo_fixed_blue_3v3(
@@ -79,6 +94,9 @@ def evaluate_mappo_fixed_blue_3v3(
         specs = [{"seed": seed_start + i} for i in range(num_envs)]
         obs, gs, am = vec_env.reset(specs)
         summaries = []
+        action_sum = np.zeros(3, dtype=np.float64)
+        action_sat_sum = np.zeros(3, dtype=np.float64)
+        action_count = 0
         next_seed = seed_start + num_envs
 
         t0 = time.perf_counter()
@@ -86,6 +104,10 @@ def evaluate_mappo_fixed_blue_3v3(
             red_obs = obs[:, :3, :].reshape(-1, OBS_DIM)
             with torch.no_grad():
                 ra = actor.deterministic_action(torch.as_tensor(red_obs, device=device)).cpu().numpy().reshape(num_envs, 3, 3)
+            flat_actions = ra.reshape(-1, 3)
+            action_sum += flat_actions.sum(axis=0)
+            action_sat_sum += (np.abs(flat_actions) >= 0.95).sum(axis=0)
+            action_count += flat_actions.shape[0]
             r = vec_env.step(ra)
             obs, gs, am = r.observations, r.global_states, r.alive_masks
             done_idx = [i for i in range(num_envs) if r.terminated[i] or r.truncated[i]]
@@ -113,6 +135,18 @@ def evaluate_mappo_fixed_blue_3v3(
                         "episode_length": int(r.episode_length[gi]),
                         "termination_reason": decode_3v3_termination_reason(int(r.termination_reason_codes[gi])),
                         "environment_outcome": decode_3v3_outcome(int(r.outcome_codes[gi])),
+                        "red_attack_window_agent_steps": int(r.episode_red_attack_window_agent_steps[gi]),
+                        "blue_attack_window_agent_steps": int(r.episode_blue_attack_window_agent_steps[gi]),
+                        "red_alive_agent_steps": int(r.episode_red_alive_agent_steps[gi]),
+                        "blue_alive_agent_steps": int(r.episode_blue_alive_agent_steps[gi]),
+                        "red_attack_window_fraction": float(r.episode_red_attack_window_fraction[gi]),
+                        "blue_attack_window_fraction": float(r.episode_blue_attack_window_fraction[gi]),
+                        "red_any_attack_window": bool(r.episode_red_any_attack_window[gi]),
+                        "blue_any_attack_window": bool(r.episode_blue_any_attack_window[gi]),
+                        "red_any_attack_kill": bool(r.episode_red_any_attack_kill[gi]),
+                        "blue_any_attack_kill": bool(r.episode_blue_any_attack_kill[gi]),
+                        "red_target_switch_count": int(r.episode_red_target_switch_count[gi]),
+                        "blue_target_switch_count": int(r.episode_blue_target_switch_count[gi]),
                     })
                 use_seed = next_seed; next_seed += 1
                 no, ng, na = vec_env.reset_at(np.array([gi], dtype=np.int32), [{"seed": use_seed}])
@@ -120,6 +154,12 @@ def evaluate_mappo_fixed_blue_3v3(
 
         elapsed = time.perf_counter() - t0
         result = _summarize(summaries[:episodes], elapsed)
+        if action_count > 0:
+            action_mean = action_sum / action_count
+            action_sat = action_sat_sum / action_count
+            for dim, name in enumerate(("yaw", "pitch", "speed")):
+                result[f"deterministic_action_mean_{name}"] = float(action_mean[dim])
+                result[f"deterministic_action_saturation_rate_{name}"] = float(action_sat[dim])
         result["environment_steps_per_second"] = sum(s["episode_length"] for s in summaries[:episodes]) / elapsed if elapsed > 0 else 0.0
     finally:
         vec_env.close()
@@ -171,6 +211,18 @@ def evaluate_rule_matchup_3v3(
                         "episode_length": int(r.episode_length[gi]),
                         "termination_reason": decode_3v3_termination_reason(int(r.termination_reason_codes[gi])),
                         "environment_outcome": decode_3v3_outcome(int(r.outcome_codes[gi])),
+                        "red_attack_window_agent_steps": int(r.episode_red_attack_window_agent_steps[gi]),
+                        "blue_attack_window_agent_steps": int(r.episode_blue_attack_window_agent_steps[gi]),
+                        "red_alive_agent_steps": int(r.episode_red_alive_agent_steps[gi]),
+                        "blue_alive_agent_steps": int(r.episode_blue_alive_agent_steps[gi]),
+                        "red_attack_window_fraction": float(r.episode_red_attack_window_fraction[gi]),
+                        "blue_attack_window_fraction": float(r.episode_blue_attack_window_fraction[gi]),
+                        "red_any_attack_window": bool(r.episode_red_any_attack_window[gi]),
+                        "blue_any_attack_window": bool(r.episode_blue_any_attack_window[gi]),
+                        "red_any_attack_kill": bool(r.episode_red_any_attack_kill[gi]),
+                        "blue_any_attack_kill": bool(r.episode_blue_any_attack_kill[gi]),
+                        "red_target_switch_count": int(r.episode_red_target_switch_count[gi]),
+                        "blue_target_switch_count": int(r.episode_blue_target_switch_count[gi]),
                     })
                 use_seed = next_seed; next_seed += 1
                 no, ng, na = vec_env.reset_at(np.array([gi], dtype=np.int32), [{"seed": use_seed}])
