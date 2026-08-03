@@ -412,22 +412,24 @@ class Homogeneous3v3AirCombatEnv:
                 s.alive = False; step_death_causes[aircraft.aircraft_id] = DEATH_BOUNDARY_XY
 
         collision_pairs: list[tuple[str, str]] = []
-        alive_now = [a for a in self.aircraft if a.state.alive]
-        for i in range(len(alive_now)):
-            for j in range(i + 1, len(alive_now)):
-                a1, a2 = alive_now[i], alive_now[j]
-                if float(np.linalg.norm(a1.state.as_array()[:3] - a2.state.as_array()[:3])) <= limits["collision_distance"]:
-                    collision_pairs.append((a1.aircraft_id, a2.aircraft_id))
-        for aid1, aid2 in collision_pairs:
-            a1, a2 = self._aircraft_by_id(aid1), self._aircraft_by_id(aid2)
-            if a1.state.alive:
-                a1.state.alive = False
-                if aid1 not in step_death_causes:
-                    step_death_causes[aid1] = DEATH_COLLISION_FRIENDLY if a1.team == a2.team else DEATH_COLLISION_CROSS
-            if a2.state.alive:
-                a2.state.alive = False
-                if aid2 not in step_death_causes:
-                    step_death_causes[aid2] = DEATH_COLLISION_FRIENDLY if a1.team == a2.team else DEATH_COLLISION_CROSS
+        collision_distance = float(limits.get("collision_distance", 0.0))
+        if collision_distance > 0.0:
+            alive_now = [a for a in self.aircraft if a.state.alive]
+            for i in range(len(alive_now)):
+                for j in range(i + 1, len(alive_now)):
+                    a1, a2 = alive_now[i], alive_now[j]
+                    if float(np.linalg.norm(a1.state.as_array()[:3] - a2.state.as_array()[:3])) <= collision_distance:
+                        collision_pairs.append((a1.aircraft_id, a2.aircraft_id))
+            for aid1, aid2 in collision_pairs:
+                a1, a2 = self._aircraft_by_id(aid1), self._aircraft_by_id(aid2)
+                if a1.state.alive:
+                    a1.state.alive = False
+                    if aid1 not in step_death_causes:
+                        step_death_causes[aid1] = DEATH_COLLISION_FRIENDLY if a1.team == a2.team else DEATH_COLLISION_CROSS
+                if a2.state.alive:
+                    a2.state.alive = False
+                    if aid2 not in step_death_causes:
+                        step_death_causes[aid2] = DEATH_COLLISION_FRIENDLY if a1.team == a2.team else DEATH_COLLISION_CROSS
 
         reward_mode = self.config["combat"].get("reward_mode", "madsac_segmented")
         v7_pre_attack_dense_parts: dict[str, dict[str, float]] | None = None

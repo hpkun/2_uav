@@ -1,5 +1,0 @@
-block,active_side,opponent_generation,red_kill_rate,blue_kill_rate,combat_decisive_rate,boundary_rate,collision_rate,mean_episode_length
-0,red,0,0.0,0.0,0.0,1.0,0.0,413.4166666666667
-1,blue,0,0.0,0.0,0.0,0.0,0.0,600.0
-2,red,1,0.0,0.0,0.0,0.0,0.0,600.0
-3,blue,0,0.0,0.0,0.0,1.0,0.0,397.1666666666667

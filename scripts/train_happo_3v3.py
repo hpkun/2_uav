@@ -22,6 +22,11 @@ from uav_combat.happo.trainer_3v3 import (
     compute_best_score_fields,
 )
 
+V8_REWARD_MODES = {
+    "task_aligned_paper_segmented_team_v8",
+    "task_aligned_heterogeneous_paper_segmented_team_v8",
+}
+
 
 class Tee:
     def __init__(self, *streams):
@@ -82,6 +87,14 @@ def load_config(args) -> dict:
         if value is not None:
             cfg[section][key] = value
     return cfg
+
+
+def include_collision_in_best_score(env_config_path: str) -> bool:
+    with open(env_config_path, encoding="utf-8") as f:
+        env_cfg = yaml.safe_load(f)
+    mode = env_cfg.get("combat", {}).get("reward_mode")
+    collision_distance = float(env_cfg.get("battlefield", {}).get("collision_distance", 0.0))
+    return not (mode in V8_REWARD_MODES and collision_distance <= 0.0)
 
 
 def next_strict_milestone(current: int, interval: int) -> int:
@@ -147,6 +160,7 @@ def main() -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
     trainer = HAPPO3v3Trainer(args.env_config, cfg)
+    include_collision_best_score = include_collision_in_best_score(args.env_config)
     if args.resume:
         trainer.load_checkpoint(args.resume)
         print(f"resumed_from={args.resume}", flush=True)
@@ -175,7 +189,7 @@ def main() -> None:
             trainer.num_env_workers, trainer.device, seed + 100000,
         )
         (eval_dir / "evaluation_initial.json").write_text(json.dumps(initial_eval, indent=2, default=str))
-        trainer.best_score = compute_best_score(initial_eval)
+        trainer.best_score = compute_best_score(initial_eval, include_collision=include_collision_best_score)
         trainer.best_evaluation = initial_eval
         trainer.best_checkpoint_name = "initial.pt"
         trainer.save_checkpoint(ckpt_dir / "best.pt")
@@ -209,7 +223,7 @@ def main() -> None:
                 (eval_dir / f"evaluation_step_{trainer.env_steps:06d}.json").write_text(
                     json.dumps(ev, indent=2, default=str)
                 )
-                score = compute_best_score(ev)
+                score = compute_best_score(ev, include_collision=include_collision_best_score)
                 trainer.evaluation_history.append({"env_steps": trainer.env_steps, "score": list(score), **ev})
                 if trainer.best_score is None or score > trainer.best_score:
                     trainer.best_score = score
@@ -230,7 +244,7 @@ def main() -> None:
         trainer.num_env_workers, trainer.device, seed + 100000,
     )
     (eval_dir / "evaluation_final.json").write_text(json.dumps(final_eval, indent=2, default=str))
-    final_score = compute_best_score(final_eval)
+    final_score = compute_best_score(final_eval, include_collision=include_collision_best_score)
     if trainer.best_score is None or final_score > trainer.best_score:
         trainer.best_score = final_score
         trainer.best_evaluation = final_eval
@@ -256,8 +270,8 @@ def main() -> None:
         "environment_metadata": trainer.environment_metadata,
         "best_checkpoint": trainer.best_checkpoint_name,
         "best_score": list(trainer.best_score) if trainer.best_score else None,
-        "best_score_fields": list(compute_best_score_fields(trainer.best_evaluation).keys()) if trainer.best_evaluation else None,
-        "best_score_values": compute_best_score_fields(trainer.best_evaluation) if trainer.best_evaluation else None,
+        "best_score_fields": list(compute_best_score_fields(trainer.best_evaluation, include_collision=include_collision_best_score).keys()) if trainer.best_evaluation else None,
+        "best_score_values": compute_best_score_fields(trainer.best_evaluation, include_collision=include_collision_best_score) if trainer.best_evaluation else None,
         "final_evaluation": final_eval,
         "final_metrics": rows[-1] if rows else {},
         "total_seconds": time.perf_counter() - start,

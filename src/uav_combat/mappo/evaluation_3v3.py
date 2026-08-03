@@ -44,6 +44,8 @@ def _summarize(summaries, elapsed):
         "draw_rate": sum(1 for s in summaries if s.get("environment_outcome") == "draw") / n,
         "mean_red_attack_kills": float(np.mean([s["red_attack_kills"] for s in summaries])),
         "mean_blue_attack_kills": float(np.mean([s["blue_attack_kills"] for s in summaries])),
+        "mean_red_attack_deaths": float(np.mean([s["red_attack_deaths"] for s in summaries])),
+        "mean_blue_attack_deaths": float(np.mean([s["blue_attack_deaths"] for s in summaries])),
         "mean_red_survivors": float(np.mean([s["red_survivors"] for s in summaries])),
         "mean_blue_survivors": float(np.mean([s["blue_survivors"] for s in summaries])),
         "red_kd_numerator": rk, "red_kd_denominator": bk,
@@ -159,7 +161,7 @@ def evaluate_mappo_fixed_blue_3v3(
 def evaluate_rule_matchup_3v3(
     env_config: str | Path, red_mode: str, blue_mode: str,
     episodes: int, num_envs: int = 8, num_env_workers: int = 4,
-    seed_start: int = 1000,
+    seed_start: int = 1000, include_episode_details: bool = False,
 ) -> dict[str, Any]:
     mode_map = {"zero": 0, "pursuit": 1}
     red_m, blue_m = mode_map[red_mode], mode_map[blue_mode]
@@ -208,6 +210,8 @@ def evaluate_rule_matchup_3v3(
                 obs[gi], gs[gi], am[gi] = no[0], ng[0], na[0]
         elapsed = time.perf_counter() - t0
         result = _summarize(summaries[:episodes], elapsed)
+        if include_episode_details:
+            result["episode_details"] = summaries[:episodes]
     finally:
         vec_env.close()
     return result

@@ -23,6 +23,11 @@ ROLLOUT_REWARD_FIELDS = (
     "mean_rollout_event_terminal_reward",
 )
 
+V8_REWARD_MODES = {
+    "task_aligned_paper_segmented_team_v8",
+    "task_aligned_heterogeneous_paper_segmented_team_v8",
+}
+
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--env-config", default="configs/homogeneous_3v3.yaml")
@@ -78,6 +83,13 @@ def _json_finite_or_none(value):
         return bool(value)
     return value
 
+def _include_collision_in_best_score(env_config_path):
+    with open(env_config_path, encoding="utf-8") as f:
+        env_cfg = yaml.safe_load(f)
+    mode = env_cfg.get("combat", {}).get("reward_mode")
+    collision_distance = float(env_cfg.get("battlefield", {}).get("collision_distance", 0.0))
+    return not (mode in V8_REWARD_MODES and collision_distance <= 0.0)
+
 def main():
     args = parse_args(); config = load_config(args)
     tc = config["training"]; seed = config["experiment"]["seed"]
@@ -90,6 +102,7 @@ def main():
     print(f"num_envs={num_envs} workers={num_workers} envs_per_worker={num_envs//num_workers}", flush=True)
 
     trainer = FixedBlue3v3MAPPOTrainer(args.env_config, config)
+    include_collision_best_score = _include_collision_in_best_score(args.env_config)
     rule_policy_mapping_modes = trainer.vector_env.policy_modes()
     output = Path(config["experiment"]["output_dir"])
     ckpt_dir = output / "checkpoints"; eval_dir = output / "evaluations"
@@ -115,7 +128,7 @@ def main():
         eval_accum += time.perf_counter() - t_ev
         (eval_dir / "evaluation_initial.json").write_text(json.dumps(init_eval, indent=2, default=str))
         if trainer.best_score is None:
-            trainer.best_score = compute_best_score(init_eval)
+            trainer.best_score = compute_best_score(init_eval, include_collision=include_collision_best_score)
             trainer.best_evaluation = init_eval
             trainer.best_checkpoint_name = "initial.pt"
             trainer.save_checkpoint(ckpt_dir / "best.pt")
@@ -217,7 +230,7 @@ def main():
                 ev_elapsed = time.perf_counter() - t_ev
                 trainer.total_evaluation_seconds += ev_elapsed
                 (eval_dir / f"evaluation_step_{cur_milestone:06d}.json").write_text(json.dumps(ev, indent=2, default=str))
-                sc = compute_best_score(ev)
+                sc = compute_best_score(ev, include_collision=include_collision_best_score)
                 if trainer.best_score is None or sc > trainer.best_score:
                     trainer.best_score = sc; trainer.best_evaluation = ev
                     trainer.best_checkpoint_name = f"step_{cur_milestone:06d}.pt"
@@ -263,7 +276,7 @@ def main():
                                                  num_envs, num_workers, trainer.device, seed + 100000)
     trainer.total_evaluation_seconds += time.perf_counter() - t_ev
     (eval_dir / "evaluation_final.json").write_text(json.dumps(final_eval, indent=2, default=str))
-    sc = compute_best_score(final_eval)
+    sc = compute_best_score(final_eval, include_collision=include_collision_best_score)
     if trainer.best_score is None or sc > trainer.best_score:
         trainer.best_score = sc; trainer.best_evaluation = final_eval
         trainer.best_checkpoint_name = "final.pt"
@@ -305,8 +318,8 @@ def main():
         "best_checkpoint": trainer.best_checkpoint_name,
         "final_evaluation": final_eval,
         "best_score": list(trainer.best_score) if trainer.best_score else None,
-        "best_score_fields": list(compute_best_score_fields(trainer.best_evaluation).keys()) if trainer.best_evaluation else None,
-        "best_score_values": compute_best_score_fields(trainer.best_evaluation) if trainer.best_evaluation else None,
+        "best_score_fields": list(compute_best_score_fields(trainer.best_evaluation, include_collision=include_collision_best_score).keys()) if trainer.best_evaluation else None,
+        "best_score_values": compute_best_score_fields(trainer.best_evaluation, include_collision=include_collision_best_score) if trainer.best_evaluation else None,
         "final_metrics": _json_finite_or_none(rows[-1]) if rows else None,
         "smoke_restore_and_continue_ok": restored_ok,
     }

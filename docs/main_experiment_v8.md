@@ -11,6 +11,19 @@ v8 is the simplified main-experiment environment for the current 3DOF NED point-
 - MAPPO and HAPPO algorithm structures and stability settings.
 - Homogeneous 3v3 and functional heterogeneous 3v3 variants.
 
+## Collision contract
+
+Li et al. 2023 does not define an aircraft-to-aircraft collision model for the simplified multi-UAV air-combat task.  The v8 main experiment therefore disables inter-aircraft collision detection by setting:
+
+```yaml
+battlefield:
+  collision_distance: 0.0
+```
+
+`collision_distance <= 0` means aircraft are allowed to pass through each other in the point-mass model.  Aircraft in v8 can die only by deterministic attack or by leaving the combat area.  The collision detector remains available for historical configurations with positive `collision_distance`, but v8 does not include collision deaths, anti-collision rewards, separation rewards, soft safety rewards, or collision terminal rewards.
+
+This is an intentionally simplified academic learning environment for algorithm comparison, not a high-fidelity flight-safety simulator.
+
 ## Observation contract
 
 v8 follows the Equation (24) idea: each agent observes self state, teammate state, and enemy state blocks in its own coordinate frame.  It does not add target IDs, target flags, persistent engagement labels, or target-first ordering.
@@ -64,7 +77,7 @@ Local terms:
 - `R41`: within 4000 m and `horizontal_aa <= 30°`, then +0.01 / +0.02 / +0.10 for coarse / medium / fine own attack geometry.  The tier requires both `horizontal_ata` and `height_angle` to satisfy the same tier.
 - `R42`: reverse geometry is recomputed by swapping own and target.  Within 4000 m and reverse `horizontal_aa <= 30°`, the penalty is -0.015 / -0.025 / -0.150 for coarse / medium / fine reverse threat geometry, again requiring both reverse `horizontal_ata` and reverse `height_angle`.
 
-There is no extra terminal reward, timeout penalty, complete-elimination bonus, time penalty, soft-boundary shaping, continuous distance progress, Gaussian geometry reward, support-information shaping, or dense clipping in v8.  Collision deaths still occur in the environment and are logged in ledgers/evaluation metrics, but they do not add an explicit v8 reward penalty.  Timeout affects outcome/statistics and best-checkpoint selection only.
+There is no extra terminal reward, timeout penalty, complete-elimination bonus, time penalty, soft-boundary shaping, continuous distance progress, Gaussian geometry reward, support-information shaping, dense clipping, collision penalty, separation penalty, anti-collision reward, soft safety reward, minimum-separation reward, or terminal collision reward in v8.  Timeout affects outcome/statistics and best-checkpoint selection only.
 
 ## Heterogeneous v8
 
@@ -92,7 +105,7 @@ The main training/evaluation path keeps:
 - red/blue complete-elimination success rates;
 - red/blue attack kills and any-attack-kill rates;
 - red/blue survivors;
-- attack, altitude-boundary, XY-boundary, and collision deaths;
+- attack, altitude-boundary, and XY-boundary deaths;
 - timeout rate and mean episode length;
 - R1 kill/death, R2 boundary, R3, R41, R42, and total team reward;
 - actor loss, critic loss, entropy, approximate KL, effective log-std/std;
@@ -109,11 +122,16 @@ v8 best checkpoint selection uses the simplified lexicographic score:
 3. `mean_red_attack_kills`
 4. `mean_red_survivors`
 5. `-mean_red_boundary_deaths`
-6. `-mean_red_collision_deaths`
-7. `-max_steps_rate`
-8. `-mean_episode_length`
+6. `-max_steps_rate`
+7. `-mean_episode_length`
 
 This preserves the project rule that red only wins after complete blue elimination; timeout/draw is not a red success.
+
+## Rule-vs-rule attackability check
+
+After changing v8 collision semantics, run a deterministic homogeneous v8 rule-vs-rule check with 200 episodes.  The check uses `paper_nearest_pursuit_v1` for both red and blue, `rate_aligned_v1`, the existing deterministic attack model, the `100-1000 m` attack range, the current ATA/AA attack conditions, `collision_distance = 0`, and `max_steps = 600`.
+
+This check is only used to confirm whether the attack envelope is reachable under the fixed pure-pursuit rules.  It should not be used to tune attack distance, angles, rewards, or policy complexity from the same 200 episodes.
 
 ## Running long experiments
 

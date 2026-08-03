@@ -11,8 +11,11 @@ import yaml
 from uav_combat.config import load_config
 from uav_combat.environment_3v3 import (
     DEATH_ATTACK,
+    DEATH_BOUNDARY_ALTITUDE,
     DEATH_BOUNDARY_XY,
     DEATH_COLLISION_CROSS,
+    DEATH_COLLISION_FRIENDLY,
+    DEATH_NONE,
     OBS_DIM,
     Homogeneous3v3AirCombatEnv,
 )
@@ -94,6 +97,8 @@ def _summary_record(**overrides):
     base = {
         "red_attack_kills": 0,
         "blue_attack_kills": 0,
+        "red_attack_deaths": 0,
+        "blue_attack_deaths": 0,
         "red_complete_elimination_success": False,
         "blue_complete_elimination_success": False,
         "environment_outcome": "draw",
@@ -129,6 +134,8 @@ def test_v8_configs_are_paper_segmented_and_old_configs_unchanged():
     hetero = load_config(HETERO_V8)
     assert homo["combat"]["reward_mode"] == "task_aligned_paper_segmented_team_v8"
     assert hetero["combat"]["reward_mode"] == "task_aligned_heterogeneous_paper_segmented_team_v8"
+    assert homo["battlefield"]["collision_distance"] == 0.0
+    assert hetero["battlefield"]["collision_distance"] == 0.0
     assert homo["reward_v8"]["paper_segment_distance"] == 4000.0
     assert hetero["reward_heterogeneous_v8"]["paper_segment_distance"] == 4000.0
     assert hetero["blue_rule_policy"]["mode"] == "functional_heterogeneous_nearest_pursuit_v8"
@@ -136,7 +143,9 @@ def test_v8_configs_are_paper_segmented_and_old_configs_unchanged():
     for cfg in (homo, hetero):
         assert not ({"preferred_distance", "distance_scale", "terminal_reward"} & set(cfg["combat"]))
     assert load_config(V4)["combat"]["reward_mode"] == "paper_coupled_team_v2"
+    assert load_config(V4)["battlefield"]["collision_distance"] > 0.0
     assert load_config(V7)["combat"]["reward_mode"] == "paper_segmented_team_v4"
+    assert load_config(V7)["battlefield"]["collision_distance"] > 0.0
 
 
 def test_old_v8_continuous_aliases_are_rejected(tmp_path):
@@ -259,6 +268,69 @@ def test_v8_team_aggregation_and_event_rewards_ignore_collision_penalty():
     assert rewards["red_0"] == pytest.approx((0.10 + 10.0 - 10.0 - 10.0) / 3.0)
 
 
+def test_v8_collision_distance_zero_disables_collision_detection_and_death():
+    env = Homogeneous3v3AirCombatEnv(HOMO_V8)
+    env.reset(0)
+    _set(env, "red_0", 0.0, 0.0, psi=0.0)
+    _set(env, "red_1", 0.0, 0.0, psi=0.0)
+    _set(env, "red_2", 0.0, 1000.0, psi=0.0)
+    _set(env, "blue_0", 9000.0, 0.0, psi=np.pi)
+    _set(env, "blue_1", 9000.0, 1000.0, psi=np.pi)
+    _set(env, "blue_2", 9000.0, -1000.0, psi=np.pi)
+
+    _, _, terminated, truncated, info = env.step(_zero_actions(env))
+
+    assert info["collision_pairs"] == []
+    assert info["collision_deaths"] == {"red": 0, "blue": 0}
+    assert DEATH_COLLISION_FRIENDLY not in info["death_causes"].values()
+    assert DEATH_COLLISION_CROSS not in info["death_causes"].values()
+    assert env._aircraft_by_id("red_0").state.alive
+    assert env._aircraft_by_id("red_1").state.alive
+    assert not terminated
+    assert not truncated
+
+
+def test_v8_collision_disabled_death_ledger_contains_only_attack_and_boundary_causes():
+    env = Homogeneous3v3AirCombatEnv(HOMO_V8)
+    env.reset(0)
+    _set(env, "red_0", 0.0, 0.0, psi=0.0)
+    _set(env, "red_1", 0.0, 0.0, psi=0.0)
+    _set(env, "red_2", 25000.0, 0.0, psi=0.0)  # one boundary death is allowed
+    _set(env, "blue_0", 9000.0, 0.0, psi=np.pi)
+    _set(env, "blue_1", 9000.0, 1000.0, psi=np.pi)
+    _set(env, "blue_2", 9000.0, -1000.0, psi=np.pi)
+
+    _, _, _, _, info = env.step(_zero_actions(env))
+
+    allowed = {DEATH_NONE, DEATH_ATTACK, DEATH_BOUNDARY_ALTITUDE, DEATH_BOUNDARY_XY}
+    assert set(env._episode_death_causes.values()) <= allowed
+    assert info["collision_pairs"] == []
+    assert info["reward_components"]["red_collision_death_penalty"] == 0.0
+    assert info["reward_components"]["blue_collision_death_penalty"] == 0.0
+
+
+def test_positive_collision_distance_still_enables_historical_collision_behavior(tmp_path):
+    path = _rewrite_config(
+        tmp_path,
+        HOMO_V8,
+        lambda cfg: cfg["battlefield"].update({"collision_distance": 30.0}),
+    )
+    env = Homogeneous3v3AirCombatEnv(path)
+    env.reset(0)
+    _set(env, "red_0", 0.0, 0.0, psi=0.0)
+    _set(env, "red_1", 0.0, 0.0, psi=0.0)
+    _set(env, "red_2", 0.0, 1000.0, psi=0.0)
+    _set(env, "blue_0", 9000.0, 0.0, psi=np.pi)
+    _set(env, "blue_1", 9000.0, 1000.0, psi=np.pi)
+    _set(env, "blue_2", 9000.0, -1000.0, psi=np.pi)
+
+    _, _, _, _, info = env.step(_zero_actions(env))
+
+    assert ("red_0", "red_1") in info["collision_pairs"]
+    assert info["death_causes"]["red_0"] == DEATH_COLLISION_FRIENDLY
+    assert info["death_causes"]["red_1"] == DEATH_COLLISION_FRIENDLY
+
+
 def test_v8_has_68d_observation_and_no_persistent_target_state():
     env = Homogeneous3v3AirCombatEnv(HOMO_V8)
     obs, info = env.reset(0)
@@ -366,6 +438,22 @@ def test_evaluation_collision_metrics_feed_best_score():
     clean = {**mappo, "mean_red_collision_deaths": 0.0}
     assert compute_best_score(clean) > compute_best_score(mappo)
     assert "neg_mean_red_collision_deaths" in compute_best_score_fields(mappo)
+
+
+def test_v8_best_score_fields_exclude_collision_term():
+    record = _summary_record(red_friendly_collision_deaths=3)
+    summary = summarize_mappo([record], elapsed=1.0)
+    fields = compute_best_score_fields(summary, include_collision=False)
+    assert "neg_mean_red_collision_deaths" not in fields
+    assert tuple(fields) == (
+        "red_complete_elimination_success_rate",
+        "red_any_attack_kill_rate",
+        "mean_red_attack_kills",
+        "mean_red_survivors",
+        "neg_mean_red_boundary_deaths",
+        "neg_max_steps_rate",
+        "neg_mean_episode_length",
+    )
 
 
 def test_mappo_happo_and_heterogeneous_happo_trainers_construct(tmp_path):

@@ -29,7 +29,7 @@ battlefield:
   y_limit: 20000.0
   altitude_min: 500.0
   altitude_max: 6000.0
-  collision_distance: 30.0
+  collision_distance: 0.0
 combat:
   reward_mode: task_aligned_heterogeneous_paper_segmented_team_v8
   timeout_outcome_mode: red_failure_blue_win

@@ -43,32 +43,37 @@ def linear_schedule(start: float, end: float, progress: float) -> float:
     return start + p * (end - start)
 
 
-def compute_best_score(es: dict[str, Any]) -> tuple[float, ...]:
+def compute_best_score(es: dict[str, Any], *, include_collision: bool = True) -> tuple[float, ...]:
     """Lexicographic checkpoint ranking centered on genuine red attack performance."""
-    return (
+    score = (
         float(es.get("red_complete_elimination_success_rate", 0.0)),
         float(es.get("red_any_attack_kill_rate", 1.0 if es.get("mean_red_attack_kills", 0.0) > 0.0 else 0.0)),
         float(es.get("mean_red_attack_kills", 0.0)),
         float(es.get("mean_red_survivors", 0.0)),
         -float(es.get("mean_red_boundary_deaths", 0.0)),
-        -float(es.get("mean_red_collision_deaths", 0.0)),
+    )
+    if include_collision:
+        score += (-float(es.get("mean_red_collision_deaths", 0.0)),)
+    score += (
         -float(es.get("max_steps_rate", 1.0)),
         -float(es.get("mean_episode_length", 600.0)),
     )
+    return score
 
 
-def compute_best_score_fields(es: dict[str, Any]) -> dict[str, float]:
-    names = (
+def compute_best_score_fields(es: dict[str, Any], *, include_collision: bool = True) -> dict[str, float]:
+    names = [
         "red_complete_elimination_success_rate",
         "red_any_attack_kill_rate",
         "mean_red_attack_kills",
         "mean_red_survivors",
         "neg_mean_red_boundary_deaths",
-        "neg_mean_red_collision_deaths",
         "neg_max_steps_rate",
         "neg_mean_episode_length",
-    )
-    return {name: value for name, value in zip(names, compute_best_score(es))}
+    ]
+    if include_collision:
+        names.insert(5, "neg_mean_red_collision_deaths")
+    return {name: value for name, value in zip(names, compute_best_score(es, include_collision=include_collision))}
 
 
 def _signature_differences(checkpoint: Any, current: Any, prefix: str = "signature") -> list[str]:
