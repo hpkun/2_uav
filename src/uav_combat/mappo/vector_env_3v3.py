@@ -145,7 +145,10 @@ def _fill_red_reward_components(info, i, arr):
 
 
 def _select_rule_actions(env, policy, own_aircraft, enemy_aircraft):
-    if getattr(policy, "policy_name", "") == "functional_heterogeneous_team_v1":
+    if getattr(policy, "policy_name", "") in {
+        "functional_heterogeneous_team_v1",
+        "functional_heterogeneous_nearest_pursuit_v8",
+    }:
         team = own_aircraft[0].team if own_aircraft else "red"
         return policy.select_actions(
             own_aircraft,

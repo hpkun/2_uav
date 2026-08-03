@@ -60,6 +60,14 @@ def _summarize(summaries, elapsed):
         "mean_blue_friendly_collision_deaths": float(np.mean([s["blue_friendly_collision_deaths"] for s in summaries])),
         "mean_red_cross_collision_deaths": float(np.mean([s["red_cross_collision_deaths"] for s in summaries])),
         "mean_blue_cross_collision_deaths": float(np.mean([s["blue_cross_collision_deaths"] for s in summaries])),
+        "mean_red_collision_deaths": float(np.mean([
+            s["red_friendly_collision_deaths"] + s["red_cross_collision_deaths"]
+            for s in summaries
+        ])),
+        "mean_blue_collision_deaths": float(np.mean([
+            s["blue_friendly_collision_deaths"] + s["blue_cross_collision_deaths"]
+            for s in summaries
+        ])),
         "max_steps_rate": sum(1 for s in summaries if s.get("termination_reason") == "max_steps") / n,
         "mean_episode_length": float(np.mean([s["episode_length"] for s in summaries])),
         "evaluation_seconds": elapsed,

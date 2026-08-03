@@ -38,7 +38,15 @@ The homogeneous fixed blue opponent in v8 is `paper_nearest_pursuit_v1`, not the
 
 ## Reward
 
-v8 uses the existing tested paper-segmented local helper for Equation (25)-style `R1 + R2 + R3 + R4` terms.
+v8 uses a dedicated Equation (25)-style paper reward helper.  The helper is separate from the older v7 `paper_segmented_local_reward` implementation so that v8 can keep the paper geometry and the project attack envelope distinct.
+
+The reward geometry is horizontal:
+
+- `horizontal_ata`: angle between own horizontal velocity and the horizontal line of sight to the target;
+- `horizontal_aa`: angle between target horizontal velocity and the same horizontal line of sight;
+- `height_angle`: `abs(atan2(target_altitude - own_altitude, horizontal_distance))`.
+
+The paper reward distance threshold is `paper_segment_distance = 4000 m`.  This is not the same as the deterministic attack envelope, which remains `100-1000 m` with the existing ATA/AA kill checks.  Reward shaping can therefore activate outside the kill envelope, but actual kills are still decided only by the existing combat model.
 
 For each team:
 
@@ -52,11 +60,11 @@ Local terms:
 
 - `R1`: +10 for an attack kill by this team, -10 when one own aircraft is killed by attack.
 - `R2`: -10 when one own aircraft leaves the combat boundary.
-- `R3`: +0.001 guide reward from the existing paper-segmented helper.
-- `R41`: +0.01 / +0.02 / +0.10 for coarse / medium / fine own attack geometry.
-- `R42`: -0.015 / -0.025 / -0.150 for coarse / medium / fine reverse threat geometry.
+- `R3`: +0.001 only when distance is at least 4000 m, `horizontal_ata <= 30°`, and `height_angle <= 30°`.
+- `R41`: within 4000 m and `horizontal_aa <= 30°`, then +0.01 / +0.02 / +0.10 for coarse / medium / fine own attack geometry.  The tier requires both `horizontal_ata` and `height_angle` to satisfy the same tier.
+- `R42`: reverse geometry is recomputed by swapping own and target.  Within 4000 m and reverse `horizontal_aa <= 30°`, the penalty is -0.015 / -0.025 / -0.150 for coarse / medium / fine reverse threat geometry, again requiring both reverse `horizontal_ata` and reverse `height_angle`.
 
-There is no extra terminal reward, timeout penalty, complete-elimination bonus, time penalty, soft-boundary shaping, continuous distance progress, Gaussian geometry reward, or support-information shaping in v8.  Timeout affects outcome/statistics and best-checkpoint selection only.
+There is no extra terminal reward, timeout penalty, complete-elimination bonus, time penalty, soft-boundary shaping, continuous distance progress, Gaussian geometry reward, support-information shaping, or dense clipping in v8.  Collision deaths still occur in the environment and are logged in ledgers/evaluation metrics, but they do not add an explicit v8 reward penalty.  Timeout affects outcome/statistics and best-checkpoint selection only.
 
 ## Heterogeneous v8
 
@@ -69,7 +77,8 @@ The heterogeneous variant keeps only capability and observation differences:
 - combat can attack;
 - support-to-combat information sharing remains enabled;
 - HAPPO uses separate actors for support/combat slots;
-- fixed blue support keeps the simple rear-formation hold rule.
+- fixed support keeps the simple rear-formation hold rule.
+- fixed combat aircraft use `functional_heterogeneous_nearest_pursuit_v8`: each combat aircraft independently selects its nearest alive effective-visible enemy each step and then reuses the same pure-pursuit `rate_aligned_v1` control.  There is no one-to-one target assignment in this v8 heterogeneous rule policy, so two combat aircraft may choose the same enemy.
 
 Support aircraft can receive shared team reward, can be killed, and can incur boundary loss.  They do not produce R3/R41/R42 attack-geometry rewards and do not receive a support-information shaping reward.
 

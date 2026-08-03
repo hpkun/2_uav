@@ -48,6 +48,14 @@ def _summarize(records: list[dict[str, Any]], elapsed: float) -> dict[str, Any]:
         "mean_blue_friendly_collision_deaths": float(np.mean([r["blue_friendly_collision_deaths"] for r in records])),
         "mean_red_cross_collision_deaths": float(np.mean([r["red_cross_collision_deaths"] for r in records])),
         "mean_blue_cross_collision_deaths": float(np.mean([r["blue_cross_collision_deaths"] for r in records])),
+        "mean_red_collision_deaths": float(np.mean([
+            r["red_friendly_collision_deaths"] + r["red_cross_collision_deaths"]
+            for r in records
+        ])),
+        "mean_blue_collision_deaths": float(np.mean([
+            r["blue_friendly_collision_deaths"] + r["blue_cross_collision_deaths"]
+            for r in records
+        ])),
         "mean_red_kills_with_shared_observation": float(np.mean([r["red_kills_with_shared_observation"] for r in records])),
         "mean_blue_kills_with_shared_observation": float(np.mean([r["blue_kills_with_shared_observation"] for r in records])),
         "mean_red_support_coverage_ratio": float(np.mean([r["red_mean_support_coverage_ratio"] for r in records])),

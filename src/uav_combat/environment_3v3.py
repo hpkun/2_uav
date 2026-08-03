@@ -20,6 +20,7 @@ from .rewards import (
     friendly_separation_risk,
     head_on_collision_risk,
     paper_segmented_local_reward,
+    paper_equation25_local_reward,
     validate_paper_segmented_v4_config,
 )
 from .scenario_3v3 import ALL_IDS, BLUE_IDS, RED_IDS, Homogeneous3v3Scenario
@@ -197,9 +198,6 @@ class Homogeneous3v3AirCombatEnv:
         return mode in {
             "task_aligned_paper_segmented_team_v8",
             "task_aligned_heterogeneous_paper_segmented_team_v8",
-            # Backward-compatible aliases for already-created v8 configs/checkpoints.
-            "task_aligned_continuous_team_v8",
-            "task_aligned_heterogeneous_team_v8",
         }
 
     def _direct_visible(self, own: Aircraft, enemy: Aircraft) -> bool:
@@ -1412,14 +1410,7 @@ class Homogeneous3v3AirCombatEnv:
             return zero, None
         if self._heterogeneous and (own.role == "support" or not own.can_attack):
             return zero, target.aircraft_id
-        combat = self.config["combat"]
-        local = paper_segmented_local_reward(
-            own.state,
-            target.state,
-            float(combat["attack_distance_min"]),
-            float(combat["attack_distance_max"]),
-            cfg,
-        )
+        local = paper_equation25_local_reward(own.state, target.state, cfg)
         return {
             "guide": float(local["guide"]),
             "attack_advantage": float(local["attack_advantage"]),
@@ -1476,11 +1467,10 @@ class Homogeneous3v3AirCombatEnv:
             parts = pre_attack_parts[team]
             atk_losses = _losses(team, (DEATH_ATTACK,))
             bdy_losses = _losses(team, (DEATH_BOUNDARY_ALTITUDE, DEATH_BOUNDARY_XY))
-            col_losses = _losses(team, (DEATH_COLLISION_FRIENDLY, DEATH_COLLISION_CROSS))
             kill_reward = float(cfg["kill_reward"]) * int(attack_kills[team]) / team_size
             attack_death_penalty = -float(cfg["aircraft_loss_penalty"]) * atk_losses / team_size
             boundary_death_penalty = -float(cfg["aircraft_loss_penalty"]) * bdy_losses / team_size
-            collision_death_penalty = -float(cfg["aircraft_loss_penalty"]) * col_losses / team_size
+            collision_death_penalty = 0.0
             event = kill_reward + attack_death_penalty + boundary_death_penalty + collision_death_penalty
             total = float(parts["dense_reward"] + event)
             totals[team] = total

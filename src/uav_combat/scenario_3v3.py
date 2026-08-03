@@ -73,12 +73,11 @@ def _validate_heterogeneous_config(config: dict[str, Any]) -> None:
 
     if config.get("combat", {}).get("reward_mode") not in {
         "functional_heterogeneous_team_v1",
-        "task_aligned_heterogeneous_team_v8",
         "task_aligned_heterogeneous_paper_segmented_team_v8",
     }:
         raise ValueError(
             "functional heterogeneous v1 requires combat.reward_mode="
-            "functional_heterogeneous_team_v1 or a supported task_aligned heterogeneous v8 mode"
+            "functional_heterogeneous_team_v1 or task_aligned_heterogeneous_paper_segmented_team_v8"
         )
 
 

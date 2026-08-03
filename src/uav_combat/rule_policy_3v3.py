@@ -421,6 +421,45 @@ class FunctionalHeterogeneousTeamPolicy3v3(NearestTargetPursuitPolicy3v3):
         self.focus_fire_count = 0
 
 
+class FunctionalHeterogeneousNearestPursuitPolicy3v3(FunctionalHeterogeneousTeamPolicy3v3):
+    """Functional-heterogeneous v8 rule policy with independent nearest pursuit.
+
+    Support aircraft keep the same rear-formation hold behavior as
+    ``functional_heterogeneous_team_v1``.  Combat aircraft do not perform
+    team-level one-to-one assignment: every step each alive combat aircraft
+    selects its own nearest alive effective-visible enemy, with deterministic
+    ID tie-breaking, and then reuses the same pure-pursuit action mapping.
+    """
+
+    policy_name = "functional_heterogeneous_nearest_pursuit_v8"
+
+    def _assign_combat_targets(
+        self,
+        own_aircraft: list[Aircraft],
+        enemy_aircraft: list[Aircraft],
+        visible_enemy_ids_by_own: dict[str, set[str]],
+    ) -> dict[str, Aircraft]:
+        combats = sorted(
+            (a for a in own_aircraft if a.role == "combat" and a.state.alive),
+            key=lambda a: a.aircraft_id,
+        )
+        enemies = {a.aircraft_id: a for a in enemy_aircraft if a.state.alive}
+        assignments: dict[str, Aircraft] = {}
+        for own in combats:
+            visible = sorted(visible_enemy_ids_by_own.get(own.aircraft_id, set()))
+            candidates = [enemies[enemy_id] for enemy_id in visible if enemy_id in enemies]
+            if not candidates:
+                continue
+            assignments[own.aircraft_id] = min(
+                candidates,
+                key=lambda enemy: (
+                    float(np.linalg.norm(own.state.as_array()[:3] - enemy.state.as_array()[:3])),
+                    enemy.aircraft_id,
+                ),
+            )
+        return assignments
+
+
 def make_nearest_target_pursuit_policy_3v3(config: dict) -> NearestTargetPursuitPolicy3v3:
     """Create a 3v3 pursuit policy from the environment config."""
     act_cfg = config["action"]
@@ -478,6 +517,30 @@ def _make_functional_heterogeneous_team_policy_3v3(config: dict) -> FunctionalHe
     )
 
 
+def _make_functional_heterogeneous_nearest_pursuit_policy_3v3(
+    config: dict,
+) -> FunctionalHeterogeneousNearestPursuitPolicy3v3:
+    act_cfg = config["action"]
+    ac_cfg = config["aircraft"]
+    support_cfg = config.get("heterogeneous", {}).get("support_rule", {})
+    support_mode = support_cfg.get("mode")
+    if support_mode != "rear_formation_hold_v1":
+        raise ValueError(f"unsupported support rule mode: {support_mode!r}")
+    return FunctionalHeterogeneousNearestPursuitPolicy3v3(
+        act_cfg["delta_yaw_max"],
+        act_cfg["delta_pitch_max"],
+        act_cfg["delta_speed_max"],
+        mapping_mode=act_cfg.get("mapping_mode", "legacy_delta"),
+        yaw_rate_max=ac_cfg["yaw_rate_max"],
+        pitch_rate_max=ac_cfg["pitch_rate_max"],
+        acceleration_max=ac_cfg["acceleration_max"],
+        k_yaw=ac_cfg["k_yaw"],
+        k_pitch=ac_cfg["k_pitch"],
+        k_speed=ac_cfg["k_speed"],
+        support_follow_distance=float(support_cfg.get("follow_distance", 1200.0)),
+    )
+
+
 def make_team_rule_policy_3v3(config: dict, team: str):
     """Create the configured deterministic 3v3 rule policy for a team."""
     if team not in ("blue", "red"):
@@ -489,4 +552,6 @@ def make_team_rule_policy_3v3(config: dict, team: str):
         return _make_greedy_team_pursuit_policy_3v3(config)
     if mode == "functional_heterogeneous_team_v1":
         return _make_functional_heterogeneous_team_policy_3v3(config)
+    if mode == "functional_heterogeneous_nearest_pursuit_v8":
+        return _make_functional_heterogeneous_nearest_pursuit_policy_3v3(config)
     raise ValueError(f"unknown {team}_rule_policy mode: {mode}")

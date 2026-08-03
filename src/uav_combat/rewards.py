@@ -7,6 +7,58 @@ from .models import AircraftState
 BOUNDARY_REASONS = {"altitude_boundary", "xy_boundary", "boundary"}
 
 
+def _horizontal_velocity(state: AircraftState) -> np.ndarray:
+    return np.array([
+        state.v * np.cos(state.theta) * np.cos(state.psi),
+        state.v * np.cos(state.theta) * np.sin(state.psi),
+    ], dtype=float)
+
+
+def compute_paper_reward_geometry(
+    own_state: AircraftState,
+    target_state: AircraftState,
+    epsilon: float = 1e-8,
+) -> dict[str, float]:
+    """Paper Eq. (25) reward geometry for v8 R3/R41/R42 terms."""
+    own_pos = own_state.as_array()[:3].astype(float)
+    target_pos = target_state.as_array()[:3].astype(float)
+    rel = target_pos - own_pos
+    horizontal = rel[:2]
+    horizontal_distance = float(np.linalg.norm(horizontal))
+    distance = float(np.linalg.norm(rel))
+
+    if horizontal_distance <= epsilon:
+        horizontal_ata = float(np.pi)
+        horizontal_aa = float(np.pi)
+    else:
+        own_vel = _horizontal_velocity(own_state)
+        target_vel = _horizontal_velocity(target_state)
+        own_speed = float(np.linalg.norm(own_vel))
+        target_speed = float(np.linalg.norm(target_vel))
+        if own_speed <= epsilon:
+            horizontal_ata = float(np.pi)
+        else:
+            cos_ata = float(np.dot(own_vel, horizontal) / (own_speed * horizontal_distance))
+            horizontal_ata = float(np.arccos(np.clip(cos_ata, -1.0, 1.0)))
+        if target_speed <= epsilon:
+            horizontal_aa = float(np.pi)
+        else:
+            cos_aa = float(np.dot(target_vel, horizontal) / (target_speed * horizontal_distance))
+            horizontal_aa = float(np.arccos(np.clip(cos_aa, -1.0, 1.0)))
+
+    height_angle = float(abs(np.arctan2(target_state.altitude - own_state.altitude, horizontal_distance)))
+    height_angle = float(np.clip(height_angle, 0.0, np.pi / 2.0))
+    result = {
+        "distance": distance,
+        "horizontal_ata": horizontal_ata,
+        "horizontal_aa": horizontal_aa,
+        "height_angle": height_angle,
+    }
+    if not np.isfinite(list(result.values())).all():
+        raise FloatingPointError("non-finite paper reward geometry")
+    return result
+
+
 def _empty() -> dict[str, float]:
     return {key: 0.0 for key in ("reward_terminal", "reward_boundary", "reward_guide", "reward_position", "reward_threat", "reward_total")}
 
@@ -322,4 +374,77 @@ def paper_segmented_local_reward(
     }
     if not np.isfinite(list(result.values())).all():
         raise FloatingPointError("non-finite paper_segmented_team_v4 local reward")
+    return result
+
+
+def _tiered_paper_attack_reward(
+    horizontal_ata: float,
+    height_angle: float,
+    cfg: dict[str, Any],
+    prefix: str,
+) -> float:
+    if horizontal_ata <= float(cfg["fine_angle"]) and height_angle <= float(cfg["fine_angle"]):
+        return float(cfg[f"fine_{prefix}"])
+    if horizontal_ata <= float(cfg["medium_angle"]) and height_angle <= float(cfg["medium_angle"]):
+        return float(cfg[f"medium_{prefix}"])
+    if horizontal_ata <= float(cfg["coarse_angle"]) and height_angle <= float(cfg["coarse_angle"]):
+        return float(cfg[f"coarse_{prefix}"])
+    return 0.0
+
+
+def paper_equation25_local_reward(
+    own_state: AircraftState,
+    target_state: AircraftState,
+    cfg: dict[str, Any],
+) -> dict[str, float]:
+    """Strict v8 Eq. (25) local R3/R41/R42 terms.
+
+    Uses an independent paper segment distance and horizontal ATA/AA plus
+    absolute height angle. This deliberately does not change the attack model.
+    """
+    segment_distance = float(cfg["paper_segment_distance"])
+    tolerance = 1e-12
+    geometry = compute_paper_reward_geometry(own_state, target_state)
+
+    guide = 0.0
+    if (
+        geometry["distance"] + tolerance >= segment_distance
+        and geometry["horizontal_ata"] <= float(cfg["guide_angle_max"]) + tolerance
+        and geometry["height_angle"] <= float(cfg["guide_angle_max"]) + tolerance
+    ):
+        guide = float(cfg["guide_reward"])
+
+    attack_advantage = 0.0
+    if (
+        geometry["distance"] <= segment_distance + tolerance
+        and geometry["horizontal_aa"] <= float(cfg["advantage_aspect_max"]) + tolerance
+    ):
+        attack_advantage = _tiered_paper_attack_reward(
+            geometry["horizontal_ata"],
+            geometry["height_angle"],
+            cfg,
+            "attack_reward",
+        )
+
+    reverse = compute_paper_reward_geometry(target_state, own_state)
+    threat = 0.0
+    if (
+        reverse["distance"] <= segment_distance + tolerance
+        and reverse["horizontal_aa"] <= float(cfg["advantage_aspect_max"]) + tolerance
+    ):
+        threat = -_tiered_paper_attack_reward(
+            reverse["horizontal_ata"],
+            reverse["height_angle"],
+            cfg,
+            "threat_penalty",
+        )
+
+    result = {
+        "guide": float(guide),
+        "attack_advantage": float(attack_advantage),
+        "threat": float(threat),
+        "dense_total": float(guide + attack_advantage + threat),
+    }
+    if not np.isfinite(list(result.values())).all():
+        raise FloatingPointError("non-finite paper Eq. (25) local reward")
     return result
