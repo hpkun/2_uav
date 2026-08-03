@@ -11,6 +11,7 @@ from .dynamics import PointMassDynamics
 from .geometry import compute_pairwise_geometry
 from .integrator import RK4Integrator
 from .math_utils import angle_difference
+from .main_experiment_v8 import V8_REWARD_MODES, validate_main_v8_contract
 from .models import Aircraft, AircraftState, ControlCommand, TargetCommand
 from .rewards import (
     madsac_segmented_reward,
@@ -55,6 +56,8 @@ def _make_episode_summary(
     red_alive: int, blue_alive: int,
     outcome: str | None, reason: str | None,
     step_count: int,
+    attack_kill_steps: dict[str, list[int]] | None = None,
+    tactical_window_steps: dict[str, dict[str, int]] | None = None,
     heterogeneous_episode_metrics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build authoritative episode_summary with full death-cause breakdown."""
@@ -125,6 +128,22 @@ def _make_episode_summary(
         "episode_length": step_count,
         "termination_reason": reason,
     }
+    attack_kill_steps = attack_kill_steps or {"red": [], "blue": []}
+    for team in ("red", "blue"):
+        steps = [int(s) for s in attack_kill_steps.get(team, [])]
+        summary[f"{team}_attack_kill_steps"] = steps
+        for index, label in enumerate(("first", "second", "third")):
+            summary[f"{team}_{label}_attack_kill_step"] = steps[index] if len(steps) > index else None
+    tactical_window_steps = tactical_window_steps or {
+        "red": {"r3": 0, "r41": 0, "r42": 0, "attack_window": 0},
+        "blue": {"r3": 0, "r41": 0, "r42": 0, "attack_window": 0},
+    }
+    for team in ("red", "blue"):
+        team_counts = tactical_window_steps.get(team, {})
+        summary[f"{team}_r3_active_steps"] = int(team_counts.get("r3", 0))
+        summary[f"{team}_r41_active_steps"] = int(team_counts.get("r41", 0))
+        summary[f"{team}_r42_active_steps"] = int(team_counts.get("r42", 0))
+        summary[f"{team}_attack_window_steps"] = int(team_counts.get("attack_window", 0))
     summary.update(heterogeneous_episode_metrics or {
         "red_kills_with_shared_observation": 0,
         "blue_kills_with_shared_observation": 0,
@@ -156,6 +175,7 @@ class Homogeneous3v3AirCombatEnv:
 
     def __init__(self, config_path: str | Path = "configs/homogeneous_3v3.yaml") -> None:
         self.config = load_config(config_path)
+        validate_main_v8_contract(self.config)
         sim, act, combat = self.config["simulation"], self.config["action"], self.config["combat"]
         self.scenario = Homogeneous3v3Scenario(self.config)
         self.dynamics = PointMassDynamics(sim["gravity"])
@@ -179,6 +199,8 @@ class Homogeneous3v3AirCombatEnv:
         self._episode_support_coverage_sum: dict[str, float] = {}
         self._episode_support_coverage_step_count: dict[str, int] = {}
         self._episode_shared_kills: dict[str, int] = {}
+        self._episode_attack_kill_steps: dict[str, list[int]] = {}
+        self._episode_tactical_window_steps: dict[str, dict[str, int]] = {}
         self.audit_trace_enabled = False
 
     def _aircraft_by_id(self, aid: str) -> Aircraft:
@@ -195,10 +217,7 @@ class Homogeneous3v3AirCombatEnv:
 
     def _is_v8_reward_mode(self, reward_mode: str | None = None) -> bool:
         mode = reward_mode or self.config["combat"].get("reward_mode", "")
-        return mode in {
-            "task_aligned_paper_segmented_team_v8",
-            "task_aligned_heterogeneous_paper_segmented_team_v8",
-        }
+        return mode in V8_REWARD_MODES
 
     def _direct_visible(self, own: Aircraft, enemy: Aircraft) -> bool:
         if not own.state.alive or not enemy.state.alive or own.team == enemy.team:
@@ -336,6 +355,11 @@ class Homogeneous3v3AirCombatEnv:
         self._episode_support_coverage_sum = {"red": 0.0, "blue": 0.0}
         self._episode_support_coverage_step_count = {"red": 0, "blue": 0}
         self._episode_shared_kills = {"red": 0, "blue": 0}
+        self._episode_attack_kill_steps = {"red": [], "blue": []}
+        self._episode_tactical_window_steps = {
+            "red": {"r3": 0, "r41": 0, "r42": 0, "attack_window": 0},
+            "blue": {"r3": 0, "r41": 0, "r42": 0, "attack_window": 0},
+        }
         observations = self._all_observations()
         heterogeneous_metrics = self._heterogeneous_step_metrics()
         info = {"step_count": 0, "scenario_name": self.scenario.scenario_name,
@@ -532,6 +556,25 @@ class Homogeneous3v3AirCombatEnv:
             if tgt_id is not None:
                 attackers_by_target.setdefault(tgt_id, []).append(atk_id)
 
+        if self._is_v8_reward_mode(reward_mode) and v8_pre_attack_parts is not None:
+            for team in ("red", "blue"):
+                if float(v8_pre_attack_parts[team].get("approach_reward", 0.0)) > 0.0:
+                    self._episode_tactical_window_steps[team]["r3"] += 1
+                if float(v8_pre_attack_parts[team].get("attack_advantage_reward", 0.0)) > 0.0:
+                    self._episode_tactical_window_steps[team]["r41"] += 1
+                if float(v8_pre_attack_parts[team].get("threat_penalty", 0.0)) < 0.0:
+                    self._episode_tactical_window_steps[team]["r42"] += 1
+            if any(
+                tgt_id is not None and self._aircraft_by_id(atk_id).team == "red"
+                for atk_id, tgt_id in attack_intents.items()
+            ):
+                self._episode_tactical_window_steps["red"]["attack_window"] += 1
+            if any(
+                tgt_id is not None and self._aircraft_by_id(atk_id).team == "blue"
+                for atk_id, tgt_id in attack_intents.items()
+            ):
+                self._episode_tactical_window_steps["blue"]["attack_window"] += 1
+
         attack_kills = {"red": 0, "blue": 0}
         shared_kills = {"red": 0, "blue": 0}
         for tgt_id in attackers_by_target:
@@ -542,10 +585,12 @@ class Homogeneous3v3AirCombatEnv:
                     step_death_causes[tgt_id] = DEATH_ATTACK
                 if tgt.team == "blue":
                     attack_kills["red"] += 1
+                    self._episode_attack_kill_steps["red"].append(int(self.step_count))
                     if tgt_id in shared_attackers["red"]:
                         shared_kills["red"] += 1
                 else:
                     attack_kills["blue"] += 1
+                    self._episode_attack_kill_steps["blue"].append(int(self.step_count))
                     if tgt_id in shared_attackers["blue"]:
                         shared_kills["blue"] += 1
 
@@ -668,6 +713,7 @@ class Homogeneous3v3AirCombatEnv:
             episode_summary = _make_episode_summary(
                 self._episode_death_causes, self._episode_attack_kills,
                 red_alive, blue_alive, outcome, reason, self.step_count,
+                self._episode_attack_kill_steps, self._episode_tactical_window_steps,
                 hetero_summary)
 
         red_success = episode_summary["red_complete_elimination_success"] if episode_summary else False

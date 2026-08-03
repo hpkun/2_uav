@@ -24,6 +24,32 @@ def _summarize(records: list[dict[str, Any]], elapsed: float) -> dict[str, Any]:
     rk = sum(r["red_attack_kills"] for r in records)
     bk = sum(r["blue_attack_kills"] for r in records)
     total_steps = sum(r["episode_length"] for r in records)
+    for r in records:
+        if r["red_attack_kills"] != r["blue_attack_deaths"]:
+            raise RuntimeError(f"red attack kill/death mismatch: {r}")
+        if r["blue_attack_kills"] != r["red_attack_deaths"]:
+            raise RuntimeError(f"blue attack kill/death mismatch: {r}")
+
+    def kill_distribution(team: str) -> dict[str, int]:
+        return {str(k): sum(1 for r in records if int(r[f"{team}_attack_kills"]) == k) for k in range(4)}
+
+    def step_values(team: str, label: str) -> list[int]:
+        key = f"{team}_{label}_attack_kill_step"
+        return [int(r[key]) for r in records if r.get(key) is not None and int(r[key]) >= 0]
+
+    def mean_or_none(vals: list[int]) -> float | None:
+        return float(np.mean(vals)) if vals else None
+
+    def median_or_none(vals: list[int]) -> float | None:
+        return float(np.median(vals)) if vals else None
+
+    def neutral_outcome(r: dict[str, Any]) -> str:
+        if r["blue_survivors"] == 0 and r["red_survivors"] > 0:
+            return "red"
+        if r["red_survivors"] == 0 and r["blue_survivors"] > 0:
+            return "blue"
+        return "draw"
+
     base = {
         "episodes": n,
         "red_complete_elimination_success_rate": sum(r["red_complete_elimination_success"] for r in records) / n,
@@ -72,7 +98,38 @@ def _summarize(records: list[dict[str, Any]], elapsed: float) -> dict[str, Any]:
     base.update({
         "red_any_attack_kill_rate": sum(1 for r in records if r.get("red_any_attack_kill")) / n,
         "blue_any_attack_kill_rate": sum(1 for r in records if r.get("blue_any_attack_kill")) / n,
+        "neutral_rule_red_win_rate": sum(1 for r in records if neutral_outcome(r) == "red") / n,
+        "neutral_rule_blue_win_rate": sum(1 for r in records if neutral_outcome(r) == "blue") / n,
+        "neutral_rule_draw_rate": sum(1 for r in records if neutral_outcome(r) == "draw") / n,
     })
+    for team in ("red", "blue"):
+        dist = kill_distribution(team)
+        base[f"{team}_attack_kill_count_distribution"] = dist
+        base[f"{team}_zero_attack_kill_rate"] = dist["0"] / n
+        base[f"{team}_at_least_one_attack_kill_rate"] = sum(int(r[f"{team}_attack_kills"]) >= 1 for r in records) / n
+        base[f"{team}_at_least_two_attack_kill_rate"] = sum(int(r[f"{team}_attack_kills"]) >= 2 for r in records) / n
+        base[f"{team}_three_attack_kill_rate"] = dist["3"] / n
+        first = step_values(team, "first")
+        second = step_values(team, "second")
+        third = step_values(team, "third")
+        base[f"mean_{team}_first_attack_kill_step"] = mean_or_none(first)
+        base[f"median_{team}_first_attack_kill_step"] = median_or_none(first)
+        base[f"mean_{team}_second_attack_kill_step"] = mean_or_none(second)
+        base[f"mean_{team}_third_attack_kill_step"] = mean_or_none(third)
+        remaining = [
+            int(r["episode_length"]) - int(r[f"{team}_first_attack_kill_step"])
+            for r in records
+            if r.get(f"{team}_first_attack_kill_step") is not None and int(r[f"{team}_first_attack_kill_step"]) >= 0
+        ]
+        base[f"mean_{team}_remaining_steps_after_first_kill"] = mean_or_none(remaining)
+        denom = total_steps if total_steps > 0 else 1
+        for metric in ("r3", "r41", "r42"):
+            base[f"{team}_{metric}_active_step_rate"] = (
+                sum(int(r.get(f"{team}_{metric}_active_steps", 0)) for r in records) / denom
+            )
+        base[f"{team}_attack_window_step_rate"] = (
+            sum(int(r.get(f"{team}_attack_window_steps", 0)) for r in records) / denom
+        )
     return base
 
 
@@ -138,6 +195,20 @@ def evaluate_happo_fixed_blue_3v3(
                     "blue_support_survived": bool(result.episode_blue_support_survived[i]),
                     "red_any_attack_kill": bool(result.episode_red_any_attack_kill[i]),
                     "blue_any_attack_kill": bool(result.episode_blue_any_attack_kill[i]),
+                    "red_first_attack_kill_step": None if int(result.episode_red_first_attack_kill_step[i]) < 0 else int(result.episode_red_first_attack_kill_step[i]),
+                    "blue_first_attack_kill_step": None if int(result.episode_blue_first_attack_kill_step[i]) < 0 else int(result.episode_blue_first_attack_kill_step[i]),
+                    "red_second_attack_kill_step": None if int(result.episode_red_second_attack_kill_step[i]) < 0 else int(result.episode_red_second_attack_kill_step[i]),
+                    "blue_second_attack_kill_step": None if int(result.episode_blue_second_attack_kill_step[i]) < 0 else int(result.episode_blue_second_attack_kill_step[i]),
+                    "red_third_attack_kill_step": None if int(result.episode_red_third_attack_kill_step[i]) < 0 else int(result.episode_red_third_attack_kill_step[i]),
+                    "blue_third_attack_kill_step": None if int(result.episode_blue_third_attack_kill_step[i]) < 0 else int(result.episode_blue_third_attack_kill_step[i]),
+                    "red_r3_active_steps": int(result.episode_red_r3_active_steps[i]),
+                    "blue_r3_active_steps": int(result.episode_blue_r3_active_steps[i]),
+                    "red_r41_active_steps": int(result.episode_red_r41_active_steps[i]),
+                    "blue_r41_active_steps": int(result.episode_blue_r41_active_steps[i]),
+                    "red_r42_active_steps": int(result.episode_red_r42_active_steps[i]),
+                    "blue_r42_active_steps": int(result.episode_blue_r42_active_steps[i]),
+                    "red_attack_window_steps": int(result.episode_red_attack_window_steps[i]),
+                    "blue_attack_window_steps": int(result.episode_blue_attack_window_steps[i]),
                     "episode_length": int(result.episode_length[i]),
                     "termination_reason": decode_3v3_termination_reason(int(result.termination_reason_codes[i])),
                     "environment_outcome": decode_3v3_outcome(int(result.outcome_codes[i])),

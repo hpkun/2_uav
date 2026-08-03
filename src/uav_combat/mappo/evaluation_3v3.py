@@ -35,6 +35,30 @@ def _summarize(summaries, elapsed):
                 s[f"{team}_boundary_altitude_deaths"] + s[f"{team}_boundary_xy_deaths"]
             ):
                 raise RuntimeError(f"Boundary death mismatch for {team}: {s}")
+            if s[f"{team}_attack_kills"] != s[f"{'blue' if team == 'red' else 'red'}_attack_deaths"]:
+                raise RuntimeError(f"Attack kill/death mismatch for {team}: {s}")
+    total_episode_steps = sum(s["episode_length"] for s in summaries)
+
+    def kill_distribution(team: str) -> dict[str, int]:
+        return {str(k): sum(1 for s in summaries if int(s[f"{team}_attack_kills"]) == k) for k in range(4)}
+
+    def step_values(team: str, label: str) -> list[int]:
+        key = f"{team}_{label}_attack_kill_step"
+        return [int(s[key]) for s in summaries if s.get(key) is not None and int(s[key]) >= 0]
+
+    def mean_or_none(vals: list[int]) -> float | None:
+        return float(np.mean(vals)) if vals else None
+
+    def median_or_none(vals: list[int]) -> float | None:
+        return float(np.median(vals)) if vals else None
+
+    def neutral_outcome(s: dict[str, Any]) -> str:
+        if s["blue_survivors"] == 0 and s["red_survivors"] > 0:
+            return "red"
+        if s["red_survivors"] == 0 and s["blue_survivors"] > 0:
+            return "blue"
+        return "draw"
+
     base = {
         "episodes": n,
         "red_complete_elimination_success_rate": r("red_complete_elimination_success"),
@@ -77,7 +101,35 @@ def _summarize(summaries, elapsed):
     base.update({
         "red_any_attack_kill_rate": sum(1 for s in summaries if s.get("red_any_attack_kill")) / n,
         "blue_any_attack_kill_rate": sum(1 for s in summaries if s.get("blue_any_attack_kill")) / n,
+        "neutral_rule_red_win_rate": sum(1 for s in summaries if neutral_outcome(s) == "red") / n,
+        "neutral_rule_blue_win_rate": sum(1 for s in summaries if neutral_outcome(s) == "blue") / n,
+        "neutral_rule_draw_rate": sum(1 for s in summaries if neutral_outcome(s) == "draw") / n,
     })
+    for team in ("red", "blue"):
+        dist = kill_distribution(team)
+        base[f"{team}_attack_kill_count_distribution"] = dist
+        base[f"{team}_zero_attack_kill_rate"] = dist["0"] / n
+        base[f"{team}_at_least_one_attack_kill_rate"] = sum(int(s[f"{team}_attack_kills"]) >= 1 for s in summaries) / n
+        base[f"{team}_at_least_two_attack_kill_rate"] = sum(int(s[f"{team}_attack_kills"]) >= 2 for s in summaries) / n
+        base[f"{team}_three_attack_kill_rate"] = dist["3"] / n
+        first = step_values(team, "first")
+        second = step_values(team, "second")
+        third = step_values(team, "third")
+        base[f"mean_{team}_first_attack_kill_step"] = mean_or_none(first)
+        base[f"median_{team}_first_attack_kill_step"] = median_or_none(first)
+        base[f"mean_{team}_second_attack_kill_step"] = mean_or_none(second)
+        base[f"mean_{team}_third_attack_kill_step"] = mean_or_none(third)
+        remaining = [
+            int(s["episode_length"]) - int(s[f"{team}_first_attack_kill_step"])
+            for s in summaries
+            if s.get(f"{team}_first_attack_kill_step") is not None and int(s[f"{team}_first_attack_kill_step"]) >= 0
+        ]
+        base[f"mean_{team}_remaining_steps_after_first_kill"] = mean_or_none(remaining)
+        denom = total_episode_steps if total_episode_steps > 0 else 1
+        for metric in ("r3", "r41", "r42", "attack_window"):
+            base[f"{team}_{metric}_active_step_rate" if metric != "attack_window" else f"{team}_attack_window_step_rate"] = (
+                sum(int(s.get(f"{team}_{metric}_active_steps" if metric != "attack_window" else f"{team}_attack_window_steps", 0)) for s in summaries) / denom
+            )
     return base
 
 
@@ -138,6 +190,20 @@ def evaluate_mappo_fixed_blue_3v3(
                         "environment_outcome": decode_3v3_outcome(int(r.outcome_codes[gi])),
                         "red_any_attack_kill": bool(r.episode_red_any_attack_kill[gi]),
                         "blue_any_attack_kill": bool(r.episode_blue_any_attack_kill[gi]),
+                        "red_first_attack_kill_step": None if int(r.episode_red_first_attack_kill_step[gi]) < 0 else int(r.episode_red_first_attack_kill_step[gi]),
+                        "blue_first_attack_kill_step": None if int(r.episode_blue_first_attack_kill_step[gi]) < 0 else int(r.episode_blue_first_attack_kill_step[gi]),
+                        "red_second_attack_kill_step": None if int(r.episode_red_second_attack_kill_step[gi]) < 0 else int(r.episode_red_second_attack_kill_step[gi]),
+                        "blue_second_attack_kill_step": None if int(r.episode_blue_second_attack_kill_step[gi]) < 0 else int(r.episode_blue_second_attack_kill_step[gi]),
+                        "red_third_attack_kill_step": None if int(r.episode_red_third_attack_kill_step[gi]) < 0 else int(r.episode_red_third_attack_kill_step[gi]),
+                        "blue_third_attack_kill_step": None if int(r.episode_blue_third_attack_kill_step[gi]) < 0 else int(r.episode_blue_third_attack_kill_step[gi]),
+                        "red_r3_active_steps": int(r.episode_red_r3_active_steps[gi]),
+                        "blue_r3_active_steps": int(r.episode_blue_r3_active_steps[gi]),
+                        "red_r41_active_steps": int(r.episode_red_r41_active_steps[gi]),
+                        "blue_r41_active_steps": int(r.episode_blue_r41_active_steps[gi]),
+                        "red_r42_active_steps": int(r.episode_red_r42_active_steps[gi]),
+                        "blue_r42_active_steps": int(r.episode_blue_r42_active_steps[gi]),
+                        "red_attack_window_steps": int(r.episode_red_attack_window_steps[gi]),
+                        "blue_attack_window_steps": int(r.episode_blue_attack_window_steps[gi]),
                     })
                 use_seed = next_seed; next_seed += 1
                 no, ng, na = vec_env.reset_at(np.array([gi], dtype=np.int32), [{"seed": use_seed}])
@@ -204,6 +270,20 @@ def evaluate_rule_matchup_3v3(
                         "environment_outcome": decode_3v3_outcome(int(r.outcome_codes[gi])),
                         "red_any_attack_kill": bool(r.episode_red_any_attack_kill[gi]),
                         "blue_any_attack_kill": bool(r.episode_blue_any_attack_kill[gi]),
+                        "red_first_attack_kill_step": None if int(r.episode_red_first_attack_kill_step[gi]) < 0 else int(r.episode_red_first_attack_kill_step[gi]),
+                        "blue_first_attack_kill_step": None if int(r.episode_blue_first_attack_kill_step[gi]) < 0 else int(r.episode_blue_first_attack_kill_step[gi]),
+                        "red_second_attack_kill_step": None if int(r.episode_red_second_attack_kill_step[gi]) < 0 else int(r.episode_red_second_attack_kill_step[gi]),
+                        "blue_second_attack_kill_step": None if int(r.episode_blue_second_attack_kill_step[gi]) < 0 else int(r.episode_blue_second_attack_kill_step[gi]),
+                        "red_third_attack_kill_step": None if int(r.episode_red_third_attack_kill_step[gi]) < 0 else int(r.episode_red_third_attack_kill_step[gi]),
+                        "blue_third_attack_kill_step": None if int(r.episode_blue_third_attack_kill_step[gi]) < 0 else int(r.episode_blue_third_attack_kill_step[gi]),
+                        "red_r3_active_steps": int(r.episode_red_r3_active_steps[gi]),
+                        "blue_r3_active_steps": int(r.episode_blue_r3_active_steps[gi]),
+                        "red_r41_active_steps": int(r.episode_red_r41_active_steps[gi]),
+                        "blue_r41_active_steps": int(r.episode_blue_r41_active_steps[gi]),
+                        "red_r42_active_steps": int(r.episode_red_r42_active_steps[gi]),
+                        "blue_r42_active_steps": int(r.episode_blue_r42_active_steps[gi]),
+                        "red_attack_window_steps": int(r.episode_red_attack_window_steps[gi]),
+                        "blue_attack_window_steps": int(r.episode_blue_attack_window_steps[gi]),
                     })
                 use_seed = next_seed; next_seed += 1
                 no, ng, na = vec_env.reset_at(np.array([gi], dtype=np.int32), [{"seed": use_seed}])

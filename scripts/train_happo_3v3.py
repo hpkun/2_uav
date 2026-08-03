@@ -21,11 +21,14 @@ from uav_combat.happo.trainer_3v3 import (
     compute_best_score,
     compute_best_score_fields,
 )
-
-V8_REWARD_MODES = {
-    "task_aligned_paper_segmented_team_v8",
-    "task_aligned_heterogeneous_paper_segmented_team_v8",
-}
+from uav_combat.main_experiment_v8 import (
+    best_score_fields_for_config,
+    best_score_values_for_config,
+    build_main_v8_contract_metadata,
+    compute_best_score_for_config,
+    filter_public_metrics_for_config,
+    is_main_v8_config,
+)
 
 
 class Tee:
@@ -87,14 +90,6 @@ def load_config(args) -> dict:
         if value is not None:
             cfg[section][key] = value
     return cfg
-
-
-def include_collision_in_best_score(env_config_path: str) -> bool:
-    with open(env_config_path, encoding="utf-8") as f:
-        env_cfg = yaml.safe_load(f)
-    mode = env_cfg.get("combat", {}).get("reward_mode")
-    collision_distance = float(env_cfg.get("battlefield", {}).get("collision_distance", 0.0))
-    return not (mode in V8_REWARD_MODES and collision_distance <= 0.0)
 
 
 def next_strict_milestone(current: int, interval: int) -> int:
@@ -160,7 +155,8 @@ def main() -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
     trainer = HAPPO3v3Trainer(args.env_config, cfg)
-    include_collision_best_score = include_collision_in_best_score(args.env_config)
+    env_contract_config = trainer.env_contract_config
+    environment_contract = build_main_v8_contract_metadata(env_contract_config) if is_main_v8_config(env_contract_config) else None
     if args.resume:
         trainer.load_checkpoint(args.resume)
         print(f"resumed_from={args.resume}", flush=True)
@@ -188,12 +184,12 @@ def main() -> None:
             trainer.actors, args.env_config, quick_eps, trainer.num_envs,
             trainer.num_env_workers, trainer.device, seed + 100000,
         )
-        (eval_dir / "evaluation_initial.json").write_text(json.dumps(initial_eval, indent=2, default=str))
-        trainer.best_score = compute_best_score(initial_eval, include_collision=include_collision_best_score)
+        (eval_dir / "evaluation_initial.json").write_text(json.dumps(filter_public_metrics_for_config(initial_eval, env_contract_config), indent=2, default=str))
+        trainer.best_score = compute_best_score_for_config(initial_eval, env_contract_config)
         trainer.best_evaluation = initial_eval
         trainer.best_checkpoint_name = "initial.pt"
         trainer.save_checkpoint(ckpt_dir / "best.pt")
-        (eval_dir / "evaluation_best.json").write_text(json.dumps(initial_eval, indent=2, default=str))
+        (eval_dir / "evaluation_best.json").write_text(json.dumps(filter_public_metrics_for_config(initial_eval, env_contract_config), indent=2, default=str))
 
     try:
         while trainer.env_steps < total_steps:
@@ -221,16 +217,16 @@ def main() -> None:
                     trainer.num_env_workers, trainer.device, seed + 100000,
                 )
                 (eval_dir / f"evaluation_step_{trainer.env_steps:06d}.json").write_text(
-                    json.dumps(ev, indent=2, default=str)
+                    json.dumps(filter_public_metrics_for_config(ev, env_contract_config), indent=2, default=str)
                 )
-                score = compute_best_score(ev, include_collision=include_collision_best_score)
+                score = compute_best_score_for_config(ev, env_contract_config)
                 trainer.evaluation_history.append({"env_steps": trainer.env_steps, "score": list(score), **ev})
                 if trainer.best_score is None or score > trainer.best_score:
                     trainer.best_score = score
                     trainer.best_evaluation = ev
                     trainer.best_checkpoint_name = f"step_{trainer.env_steps:06d}.pt"
                     trainer.save_checkpoint(ckpt_dir / "best.pt")
-                    (eval_dir / "evaluation_best.json").write_text(json.dumps(ev, indent=2, default=str))
+                    (eval_dir / "evaluation_best.json").write_text(json.dumps(filter_public_metrics_for_config(ev, env_contract_config), indent=2, default=str))
                 next_eval += eval_interval
             if trainer.env_steps >= next_ckpt:
                 trainer.save_checkpoint(ckpt_dir / f"step_{trainer.env_steps:06d}.pt")
@@ -243,22 +239,35 @@ def main() -> None:
         trainer.actors, args.env_config, int(cfg["evaluation"]["episodes"]), trainer.num_envs,
         trainer.num_env_workers, trainer.device, seed + 100000,
     )
-    (eval_dir / "evaluation_final.json").write_text(json.dumps(final_eval, indent=2, default=str))
-    final_score = compute_best_score(final_eval, include_collision=include_collision_best_score)
+    (eval_dir / "evaluation_final.json").write_text(json.dumps(filter_public_metrics_for_config(final_eval, env_contract_config), indent=2, default=str))
+    final_score = compute_best_score_for_config(final_eval, env_contract_config)
     if trainer.best_score is None or final_score > trainer.best_score:
         trainer.best_score = final_score
         trainer.best_evaluation = final_eval
         trainer.best_checkpoint_name = "final.pt"
         trainer.save_checkpoint(ckpt_dir / "best.pt")
-        (eval_dir / "evaluation_best.json").write_text(json.dumps(final_eval, indent=2, default=str))
+        (eval_dir / "evaluation_best.json").write_text(json.dumps(filter_public_metrics_for_config(final_eval, env_contract_config), indent=2, default=str))
     trainer.save_checkpoint(ckpt_dir / "final.pt")
     trainer.save_checkpoint(ckpt_dir / "latest.pt")
+    restored_ok = None
+    if args.smoke:
+        restored = HAPPO3v3Trainer(args.env_config, cfg)
+        try:
+            restored.load_checkpoint(ckpt_dir / "final.pt")
+            restored.collect_rollout()
+            restored_ok = restored.env_steps == trainer.env_steps + restored.rollout_steps * restored.num_envs
+        finally:
+            restored.close()
+        if not restored_ok:
+            raise AssertionError("smoke continuation failed")
     if rows:
         keys = list(dict.fromkeys(k for row in rows for k in row))
         with (output / "training_metrics.csv").open("w", newline="", encoding="utf-8") as f:
+            public_rows = [filter_public_metrics_for_config(row, env_contract_config) for row in rows]
+            keys = list(dict.fromkeys(k for row in public_rows for k in row))
             writer = csv.DictWriter(f, fieldnames=keys)
             writer.writeheader()
-            writer.writerows(rows)
+            writer.writerows(public_rows)
 
     summary = {
         "checkpoint_family": CHECKPOINT_FAMILY_HAPPO_3V3,
@@ -267,13 +276,16 @@ def main() -> None:
         "actual_environment_steps": trainer.env_steps,
         "updates": trainer.update_count,
         "rule_policy_mapping_modes": trainer.rule_policy_mapping_modes,
+        "environment_contract": environment_contract,
         "environment_metadata": trainer.environment_metadata,
         "best_checkpoint": trainer.best_checkpoint_name,
         "best_score": list(trainer.best_score) if trainer.best_score else None,
-        "best_score_fields": list(compute_best_score_fields(trainer.best_evaluation, include_collision=include_collision_best_score).keys()) if trainer.best_evaluation else None,
-        "best_score_values": compute_best_score_fields(trainer.best_evaluation, include_collision=include_collision_best_score) if trainer.best_evaluation else None,
-        "final_evaluation": final_eval,
-        "final_metrics": rows[-1] if rows else {},
+        "best_score_schema": list(best_score_fields_for_config(env_contract_config)),
+        "best_score_fields": list(best_score_fields_for_config(env_contract_config)) if trainer.best_evaluation else None,
+        "best_score_values": best_score_values_for_config(trainer.best_evaluation, env_contract_config) if trainer.best_evaluation else None,
+        "final_evaluation": filter_public_metrics_for_config(final_eval, env_contract_config),
+        "final_metrics": filter_public_metrics_for_config(rows[-1], env_contract_config) if rows else {},
+        "smoke_restore_and_continue_ok": restored_ok,
         "total_seconds": time.perf_counter() - start,
     }
     (output / "run_summary.json").write_text(json.dumps(summary, indent=2, default=str))

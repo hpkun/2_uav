@@ -13,6 +13,11 @@ from torch import nn
 from ..environment_3v3 import GS_DIM, OBS_DIM
 from ..config import load_config
 from ..mappo.trainer_3v3 import compute_best_score, compute_best_score_fields, linear_schedule, resolve_device
+from ..main_experiment_v8 import (
+    best_score_fields_for_config,
+    compute_best_score_for_config,
+    infer_best_score_schema_for_checkpoint,
+)
 from ..mappo.vector_env_3v3 import (
     RED_REWARD_COMPONENT_KEYS_3V3,
     VectorStepResult3v3,
@@ -125,6 +130,8 @@ class HAPPO3v3Trainer:
 
     def __init__(self, env_config: str | Path, config: dict[str, Any]) -> None:
         self.env_config = str(env_config)
+        self.env_contract_config = load_config(self.env_config)
+        self.best_score_schema = best_score_fields_for_config(self.env_contract_config)
         self.config = deepcopy(config)
         t, n, e = self.config["training"], self.config["network"], self.config["experiment"]
         if t.get("training_mode") != "fixed_rule_blue_3v3_happo":
@@ -281,6 +288,20 @@ class HAPPO3v3Trainer:
                         "blue_support_survived": bool(r.episode_blue_support_survived[idx]),
                         "red_any_attack_kill": bool(r.episode_red_any_attack_kill[idx]),
                         "blue_any_attack_kill": bool(r.episode_blue_any_attack_kill[idx]),
+                        "red_first_attack_kill_step": None if int(r.episode_red_first_attack_kill_step[idx]) < 0 else int(r.episode_red_first_attack_kill_step[idx]),
+                        "blue_first_attack_kill_step": None if int(r.episode_blue_first_attack_kill_step[idx]) < 0 else int(r.episode_blue_first_attack_kill_step[idx]),
+                        "red_second_attack_kill_step": None if int(r.episode_red_second_attack_kill_step[idx]) < 0 else int(r.episode_red_second_attack_kill_step[idx]),
+                        "blue_second_attack_kill_step": None if int(r.episode_blue_second_attack_kill_step[idx]) < 0 else int(r.episode_blue_second_attack_kill_step[idx]),
+                        "red_third_attack_kill_step": None if int(r.episode_red_third_attack_kill_step[idx]) < 0 else int(r.episode_red_third_attack_kill_step[idx]),
+                        "blue_third_attack_kill_step": None if int(r.episode_blue_third_attack_kill_step[idx]) < 0 else int(r.episode_blue_third_attack_kill_step[idx]),
+                        "red_r3_active_steps": int(r.episode_red_r3_active_steps[idx]),
+                        "blue_r3_active_steps": int(r.episode_blue_r3_active_steps[idx]),
+                        "red_r41_active_steps": int(r.episode_red_r41_active_steps[idx]),
+                        "blue_r41_active_steps": int(r.episode_blue_r41_active_steps[idx]),
+                        "red_r42_active_steps": int(r.episode_red_r42_active_steps[idx]),
+                        "blue_r42_active_steps": int(r.episode_blue_r42_active_steps[idx]),
+                        "red_attack_window_steps": int(r.episode_red_attack_window_steps[idx]),
+                        "blue_attack_window_steps": int(r.episode_blue_attack_window_steps[idx]),
                     }
                     validate_episode_accounting_3v3(rec, int(idx))
                     completed.append(rec)
@@ -532,6 +553,7 @@ class HAPPO3v3Trainer:
             "update_count": self.update_count,
             "last_agent_order": self.last_agent_order,
             "best_score": self.best_score,
+            "best_score_schema": list(self.best_score_schema),
             "best_evaluation": self.best_evaluation,
             "best_checkpoint_name": self.best_checkpoint_name,
             "evaluation_history": self.evaluation_history,
@@ -559,8 +581,14 @@ class HAPPO3v3Trainer:
         self.vector_steps = int(ckpt["vector_steps"])
         self.update_count = int(ckpt["update_count"])
         self.last_agent_order = [int(v) for v in ckpt.get("last_agent_order", [])]
+        self.best_score_schema = infer_best_score_schema_for_checkpoint(ckpt, self.env_contract_config)
         self.best_score = ckpt.get("best_score")
         self.best_evaluation = ckpt.get("best_evaluation")
+        if self.best_evaluation is not None:
+            current_schema = best_score_fields_for_config(self.env_contract_config)
+            if tuple(self.best_score_schema) != tuple(current_schema) or self.best_score is None:
+                self.best_score_schema = current_schema
+                self.best_score = compute_best_score_for_config(self.best_evaluation, self.env_contract_config)
         self.best_checkpoint_name = ckpt.get("best_checkpoint_name")
         self.evaluation_history = ckpt.get("evaluation_history", [])
         self.reset_environments()

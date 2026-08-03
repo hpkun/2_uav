@@ -24,6 +24,13 @@ from uav_combat.happo.trainer_3v3 import HAPPO3v3Trainer
 from uav_combat.mappo.evaluation_3v3 import _summarize as summarize_mappo
 from uav_combat.mappo.trainer_3v3 import FixedBlue3v3MAPPOTrainer, compute_best_score, compute_best_score_fields
 from uav_combat.mappo.vector_env_3v3 import LocalCombatVectorEnv3v3, SubprocessCombatVectorEnv3v3
+from uav_combat.main_experiment_v8 import (
+    best_score_fields_for_config,
+    build_main_v8_contract_metadata,
+    compute_best_score_for_config,
+    filter_public_metrics_for_config,
+    validate_main_v8_contract,
+)
 from uav_combat.models import AircraftState
 from uav_combat.rewards import compute_paper_reward_geometry, paper_equation25_local_reward
 from uav_combat.rule_policy_3v3 import make_team_rule_policy_3v3
@@ -146,6 +153,18 @@ def test_v8_configs_are_paper_segmented_and_old_configs_unchanged():
     assert load_config(V4)["battlefield"]["collision_distance"] > 0.0
     assert load_config(V7)["combat"]["reward_mode"] == "paper_segmented_team_v4"
     assert load_config(V7)["battlefield"]["collision_distance"] > 0.0
+    validate_main_v8_contract(homo)
+    validate_main_v8_contract(hetero)
+
+
+def test_v8_contract_rejects_positive_collision_distance(tmp_path):
+    path = _rewrite_config(
+        tmp_path,
+        HOMO_V8,
+        lambda cfg: cfg["battlefield"].update({"collision_distance": 30.0}),
+    )
+    with pytest.raises(ValueError, match="collision_distance == 0.0"):
+        Homogeneous3v3AirCombatEnv(path)
 
 
 def test_old_v8_continuous_aliases_are_rejected(tmp_path):
@@ -309,13 +328,78 @@ def test_v8_collision_disabled_death_ledger_contains_only_attack_and_boundary_ca
     assert info["reward_components"]["blue_collision_death_penalty"] == 0.0
 
 
-def test_positive_collision_distance_still_enables_historical_collision_behavior(tmp_path):
+def test_v8_attack_kill_steps_record_simultaneous_unique_target_deaths(tmp_path):
     path = _rewrite_config(
         tmp_path,
         HOMO_V8,
-        lambda cfg: cfg["battlefield"].update({"collision_distance": 30.0}),
+        lambda cfg: cfg["simulation"].update({"max_steps": 1}),
     )
     env = Homogeneous3v3AirCombatEnv(path)
+    env.reset(0)
+    _set(env, "red_0", 0.0, 0.0, psi=0.0)
+    _set(env, "red_1", 0.0, 1000.0, psi=0.0)
+    _set(env, "red_2", 0.0, -1000.0, psi=0.0)
+    _set(env, "blue_0", 500.0, 0.0, psi=0.0)
+    _set(env, "blue_1", 500.0, 1000.0, psi=0.0)
+    _set(env, "blue_2", 9000.0, -1000.0, psi=0.0)
+
+    _, _, _, truncated, info = env.step(_zero_actions(env))
+
+    assert truncated
+    summary = info["episode_summary"]
+    assert summary["red_attack_kill_steps"] == [1, 1]
+    assert summary["red_first_attack_kill_step"] == 1
+    assert summary["red_second_attack_kill_step"] == 1
+    assert summary["red_third_attack_kill_step"] is None
+    assert summary["red_attack_window_steps"] == 1
+    assert summary["red_r41_active_steps"] == 1
+
+
+def test_v8_multiple_attackers_same_target_count_one_kill_step_and_reset_clears(tmp_path):
+    path = _rewrite_config(
+        tmp_path,
+        HOMO_V8,
+        lambda cfg: cfg["simulation"].update({"max_steps": 1}),
+    )
+    env = Homogeneous3v3AirCombatEnv(path)
+    env.reset(0)
+    _set(env, "red_0", 0.0, 0.0, psi=0.0)
+    _set(env, "red_1", 0.0, 100.0, psi=0.0)
+    _set(env, "red_2", 0.0, -1000.0, psi=0.0)
+    _set(env, "blue_0", 500.0, 0.0, psi=0.0)
+    _set(env, "blue_1", 9000.0, 1000.0, psi=0.0)
+    _set(env, "blue_2", 9000.0, -1000.0, psi=0.0)
+
+    _, _, _, _, info = env.step(_zero_actions(env))
+
+    summary = info["episode_summary"]
+    assert summary["red_attack_kills"] == 1
+    assert summary["red_attack_kill_steps"] == [1]
+    env.reset(1)
+    assert env._episode_attack_kill_steps == {"red": [], "blue": []}
+    assert env._episode_tactical_window_steps["red"]["attack_window"] == 0
+
+
+def test_vector_env_missing_kill_timing_uses_minus_one(tmp_path):
+    path = _rewrite_config(
+        tmp_path,
+        HOMO_V8,
+        lambda cfg: cfg["simulation"].update({"max_steps": 1}),
+    )
+    vec = LocalCombatVectorEnv3v3(path, 1)
+    try:
+        vec.reset([{"seed": 0}])
+        result = vec.step_rules(np.asarray([[0, 0]], dtype=np.int8))
+        assert result.episode_valid[0]
+        assert int(result.episode_red_first_attack_kill_step[0]) == -1
+        assert int(result.episode_blue_first_attack_kill_step[0]) == -1
+        assert result.episode_red_r3_active_steps.dtype == np.int32
+    finally:
+        vec.close()
+
+
+def test_positive_collision_distance_still_enables_historical_collision_behavior(tmp_path):
+    env = Homogeneous3v3AirCombatEnv(V4)
     env.reset(0)
     _set(env, "red_0", 0.0, 0.0, psi=0.0)
     _set(env, "red_1", 0.0, 0.0, psi=0.0)
@@ -454,6 +538,25 @@ def test_v8_best_score_fields_exclude_collision_term():
         "neg_max_steps_rate",
         "neg_mean_episode_length",
     )
+    cfg = load_config(HOMO_V8)
+    assert best_score_fields_for_config(cfg) == tuple(fields)
+    assert compute_best_score_for_config(summary, cfg) == tuple(fields.values())
+
+
+def test_v8_public_metrics_filter_collision_and_environment_contract():
+    cfg = load_config(HOMO_V8)
+    metrics = {
+        "mean_red_collision_deaths": 0.0,
+        "nested": {"blue_collision_deaths": 0, "mean_red_attack_kills": 1.0},
+    }
+    filtered = filter_public_metrics_for_config(metrics, cfg)
+    assert "mean_red_collision_deaths" not in filtered
+    assert "blue_collision_deaths" not in filtered["nested"]
+    assert filtered["nested"]["mean_red_attack_kills"] == 1.0
+    contract = build_main_v8_contract_metadata(cfg)
+    assert contract["collision_enabled"] is False
+    assert contract["allowed_death_causes"] == ["ATTACK", "BOUNDARY_ALTITUDE", "BOUNDARY_XY"]
+    assert contract["observation_dim"] == 68
 
 
 def test_mappo_happo_and_heterogeneous_happo_trainers_construct(tmp_path):

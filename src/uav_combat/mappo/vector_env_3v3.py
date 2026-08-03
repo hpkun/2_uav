@@ -119,6 +119,20 @@ class VectorStepResult3v3(NamedTuple):
     episode_blue_support_survived: np.ndarray         # [N] bool
     episode_red_any_attack_kill: np.ndarray           # [N] bool
     episode_blue_any_attack_kill: np.ndarray          # [N] bool
+    episode_red_first_attack_kill_step: np.ndarray    # [N] int32, -1 if missing
+    episode_blue_first_attack_kill_step: np.ndarray   # [N] int32, -1 if missing
+    episode_red_second_attack_kill_step: np.ndarray   # [N] int32, -1 if missing
+    episode_blue_second_attack_kill_step: np.ndarray  # [N] int32, -1 if missing
+    episode_red_third_attack_kill_step: np.ndarray    # [N] int32, -1 if missing
+    episode_blue_third_attack_kill_step: np.ndarray   # [N] int32, -1 if missing
+    episode_red_r3_active_steps: np.ndarray           # [N] int32
+    episode_blue_r3_active_steps: np.ndarray          # [N] int32
+    episode_red_r41_active_steps: np.ndarray          # [N] int32
+    episode_blue_r41_active_steps: np.ndarray         # [N] int32
+    episode_red_r42_active_steps: np.ndarray          # [N] int32
+    episode_blue_r42_active_steps: np.ndarray         # [N] int32
+    episode_red_attack_window_steps: np.ndarray       # [N] int32
+    episode_blue_attack_window_steps: np.ndarray      # [N] int32
 
 
 def _extract_diagnostics_3v3(diag):
@@ -189,6 +203,14 @@ def _episode_fields(info, L, i):
     arrays["ep_bsup"][idx] = es.get("blue_support_survived", False)
     arrays["ep_raak"][idx] = es.get("red_any_attack_kill", False)
     arrays["ep_baak"][idx] = es.get("blue_any_attack_kill", False)
+    for team_prefix, team in (("r", "red"), ("b", "blue")):
+        for label in ("first", "second", "third"):
+            value = es.get(f"{team}_{label}_attack_kill_step")
+            arrays[f"ep_{team_prefix}_{label}_kill_step"][idx] = -1 if value is None else int(value)
+        arrays[f"ep_{team_prefix}_r3_steps"][idx] = int(es.get(f"{team}_r3_active_steps", 0))
+        arrays[f"ep_{team_prefix}_r41_steps"][idx] = int(es.get(f"{team}_r41_active_steps", 0))
+        arrays[f"ep_{team_prefix}_r42_steps"][idx] = int(es.get(f"{team}_r42_active_steps", 0))
+        arrays[f"ep_{team_prefix}_attack_window_steps"][idx] = int(es.get(f"{team}_attack_window_steps", 0))
 
 
 def _make_episode_arrays(L):
@@ -207,6 +229,17 @@ def _make_episode_arrays(L):
         "ep_rcov": np.zeros(L, dtype=np.float32), "ep_bcov": np.zeros(L, dtype=np.float32),
         "ep_rsup": np.zeros(L, dtype=bool), "ep_bsup": np.zeros(L, dtype=bool),
         "ep_raak": np.zeros(L, dtype=bool), "ep_baak": np.zeros(L, dtype=bool),
+        "ep_r_first_kill_step": np.full(L, -1, dtype=np.int32),
+        "ep_b_first_kill_step": np.full(L, -1, dtype=np.int32),
+        "ep_r_second_kill_step": np.full(L, -1, dtype=np.int32),
+        "ep_b_second_kill_step": np.full(L, -1, dtype=np.int32),
+        "ep_r_third_kill_step": np.full(L, -1, dtype=np.int32),
+        "ep_b_third_kill_step": np.full(L, -1, dtype=np.int32),
+        "ep_r_r3_steps": np.zeros(L, dtype=np.int32), "ep_b_r3_steps": np.zeros(L, dtype=np.int32),
+        "ep_r_r41_steps": np.zeros(L, dtype=np.int32), "ep_b_r41_steps": np.zeros(L, dtype=np.int32),
+        "ep_r_r42_steps": np.zeros(L, dtype=np.int32), "ep_b_r42_steps": np.zeros(L, dtype=np.int32),
+        "ep_r_attack_window_steps": np.zeros(L, dtype=np.int32),
+        "ep_b_attack_window_steps": np.zeros(L, dtype=np.int32),
     }
 
 
@@ -256,6 +289,20 @@ def _build_result(L, obs, gs, team_rew, term, trunc, am, atg, dc, tac,
         episode_blue_support_survived=ep_arrs["ep_bsup"],
         episode_red_any_attack_kill=ep_arrs["ep_raak"],
         episode_blue_any_attack_kill=ep_arrs["ep_baak"],
+        episode_red_first_attack_kill_step=ep_arrs["ep_r_first_kill_step"],
+        episode_blue_first_attack_kill_step=ep_arrs["ep_b_first_kill_step"],
+        episode_red_second_attack_kill_step=ep_arrs["ep_r_second_kill_step"],
+        episode_blue_second_attack_kill_step=ep_arrs["ep_b_second_kill_step"],
+        episode_red_third_attack_kill_step=ep_arrs["ep_r_third_kill_step"],
+        episode_blue_third_attack_kill_step=ep_arrs["ep_b_third_kill_step"],
+        episode_red_r3_active_steps=ep_arrs["ep_r_r3_steps"],
+        episode_blue_r3_active_steps=ep_arrs["ep_b_r3_steps"],
+        episode_red_r41_active_steps=ep_arrs["ep_r_r41_steps"],
+        episode_blue_r41_active_steps=ep_arrs["ep_b_r41_steps"],
+        episode_red_r42_active_steps=ep_arrs["ep_r_r42_steps"],
+        episode_blue_r42_active_steps=ep_arrs["ep_b_r42_steps"],
+        episode_red_attack_window_steps=ep_arrs["ep_r_attack_window_steps"],
+        episode_blue_attack_window_steps=ep_arrs["ep_b_attack_window_steps"],
     )
 
 

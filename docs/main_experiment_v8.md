@@ -113,6 +113,50 @@ The main training/evaluation path keeps:
 
 Heterogeneous evaluation additionally keeps support survival, mean support coverage, kills with shared observation, and shared-observation kill fraction as analysis metrics only.
 
+For v8, user-facing metrics are filtered before being written to `evaluation_*.json`, `training_metrics.csv`, `run_summary.json`, and formal rule reports.  The generic environment and vector-env data structures still keep historical collision fields for older configurations, but v8 public artifacts do not display collision metrics because `collision_distance` is contractually fixed to zero.
+
+Every v8 public summary also carries an `environment_contract` block:
+
+- reward mode;
+- `collision_enabled: false`;
+- allowed death causes: attack, altitude boundary, and XY boundary;
+- deterministic attack distance range;
+- paper segment distance;
+- observation dimension 68.
+
+## Attack timing and tactical-window diagnostics
+
+v8 records attack-kill timing as episode accounting, not as reward shaping.  When a team kills a unique target by attack, the current environment step is appended to that team's kill-step list.  If several targets die in the same step, each target records the same step.  If several attackers hit the same target in the same step, that target contributes only one kill record.
+
+Evaluation summaries expose:
+
+- `red_attack_kill_count_distribution` and `blue_attack_kill_count_distribution` for 0/1/2/3 attack kills;
+- zero, at-least-one, at-least-two, and three-kill rates;
+- first, second, and third attack-kill step statistics, with `null` when there is no sample;
+- remaining steps after first attack kill, defined as `episode_length - first_attack_kill_step`.
+
+v8 also records how often the current Equation (25) tactical conditions are actually visited:
+
+- `r3_active_steps`: at least one own aircraft has positive R3 in that simulation step;
+- `r41_active_steps`: at least one own aircraft has positive R41 in that simulation step;
+- `r42_active_steps`: at least one own aircraft has negative R42 in that simulation step;
+- `attack_window_steps`: at least one valid attack intent exists in that simulation step.
+
+These are team-level step counts, not per-aircraft counts.  Their reported rates divide by total evaluated episode steps.  They are diagnostics only and do not enter the reward.
+
+## Environment outcome vs neutral rule outcome
+
+The environment outcome is the training-task outcome.  Under the current v8 task contract, reaching `max_steps` remains red task failure and can therefore appear as a blue environment outcome.
+
+Rule-vs-rule attackability reports also include a neutral symmetric interpretation:
+
+- blue eliminated and red still alive: neutral red win;
+- red eliminated and blue still alive: neutral blue win;
+- simultaneous elimination: neutral draw;
+- `max_steps`: neutral draw.
+
+The neutral rule outcome is for interpreting symmetric fixed-policy evaluations only.  It does not change the environment's training outcome semantics.
+
 ## Best checkpoint
 
 v8 best checkpoint selection uses the simplified lexicographic score:
@@ -127,11 +171,29 @@ v8 best checkpoint selection uses the simplified lexicographic score:
 
 This preserves the project rule that red only wins after complete blue elimination; timeout/draw is not a red success.
 
+The score field order comes from the shared v8 contract helper and is written as `best_score_schema` in run summaries and checkpoint metadata.  Older checkpoints that do not contain the schema can derive it from the current environment config; if a saved best evaluation exists, the best score is recomputed with the current schema.  v8 best scores never include collision fields.
+
 ## Rule-vs-rule attackability check
 
 After changing v8 collision semantics, run a deterministic homogeneous v8 rule-vs-rule check with 200 episodes.  The check uses `paper_nearest_pursuit_v1` for both red and blue, `rate_aligned_v1`, the existing deterministic attack model, the `100-1000 m` attack range, the current ATA/AA attack conditions, `collision_distance = 0`, and `max_steps = 600`.
 
 This check is only used to confirm whether the attack envelope is reachable under the fixed pure-pursuit rules.  It should not be used to tune attack distance, angles, rewards, or policy complexity from the same 200 episodes.
+
+The formal reproducible report is:
+
+- `reports/homogeneous_v8_rule_vs_rule_200.json`
+- `reports/homogeneous_v8_rule_vs_rule_200.md`
+
+The Markdown file is generated from the JSON report instead of manually copying numbers.
+
+The report classification is descriptive:
+
+- A1: weak attack reachability, meaning at-least-one attack kill occurs but at-least-two or complete elimination remains zero or near zero;
+- A2: continuous attack reachability, meaning at-least-two attack kills or complete elimination occurs;
+- B: attack is essentially unreachable and both teams have near-zero attack kills;
+- C: boundary deaths dominate termination or death sources.
+
+Do not describe "at least one attack is reachable" as "the air-combat task is already stably solved."
 
 ## Running long experiments
 

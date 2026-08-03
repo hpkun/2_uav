@@ -12,6 +12,13 @@ import torch
 from torch import nn
 
 from ..environment_3v3 import GS_DIM, OBS_DIM
+from ..config import load_config
+from ..main_experiment_v8 import (
+    best_score_fields_for_config,
+    best_score_values_for_config,
+    compute_best_score_for_config,
+    infer_best_score_schema_for_checkpoint,
+)
 from .buffer_3v3 import MAPPOBuffer3v3
 from .networks import CentralizedCritic, GaussianActor
 from .vector_env_3v3 import (
@@ -103,6 +110,8 @@ def _signature_differences(checkpoint: Any, current: Any, prefix: str = "signatu
 class FixedBlue3v3MAPPOTrainer:
     def __init__(self, env_config: str | Path, config: dict[str, Any]) -> None:
         self.env_config = str(env_config)
+        self.env_contract_config = load_config(self.env_config)
+        self.best_score_schema = best_score_fields_for_config(self.env_contract_config)
         self.config = deepcopy(config)
         t, n, e = self.config["training"], self.config["network"], self.config["experiment"]
         if t.get("training_mode") != "fixed_rule_blue_3v3":
@@ -231,6 +240,20 @@ class FixedBlue3v3MAPPOTrainer:
                         "blue_cross_collision_deaths": int(r.episode_blue_cross_collision_deaths[idx]),
                         "red_any_attack_kill": bool(r.episode_red_any_attack_kill[idx]),
                         "blue_any_attack_kill": bool(r.episode_blue_any_attack_kill[idx]),
+                        "red_first_attack_kill_step": None if int(r.episode_red_first_attack_kill_step[idx]) < 0 else int(r.episode_red_first_attack_kill_step[idx]),
+                        "blue_first_attack_kill_step": None if int(r.episode_blue_first_attack_kill_step[idx]) < 0 else int(r.episode_blue_first_attack_kill_step[idx]),
+                        "red_second_attack_kill_step": None if int(r.episode_red_second_attack_kill_step[idx]) < 0 else int(r.episode_red_second_attack_kill_step[idx]),
+                        "blue_second_attack_kill_step": None if int(r.episode_blue_second_attack_kill_step[idx]) < 0 else int(r.episode_blue_second_attack_kill_step[idx]),
+                        "red_third_attack_kill_step": None if int(r.episode_red_third_attack_kill_step[idx]) < 0 else int(r.episode_red_third_attack_kill_step[idx]),
+                        "blue_third_attack_kill_step": None if int(r.episode_blue_third_attack_kill_step[idx]) < 0 else int(r.episode_blue_third_attack_kill_step[idx]),
+                        "red_r3_active_steps": int(r.episode_red_r3_active_steps[idx]),
+                        "blue_r3_active_steps": int(r.episode_blue_r3_active_steps[idx]),
+                        "red_r41_active_steps": int(r.episode_red_r41_active_steps[idx]),
+                        "blue_r41_active_steps": int(r.episode_blue_r41_active_steps[idx]),
+                        "red_r42_active_steps": int(r.episode_red_r42_active_steps[idx]),
+                        "blue_r42_active_steps": int(r.episode_blue_r42_active_steps[idx]),
+                        "red_attack_window_steps": int(r.episode_red_attack_window_steps[idx]),
+                        "blue_attack_window_steps": int(r.episode_blue_attack_window_steps[idx]),
                     }
                     # Validate death ledger
                     for team, surv, atk_d, bdy_d, fr_c, cr_c in [
@@ -469,6 +492,7 @@ class FixedBlue3v3MAPPOTrainer:
                      "current_entropy_coef": self.current_entropy_coef,
                      "kl_early_stop_count": self.kl_early_stop_count,
                      "best_score": self.best_score, "best_evaluation": self.best_evaluation,
+                     "best_score_schema": list(self.best_score_schema),
                      "best_checkpoint_name": self.best_checkpoint_name,
                      "evaluation_history": self.evaluation_history,
                      "total_evaluation_seconds": self.total_evaluation_seconds,
@@ -499,7 +523,13 @@ class FixedBlue3v3MAPPOTrainer:
         self.critic_optimizer.load_state_dict(ckpt["critic_optimizer"])
         self.env_steps = int(ckpt["env_steps"]); self.update_count = int(ckpt["update_count"])
         self.kl_early_stop_count = int(ckpt.get("kl_early_stop_count", 0))
+        self.best_score_schema = infer_best_score_schema_for_checkpoint(ckpt, self.env_contract_config)
         self.best_score = ckpt.get("best_score"); self.best_evaluation = ckpt.get("best_evaluation")
+        if self.best_evaluation is not None:
+            current_schema = best_score_fields_for_config(self.env_contract_config)
+            if tuple(self.best_score_schema) != tuple(current_schema) or self.best_score is None:
+                self.best_score_schema = current_schema
+                self.best_score = compute_best_score_for_config(self.best_evaluation, self.env_contract_config)
         self.best_checkpoint_name = ckpt.get("best_checkpoint_name")
         self.evaluation_history = ckpt.get("evaluation_history", [])
         self.total_evaluation_seconds = float(ckpt.get("total_evaluation_seconds", 0.0))
