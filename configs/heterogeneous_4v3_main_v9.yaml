@@ -1,0 +1,93 @@
+simulation:
+  dt: 0.1
+  max_steps: 600
+  gravity: 9.81
+
+action:
+  delta_yaw_max: 3.141592653589793
+  delta_pitch_max: 1.0471975511965976
+  delta_speed_max: 50.0
+  mapping_mode: rate_aligned_v1
+
+aircraft:
+  v_min: 100.0
+  v_max: 250.0
+  theta_min: -0.7853981633974483
+  theta_max: 0.7853981633974483
+  nx_min: -1.0
+  nx_max: 1.0
+  nz_min: -3.0
+  nz_max: 3.0
+  phi_min: -1.5707963267948966
+  phi_max: 1.5707963267948966
+  yaw_rate_max: 0.35
+  pitch_rate_max: 0.25
+  acceleration_max: 8.0
+  k_yaw: 1.0
+  k_pitch: 1.0
+  k_speed: 0.5
+
+battlefield:
+  x_limit: 20000.0
+  y_limit: 20000.0
+  altitude_min: 500.0
+  altitude_max: 6000.0
+  collision_distance: 0.0
+
+combat:
+  reward_mode: functional_heterogeneous_4v3_team_v9
+  attack_distance_min: 100.0
+  attack_distance_max: 1000.0
+  attack_ata_max: 0.5235987755982988
+  attack_aa_max: 1.5707963267948966
+
+scenario:
+  type: functional_heterogeneous_4v3_head_on_v9
+  red_team_size: 4
+  blue_team_size: 3
+  separation_min: 4500.0
+  separation_max: 5500.0
+  lateral_spacing: 450.0
+  support_initial_trailing_distance: 400.0
+  altitude_center: 3000.0
+  altitude_jitter: 80.0
+  speed_center: 150.0
+  speed_jitter: 8.0
+  heading_jitter: 0.05235987755982989
+
+initial_state:
+  red_0: {x: -3600.0, y: 0.0, altitude: 3000.0, v: 150.0, theta: 0.0, psi: 0.0}
+  red_1: {x: -2500.0, y: -450.0, altitude: 3000.0, v: 150.0, theta: 0.0, psi: 0.0}
+  red_2: {x: -2500.0, y: 0.0, altitude: 3000.0, v: 150.0, theta: 0.0, psi: 0.0}
+  red_3: {x: -2500.0, y: 450.0, altitude: 3000.0, v: 150.0, theta: 0.0, psi: 0.0}
+  blue_0: {x: 2500.0, y: 450.0, altitude: 3000.0, v: 150.0, theta: 0.0, psi: 3.141592653589793}
+  blue_1: {x: 2500.0, y: 0.0, altitude: 3000.0, v: 150.0, theta: 0.0, psi: 3.141592653589793}
+  blue_2: {x: 2500.0, y: -450.0, altitude: 3000.0, v: 150.0, theta: 0.0, psi: 3.141592653589793}
+
+heterogeneous:
+  enabled: true
+  roles:
+    red_0: support
+    red_1: combat
+    red_2: combat
+    red_3: combat
+    blue_0: combat
+    blue_1: combat
+    blue_2: combat
+  sensor_range:
+    red_support: 6000.0
+    red_combat: 1800.0
+    blue_combat: 3000.0
+  can_attack:
+    support: false
+    combat: true
+  information_sharing:
+    red_support_to_red_combat: true
+    combat_to_combat: false
+    blue_sharing: false
+
+blue_rule_policy:
+  mode: functional_heterogeneous_4v3_nearest_pursuit_v9
+
+red_rule_policy:
+  mode: functional_heterogeneous_4v3_nearest_pursuit_v9

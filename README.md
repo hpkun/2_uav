@@ -73,6 +73,12 @@ The fixed heterogeneous rule policy `functional_heterogeneous_team_v1` uses visi
 
 The `*_kills_with_shared_observation` fields count only kills where, in the same step as the attack, the attacker could not directly sense the target but obtained it through immediate support sharing. Because the default combat sensor range is 3000 m and the attack distance max is 1000 m, this diagnostic is structurally expected to be zero in default experiments. The main support contribution metrics are support coverage, support survival, and the `support_to_combat` on/off ablation. A v6-style timeout is encoded as a blue environment outcome, but it is not blue complete attack elimination.
 
+### Functional heterogeneous red 4v3 v9
+
+`configs/heterogeneous_4v3_main_v9.yaml` is the first main-experiment environment where only red is functionally heterogeneous: `red_0` is a non-attacking support UAV, `red_1..red_3` are combat UAVs, and `blue_0..blue_2` remain homogeneous combat UAVs controlled by a fixed nearest-target pure-pursuit rule. All seven aircraft still share the same point-mass dynamics, controller limits, action mapping, and AircraftSpec; heterogeneity is only role, sensor range, attack permission, red support-to-combat information sharing, tactical duty, and reward composition.
+
+The red support has a 6000 m sensor and broadcasts only its direct blue detections to live red combat aircraft. Red combat aircraft have 1800 m direct sensors and may use support-shared information for early approach, but attack kills require direct observation plus the unchanged geometric attack envelope. Blue combat aircraft have 3000 m sensors, no sharing, and can attack any live red UAV through direct sensing only. `configs/happo_heterogeneous_4v3_main_v9.yaml` keeps HAPPO itself unchanged while expanding the red actor slots to four: support actor plus three combat actors.
+
 ### Reward
 
 ```
