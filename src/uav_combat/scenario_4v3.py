@@ -86,7 +86,13 @@ class FunctionalHeterogeneous4v3Scenario:
 
         separation = float(rng.uniform(settings["separation_min"], settings["separation_max"]))
         lateral_spacing = float(settings["lateral_spacing"])
-        support_trailing = float(settings.get("support_initial_trailing_distance", 1100.0))
+        formation = self.config.get("support_formation", {})
+        support_trailing = float(
+            formation.get(
+                "initial_trailing_distance",
+                settings.get("support_initial_trailing_distance", 1200.0),
+            )
+        )
         altitude_center = float(settings["altitude_center"])
         altitude_jitter = float(settings["altitude_jitter"])
         speed_center = float(settings["speed_center"])
@@ -143,4 +149,3 @@ class FunctionalHeterogeneous4v3Scenario:
             aircraft.append(self._aircraft(aid, "blue", state))
 
         return aircraft
-

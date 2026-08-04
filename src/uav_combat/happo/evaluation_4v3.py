@@ -30,6 +30,7 @@ def evaluate_happo_fixed_blue_4v3(
     actors.eval()
     vec = make_combat_vector_env_4v3(env_config, num_envs, num_env_workers, seed)
     obs, _, _ = vec.reset()
+    seed_rng = np.random.default_rng(int(seed) + 1)
     records: list[dict[str, Any]] = []
     try:
         while len(records) < int(episodes):
@@ -40,7 +41,7 @@ def evaluate_happo_fixed_blue_4v3(
             for i, summary in enumerate(result.episode_summaries):
                 if summary is not None:
                     records.append(summary)
-                    obs[i], _, _ = vec.reset_at(i)
+                    obs[i], _, _ = vec.reset_at(i, int(seed_rng.integers(0, 2**31 - 1)))
                     if len(records) >= int(episodes):
                         break
         return summarize_4v3_episodes(records[: int(episodes)])

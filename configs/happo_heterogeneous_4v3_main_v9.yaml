@@ -5,9 +5,9 @@ experiment:
 
 network:
   hidden_dim: 128
-  log_std_init: -0.5
-  log_std_min: -2.0
-  log_std_max: 0.0
+  log_std_init: -1.0
+  log_std_min: -3.0
+  log_std_max: -0.3
 
 training:
   training_mode: fixed_rule_blue_heterogeneous_4v3_happo
@@ -30,8 +30,8 @@ training:
   critic_learning_rate: 0.0003
   critic_learning_rate_final: 0.00003
 
-  entropy_coef: 0.01
-  entropy_coef_final: 0.001
+  entropy_coef: 0.003
+  entropy_coef_final: 0.0001
 
   value_loss_coef: 0.5
   max_grad_norm: 0.5

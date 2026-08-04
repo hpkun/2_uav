@@ -13,7 +13,7 @@ from torch import nn
 from ..config import load_config
 from ..environment_4v3 import GS_DIM_4V3, OBS_DIM_4V3
 from ..mappo.trainer_3v3 import linear_schedule, resolve_device
-from ..mappo.vector_env_4v3 import RED_TEAM_SIZE_4V3, make_combat_vector_env_4v3
+from ..mappo.vector_env_4v3 import RED_REWARD_COMPONENT_KEYS_4V3, RED_TEAM_SIZE_4V3, make_combat_vector_env_4v3
 from .buffer_3v3 import HAPPORolloutBuffer3v3
 from .metrics import explained_variance
 from .networks import CentralizedValueCritic, IndependentHAPPOActors
@@ -42,7 +42,7 @@ def best_score_fields_4v3() -> list[str]:
     ]
 
 
-def compute_best_score_4v3(summary: dict[str, float]) -> tuple[float, dict[str, float]]:
+def compute_best_score_4v3(summary: dict[str, float]) -> tuple[tuple[float, ...], dict[str, float]]:
     fields = {
         "red_complete_elimination_success_rate": float(summary.get("red_complete_elimination_success_rate", 0.0)),
         "red_at_least_two_attack_kill_rate": float(summary.get("red_at_least_two_attack_kill_rate", 0.0)),
@@ -53,38 +53,66 @@ def compute_best_score_4v3(summary: dict[str, float]) -> tuple[float, dict[str, 
         "negative_timeout_rate": -float(summary.get("timeout_rate", 0.0)),
         "negative_mean_episode_length": -float(summary.get("mean_episode_length", 0.0)),
     }
-    weights = {
-        "red_complete_elimination_success_rate": 100.0,
-        "red_at_least_two_attack_kill_rate": 30.0,
-        "red_any_attack_kill_rate": 10.0,
-        "mean_red_attack_kills": 3.0,
-        "support_assisted_kill_rate": 4.0,
-        "mean_red_combat_survivors": 1.0,
-        "negative_timeout_rate": 2.0,
-        "negative_mean_episode_length": 0.002,
-    }
-    return float(sum(weights[k] * fields[k] for k in weights)), fields
+    return tuple(fields[key] for key in best_score_fields_4v3()), fields
 
 
-def summarize_4v3_episodes(records: list[dict[str, Any]]) -> dict[str, float]:
+def summarize_4v3_episodes(records: list[dict[str, Any]]) -> dict[str, Any]:
     if not records:
         return {"episodes": 0}
     n = len(records)
-    return {
+    def mean_optional(key: str) -> float | None:
+        values = [float(r[key]) for r in records if r.get(key) is not None]
+        return float(np.mean(values)) if values else None
+
+    def reward_mean(key: str) -> float:
+        return float(np.mean([r.get("reward_components", {}).get(key, 0.0) for r in records]))
+
+    out = {
         "episodes": float(n),
+        "red_win_rate": float(np.mean([r.get("red_win", False) for r in records])),
         "red_complete_elimination_success_rate": float(np.mean([r.get("red_complete_elimination_success", False) for r in records])),
         "red_at_least_two_attack_kill_rate": float(np.mean([int(r.get("red_attack_kills", 0)) >= 2 for r in records])),
         "red_any_attack_kill_rate": float(np.mean([r.get("red_any_attack_kill", False) for r in records])),
         "mean_red_attack_kills": float(np.mean([r.get("red_attack_kills", 0) for r in records])),
         "mean_blue_attack_kills": float(np.mean([r.get("blue_attack_kills", 0) for r in records])),
         "support_assisted_kill_rate": float(np.mean([r.get("support_assisted_kill_rate", 0.0) for r in records])),
+        "mean_support_assisted_kills": float(np.mean([r.get("support_assisted_kills", 0) for r in records])),
         "mean_red_combat_survivors": float(np.mean([r.get("red_combat_survivors", 0) for r in records])),
         "timeout_rate": float(np.mean([r.get("termination_reason") == "timeout" for r in records])),
+        "mutual_combat_elimination_rate": float(np.mean([r.get("mutual_combat_elimination", False) for r in records])),
+        "blue_noncombat_elimination_rate": float(np.mean([r.get("blue_noncombat_elimination", False) for r in records])),
         "mean_episode_length": float(np.mean([r.get("episode_length", 0) for r in records])),
+        "mean_red_first_attack_kill_step": mean_optional("red_first_attack_kill_step"),
+        "mean_red_second_attack_kill_step": mean_optional("red_second_attack_kill_step"),
+        "mean_red_third_attack_kill_step": mean_optional("red_third_attack_kill_step"),
+        "mean_remaining_steps_after_first_kill": float(np.mean([
+            r["episode_length"] - r["red_first_attack_kill_step"]
+            for r in records if r.get("red_first_attack_kill_step") is not None
+        ])) if any(r.get("red_first_attack_kill_step") is not None for r in records) else None,
+        "mean_remaining_steps_after_second_kill": float(np.mean([
+            r["episode_length"] - r["red_second_attack_kill_step"]
+            for r in records if r.get("red_second_attack_kill_step") is not None
+        ])) if any(r.get("red_second_attack_kill_step") is not None for r in records) else None,
+        "support_survival_rate": float(np.mean([r.get("support_survived", False) for r in records])),
+        "red_all_combat_eliminated_rate": float(np.mean([r.get("red_all_combat_eliminated", False) for r in records])),
         "support_unique_detection_step_rate": float(np.mean([r.get("support_unique_detection_step_rate", 0.0) for r in records])),
         "support_shared_target_step_rate": float(np.mean([r.get("support_shared_target_step_rate", 0.0) for r in records])),
+        "mean_share_to_direct_delay": mean_optional("mean_share_to_direct_delay"),
+        "mean_share_to_kill_delay": mean_optional("mean_share_to_kill_delay"),
+        "mean_combat_early_acquisition_steps": float(np.mean([r.get("combat_early_acquisition_steps", 0) for r in records])),
         "combat_attack_window_step_rate": float(np.mean([r.get("combat_attack_window_step_rate", 0.0) for r in records])),
+        "combat_readiness_mean": float(np.mean([r.get("combat_readiness_mean", 0.0) for r in records])),
+        "combat_threat_mean": float(np.mean([r.get("combat_threat_mean", 0.0) for r in records])),
+        "mean_support_to_combat_centroid_distance": float(np.mean([r.get("mean_support_to_combat_centroid_distance", 0.0) for r in records])),
+        "support_rear_position_rate": float(np.mean([r.get("support_rear_position_rate", 0.0) for r in records])),
+        "support_threat_exposure_rate": float(np.mean([r.get("support_threat_exposure_rate", 0.0) for r in records])),
     }
+    out.update({key: reward_mean(key) for key in RED_REWARD_COMPONENT_KEYS_4V3})
+    kill_distribution = {str(k): 0.0 for k in range(4)}
+    for r in records:
+        kill_distribution[str(int(r.get("red_attack_kills", 0)))] += 1.0
+    out["red_attack_kill_distribution"] = {k: v / n for k, v in kill_distribution.items()}  # type: ignore[assignment]
+    return out
 
 
 class HAPPO4v3Trainer:
@@ -104,8 +132,10 @@ class HAPPO4v3Trainer:
         if self.device.type == "cuda":
             torch.cuda.manual_seed_all(int(e["seed"]))
         self.rng = np.random.default_rng(int(e["seed"]))
+        self.episode_seed_rng = np.random.default_rng(int(e["seed"]) + 1009)
         self.num_envs = int(t["num_envs"])
         self.rollout_steps = int(t["rollout_steps"])
+        self.total_env_steps = int(t["total_env_steps"])
         self.envs = make_combat_vector_env_4v3(
             self.env_config,
             self.num_envs,
@@ -121,19 +151,34 @@ class HAPPO4v3Trainer:
             log_std_max=float(n["log_std_max"]),
         ).to(self.device)
         self.critic = CentralizedValueCritic(GS_DIM_4V3, hidden_dim=int(n["hidden_dim"])).to(self.device)
-        self.actor_optimizers = [torch.optim.Adam(actor.parameters(), lr=float(t["actor_learning_rate"])) for actor in self.actors.actors]
-        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=float(t["critic_learning_rate"]))
+        self.initial_actor_lr = float(t["actor_learning_rate"])
+        self.final_actor_lr = float(t.get("actor_learning_rate_final", self.initial_actor_lr * 0.1))
+        self.initial_critic_lr = float(t["critic_learning_rate"])
+        self.final_critic_lr = float(t.get("critic_learning_rate_final", self.initial_critic_lr * 0.1))
+        self.initial_entropy_coef = float(t.get("entropy_coef", 0.01))
+        self.final_entropy_coef = float(t.get("entropy_coef_final", self.initial_entropy_coef * 0.1))
+        self.current_actor_lr = self.initial_actor_lr
+        self.current_critic_lr = self.initial_critic_lr
+        self.current_entropy_coef = self.initial_entropy_coef
+        self.actor_optimizers = [torch.optim.Adam(actor.parameters(), lr=self.current_actor_lr) for actor in self.actors.actors]
+        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=self.current_critic_lr)
         self.buffer = HAPPORolloutBuffer3v3(self.rollout_steps, self.num_envs, RED_TEAM_SIZE_4V3, OBS_DIM_4V3, 3, GS_DIM_4V3)
         self.obs, self.global_states, self.alive_masks = self.envs.reset()
         self.env_steps = 0
         self.vector_steps = 0
         self.update_count = 0
         self.last_agent_order: list[int] = list(range(RED_TEAM_SIZE_4V3))
-        self.best_score = float("-inf")
+        self.best_score: tuple[float, ...] | None = None
         self.best_score_fields: dict[str, float] = {}
+        self.best_evaluation: dict[str, Any] | None = None
+        self.best_checkpoint_name: str | None = None
         self.evaluation_history: list[dict[str, Any]] = []
         self.recent_episodes: list[dict[str, Any]] = []
         self.last_update_metrics: dict[str, float] = {}
+        self.last_rollout_reward_means: dict[str, float] = {}
+
+    def _next_episode_seed(self) -> int:
+        return int(self.episode_seed_rng.integers(0, 2**31 - 1))
 
     def training_signature(self) -> dict[str, Any]:
         t = self.config["training"]
@@ -162,9 +207,13 @@ class HAPPO4v3Trainer:
     def collect_rollout(self) -> list[dict[str, Any]]:
         self.buffer.clear()
         episodes: list[dict[str, Any]] = []
+        reward_component_sum = np.zeros(len(RED_REWARD_COMPONENT_KEYS_4V3), dtype=np.float64)
+        reward_component_count = 0
         for _ in range(self.rollout_steps):
             actions, log_probs, values = self._select_actions(self.obs)
             result = self.envs.step(actions)
+            reward_component_sum += result.red_reward_components.sum(axis=0)
+            reward_component_count += self.num_envs
             self.buffer.add(
                 self.obs[:, :RED_TEAM_SIZE_4V3, :],
                 self.global_states,
@@ -179,7 +228,8 @@ class HAPPO4v3Trainer:
             for i, summary in enumerate(result.episode_summaries):
                 if summary is not None:
                     episodes.append(summary)
-                    self.obs[i], self.global_states[i], self.alive_masks[i] = self.envs.reset_at(i)
+                    seed = self._next_episode_seed()
+                    self.obs[i], self.global_states[i], self.alive_masks[i] = self.envs.reset_at(i, seed)
             self.vector_steps += 1
             self.env_steps += self.num_envs
         with torch.no_grad():
@@ -187,6 +237,13 @@ class HAPPO4v3Trainer:
         self.buffer.compute_returns_and_advantages(last_values, float(self.config["training"]["gamma"]), float(self.config["training"]["gae_lambda"]))
         self.recent_episodes.extend(episodes)
         self.recent_episodes = self.recent_episodes[-200:]
+        if reward_component_count > 0:
+            self.last_rollout_reward_means = {
+                f"mean_rollout_{key}": float(value)
+                for key, value in zip(RED_REWARD_COMPONENT_KEYS_4V3, reward_component_sum / reward_component_count)
+            }
+        else:
+            self.last_rollout_reward_means = {}
         return episodes
 
     def update(self) -> dict[str, float]:
@@ -200,68 +257,129 @@ class HAPPO4v3Trainer:
         returns = torch.as_tensor(self.buffer.returns.reshape(total), dtype=torch.float32, device=self.device)
         advantages = torch.as_tensor(self.buffer.advantages.reshape(total), dtype=torch.float32, device=self.device)
 
-        progress = min(1.0, self.env_steps / max(1, int(t["total_env_steps"])))
+        progress = min(1.0, self.env_steps / max(1, self.total_env_steps))
+        self.current_actor_lr = linear_schedule(self.initial_actor_lr, self.final_actor_lr, progress)
+        self.current_critic_lr = linear_schedule(self.initial_critic_lr, self.final_critic_lr, progress)
+        self.current_entropy_coef = linear_schedule(self.initial_entropy_coef, self.final_entropy_coef, progress)
         for opt in self.actor_optimizers:
-            opt.param_groups[0]["lr"] = linear_schedule(float(t["actor_learning_rate"]), float(t["actor_learning_rate_final"]), progress)
-        self.critic_optimizer.param_groups[0]["lr"] = linear_schedule(float(t["critic_learning_rate"]), float(t["critic_learning_rate_final"]), progress)
-        entropy_coef = linear_schedule(float(t["entropy_coef"]), float(t["entropy_coef_final"]), progress)
+            for group in opt.param_groups:
+                group["lr"] = self.current_actor_lr
+        for group in self.critic_optimizer.param_groups:
+            group["lr"] = self.current_critic_lr
 
-        idxs = np.arange(total)
+        factor = torch.ones_like(advantages)
+        agent_order = [int(v) for v in self.rng.permutation(RED_TEAM_SIZE_4V3)]
+        self.last_agent_order = agent_order
+        actor_rows: list[dict[str, float | int]] = []
         critic_losses: list[float] = []
-        actor_losses: list[float] = []
-        entropies: list[float] = []
-        approx_kls: list[float] = []
-        for _ in range(int(t["ppo_epochs"])):
-            self.rng.shuffle(idxs)
-            for start in range(0, total, int(t["minibatch_size"])):
-                mb = torch.as_tensor(idxs[start:start + int(t["minibatch_size"])], dtype=torch.long, device=self.device)
-                values = self.critic(states[mb])
-                critic_loss = 0.5 * (returns[mb] - values).square().mean()
-                self.critic_optimizer.zero_grad(set_to_none=True)
-                (float(t["value_loss_coef"]) * critic_loss).backward()
-                nn.utils.clip_grad_norm_(self.critic.parameters(), float(t["max_grad_norm"]))
-                self.critic_optimizer.step()
-                critic_losses.append(float(critic_loss.detach().cpu()))
+        clip_coef = float(t["clip_coef"])
+        minibatch_size = int(t["minibatch_size"])
+        ppo_epochs = int(t["ppo_epochs"])
+        max_grad_norm = float(t["max_grad_norm"])
 
-                factor = torch.ones_like(returns[mb])
-                order = list(map(int, self.rng.permutation(RED_TEAM_SIZE_4V3)))
-                self.last_agent_order = order
-                for agent_id in order:
-                    new_lp, entropy = self.actors.evaluate_agent_actions(agent_id, obs[mb, agent_id, :], actions[mb, agent_id, :])
-                    active = masks[mb, agent_id]
-                    adv = normalize_advantages_for_agent(advantages[mb], active)
-                    ratio = torch.exp(new_lp - old_log_probs[mb, agent_id])
-                    policy_loss = ppo_clipped_policy_loss(ratio, factor * adv, float(t["clip_coef"]))
-                    loss = policy_loss - entropy_coef * entropy.mean()
+        for agent_id in agent_order:
+            active = masks[:, agent_id] > 0.5
+            if int(active.sum().detach().cpu().item()) <= 0:
+                factor = factor.detach()
+                actor_rows.append({"agent_id": agent_id, "active_samples": 0})
+                continue
+            normalized_advantages_i = normalize_advantages_for_agent(advantages, active.float())
+            for _ in range(ppo_epochs):
+                order = self.rng.permutation(total)
+                for start in range(0, total, minibatch_size):
+                    idx = torch.as_tensor(order[start:start + minibatch_size], dtype=torch.long, device=self.device)
+                    idx = idx[active[idx]]
+                    if len(idx) == 0:
+                        continue
+                    new_lp, entropy = self.actors.evaluate_agent_actions(agent_id, obs[idx, agent_id, :], actions[idx, agent_id, :])
+                    log_ratio = new_lp - old_log_probs[idx, agent_id]
+                    ratio = log_ratio.exp()
+                    effective_adv = (factor[idx] * normalized_advantages_i[idx]).detach()
+                    policy_loss = ppo_clipped_policy_loss(ratio, effective_adv, clip_coef)
+                    loss = policy_loss - self.current_entropy_coef * entropy.mean()
                     opt = self.actor_optimizers[agent_id]
                     opt.zero_grad(set_to_none=True)
                     loss.backward()
-                    nn.utils.clip_grad_norm_(self.actors.actors[agent_id].parameters(), float(t["max_grad_norm"]))
+                    grad = nn.utils.clip_grad_norm_(self.actors.actors[agent_id].parameters(), max_grad_norm)
                     opt.step()
-                    actor_losses.append(float(policy_loss.detach().cpu()))
-                    entropies.append(float(entropy.mean().detach().cpu()))
-                    with torch.no_grad():
-                        new_lp_after, _ = self.actors.evaluate_agent_actions(agent_id, obs[mb, agent_id, :], actions[mb, agent_id, :])
-                        approx_kls.append(float((old_log_probs[mb, agent_id] - new_lp_after).mean().detach().cpu()))
-                        factor = happo_preceding_factor_update(factor, old_log_probs[mb, agent_id], new_lp_after, active)
+                    self.actors.actors[agent_id].clamp_log_std_()
+                    approx_kl = ((ratio - 1.0) - log_ratio).mean()
+                    clip_fraction = ((ratio - 1.0).abs() > clip_coef).float().mean()
+                    actor_rows.append({
+                        "agent_id": agent_id,
+                        "policy_loss": float(policy_loss.item()),
+                        "entropy": float(entropy.mean().item()),
+                        "approx_kl": float(approx_kl.item()),
+                        "clip_fraction": float(clip_fraction.item()),
+                        "ratio_mean": float(ratio.mean().item()),
+                        "ratio_min": float(ratio.min().item()),
+                        "ratio_max": float(ratio.max().item()),
+                        "factor_mean": float(factor[idx].mean().item()),
+                        "factor_min": float(factor[idx].min().item()),
+                        "factor_max": float(factor[idx].max().item()),
+                        "actor_grad_norm": float(grad),
+                        "active_samples": int(len(idx)),
+                    })
+            with torch.no_grad():
+                new_lp_all, _ = self.actors.evaluate_agent_actions(agent_id, obs[:, agent_id, :], actions[:, agent_id, :])
+                factor = happo_preceding_factor_update(factor, old_log_probs[:, agent_id], new_lp_all, active.float())
+
+        value_preds_before = self.critic(states).detach().cpu().numpy()
+        for _ in range(ppo_epochs):
+            order = self.rng.permutation(total)
+            for start in range(0, total, minibatch_size):
+                idx = torch.as_tensor(order[start:start + minibatch_size], dtype=torch.long, device=self.device)
+                values = self.critic(states[idx])
+                critic_loss = 0.5 * (returns[idx] - values).square().mean()
+                self.critic_optimizer.zero_grad(set_to_none=True)
+                (float(t["value_loss_coef"]) * critic_loss).backward()
+                nn.utils.clip_grad_norm_(self.critic.parameters(), max_grad_norm)
+                self.critic_optimizer.step()
+                critic_losses.append(float(critic_loss.detach().cpu()))
         self.actors.clamp_log_std_()
-        with torch.no_grad():
-            pred = self.critic(states).detach().cpu().numpy()
         self.update_count += 1
+        nonempty = [r for r in actor_rows if int(r.get("active_samples", 0)) > 0]
+        def mean(key: str) -> float:
+            return float(np.mean([float(r[key]) for r in nonempty])) if nonempty else 0.0
+        log_std_dim = self.actors.effective_log_std_by_dim
+        std_dim = self.actors.effective_std_by_dim
         metrics = {
-            "actor_loss": float(np.mean(actor_losses)) if actor_losses else 0.0,
+            "policy_loss": mean("policy_loss"),
+            "actor_loss": mean("policy_loss"),
+            "value_loss": float(np.mean(critic_losses)) if critic_losses else 0.0,
             "critic_loss": float(np.mean(critic_losses)) if critic_losses else 0.0,
-            "entropy": float(np.mean(entropies)) if entropies else 0.0,
-            "approx_kl": float(np.mean(approx_kls)) if approx_kls else 0.0,
+            "entropy": mean("entropy"),
+            "approx_kl": mean("approx_kl"),
+            "clip_fraction": mean("clip_fraction"),
+            "ratio_mean": mean("ratio_mean"),
+            "ratio_min": float(np.min([float(r["ratio_min"]) for r in nonempty])) if nonempty else 1.0,
+            "ratio_max": float(np.max([float(r["ratio_max"]) for r in nonempty])) if nonempty else 1.0,
+            "factor_mean": mean("factor_mean"),
+            "factor_min": float(np.min([float(r["factor_min"]) for r in nonempty])) if nonempty else 1.0,
+            "factor_max": float(np.max([float(r["factor_max"]) for r in nonempty])) if nonempty else 1.0,
+            "actor_grad_norm": mean("actor_grad_norm"),
+            "actor_updates": len(nonempty),
+            "agents_updated": len({int(r["agent_id"]) for r in nonempty}),
+            "alive_actor_samples": int(sum(int(r.get("active_samples", 0)) for r in actor_rows)),
             "advantage_mean": float(np.mean(self.buffer.advantages)),
             "advantage_std": float(np.std(self.buffer.advantages)),
-            "explained_variance": float(explained_variance(pred, self.buffer.returns.reshape(total))),
+            "explained_variance": float(explained_variance(value_preds_before, self.buffer.returns.reshape(total))),
             "env_steps": float(self.env_steps),
             "vector_steps": float(self.vector_steps),
             "update_count": float(self.update_count),
+            "current_actor_lr": self.current_actor_lr,
+            "current_critic_lr": self.current_critic_lr,
+            "current_entropy_coef": self.current_entropy_coef,
+            "effective_log_std_yaw": log_std_dim[0],
+            "effective_log_std_pitch": log_std_dim[1],
+            "effective_log_std_speed": log_std_dim[2],
+            "effective_std_yaw": std_dim[0],
+            "effective_std_pitch": std_dim[1],
+            "effective_std_speed": std_dim[2],
         }
         if not all(np.isfinite(v) for v in metrics.values()):
             raise FloatingPointError(f"non-finite HAPPO 4v3 update metrics: {metrics}")
+        metrics.update(self.last_rollout_reward_means)
         self.last_update_metrics = metrics
         return metrics
 
@@ -280,8 +398,11 @@ class HAPPO4v3Trainer:
             "last_agent_order": self.last_agent_order,
             "best_score": self.best_score,
             "best_score_fields": self.best_score_fields,
+            "best_evaluation": self.best_evaluation,
+            "best_checkpoint_name": self.best_checkpoint_name,
             "evaluation_history": self.evaluation_history,
             "numpy_rng_state": self.rng.bit_generator.state,
+            "episode_seed_rng_state": self.episode_seed_rng.bit_generator.state,
             "torch_cpu_rng_state": torch.get_rng_state(),
             "torch_cuda_rng_state": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
             "is_best": bool(is_best),
@@ -305,11 +426,16 @@ class HAPPO4v3Trainer:
         self.vector_steps = int(ckpt["vector_steps"])
         self.update_count = int(ckpt["update_count"])
         self.last_agent_order = list(ckpt.get("last_agent_order", list(range(RED_TEAM_SIZE_4V3))))
-        self.best_score = float(ckpt.get("best_score", float("-inf")))
+        loaded_best = ckpt.get("best_score")
+        self.best_score = tuple(loaded_best) if loaded_best is not None else None
         self.best_score_fields = dict(ckpt.get("best_score_fields", {}))
+        self.best_evaluation = ckpt.get("best_evaluation")
+        self.best_checkpoint_name = ckpt.get("best_checkpoint_name")
         self.evaluation_history = list(ckpt.get("evaluation_history", []))
         self.obs, self.global_states, self.alive_masks = self.envs.reset()
         self.rng.bit_generator.state = ckpt["numpy_rng_state"]
+        if "episode_seed_rng_state" in ckpt:
+            self.episode_seed_rng.bit_generator.state = ckpt["episode_seed_rng_state"]
         torch.set_rng_state(ckpt["torch_cpu_rng_state"].cpu() if hasattr(ckpt["torch_cpu_rng_state"], "cpu") else ckpt["torch_cpu_rng_state"])
         if torch.cuda.is_available() and ckpt.get("torch_cuda_rng_state") is not None:
             torch.cuda.set_rng_state_all(ckpt["torch_cuda_rng_state"])
@@ -325,6 +451,11 @@ class HAPPO4v3Trainer:
             "last_update_metrics": self.last_update_metrics,
             "best_score": self.best_score,
             "best_score_fields": self.best_score_fields,
+            "best_checkpoint_name": self.best_checkpoint_name,
+            "best_evaluation": self.best_evaluation,
+            "final_evaluation": self.evaluation_history[-1]["summary"] if self.evaluation_history else None,
+            "evaluation_history": self.evaluation_history,
+            "best_score_schema": best_score_fields_4v3(),
             "policy_modes": self.envs.policy_modes(),
         }
         (out / "run_summary.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")

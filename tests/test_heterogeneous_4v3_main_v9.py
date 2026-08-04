@@ -10,6 +10,8 @@ import yaml
 from uav_combat.config import load_config
 from uav_combat.environment_4v3 import (
     BLUE_TEAM_SIZE_4V3,
+    DEATH_ATTACK,
+    DEATH_BOUNDARY_XY,
     GS_DIM_4V3,
     OBS_DIM_4V3,
     RED_TEAM_SIZE_4V3,
@@ -91,15 +93,26 @@ def test_reset_observation_global_state_and_masks_shapes_are_finite() -> None:
     assert np.isfinite(mask).all()
 
 
-def test_initial_geometry_support_sees_before_red_combat() -> None:
+def test_initial_geometry_uses_unified_support_trailing_distance() -> None:
     env = _env(9)
-    direct = env._direct_visible_ids()
-    assert len(direct["red_0"] & set(BLUE_IDS_4V3)) > 0
-    assert all(len(direct[cid] & set(BLUE_IDS_4V3)) == 0 for cid in RED_COMBAT_IDS_4V3)
+    cfg = load_config(ENV_CONFIG)
+    expected = float(cfg["support_formation"]["initial_trailing_distance"])
+    support = env._by_id("red_0")
+    combat_centroid = np.array([env._by_id(cid).state.as_array()[:2] for cid in RED_COMBAT_IDS_4V3]).mean(axis=0)
+    distance = float(np.linalg.norm(support.state.as_array()[:2] - combat_centroid))
+    assert distance == pytest.approx(expected, abs=1e-5)
+    assert support.sensor_range > env._by_id("red_1").sensor_range
 
 
 def test_support_sharing_only_to_red_combat() -> None:
     env = _env(10)
+    _set_state(env, "red_0", 0.0, 0.0, 0.0)
+    _set_state(env, "red_1", 0.0, 0.0, 0.0)
+    _set_state(env, "red_2", 0.0, 500.0, 0.0)
+    _set_state(env, "red_3", 0.0, -500.0, 0.0)
+    _set_state(env, "blue_0", 5000.0, 0.0, np.pi)
+    _set_state(env, "blue_1", 5200.0, 200.0, np.pi)
+    _set_state(env, "blue_2", 5400.0, -200.0, np.pi)
     direct = env._direct_visible_ids()
     effective = env._effective_visible_ids(direct)
     shared = direct["red_0"] & set(BLUE_IDS_4V3)
@@ -180,15 +193,39 @@ def test_all_blue_dead_with_red_combat_alive_is_red_win() -> None:
     env = _env(18)
     for bid in BLUE_IDS_4V3:
         env._by_id(bid).state.alive = False
+        env._death_causes[bid] = DEATH_ATTACK
+    env._attack_kills["red"] = 3
     assert env._termination() == (True, "red", "red_complete_elimination_success")
+
+
+def test_all_blue_dead_by_noncombat_is_not_red_complete_elimination() -> None:
+    env = _env(180)
+    for bid in BLUE_IDS_4V3:
+        env._by_id(bid).state.alive = False
+        env._death_causes[bid] = DEATH_BOUNDARY_XY
+    assert env._termination() == (True, "draw", "blue_noncombat_elimination")
+
+
+def test_two_attack_kills_one_boundary_is_not_red_complete_elimination() -> None:
+    env = _env(181)
+    for bid in BLUE_IDS_4V3[:2]:
+        env._by_id(bid).state.alive = False
+        env._death_causes[bid] = DEATH_ATTACK
+    env._by_id(BLUE_IDS_4V3[2]).state.alive = False
+    env._death_causes[BLUE_IDS_4V3[2]] = DEATH_BOUNDARY_XY
+    env._attack_kills["red"] = 2
+    assert env._termination() == (True, "draw", "blue_noncombat_elimination")
 
 
 def test_mutual_combat_elimination_not_red_win() -> None:
     env = _env(19)
     for bid in BLUE_IDS_4V3:
         env._by_id(bid).state.alive = False
+        env._death_causes[bid] = DEATH_ATTACK
     for cid in RED_COMBAT_IDS_4V3:
         env._by_id(cid).state.alive = False
+        env._death_causes[cid] = DEATH_ATTACK
+    env._attack_kills["red"] = 3
     assert env._termination() == (True, "draw", "mutual_combat_elimination")
 
 
@@ -237,6 +274,18 @@ def test_local_vector_env_shapes_and_policy_modes() -> None:
         vec.close()
 
 
+def test_vector_env_reset_at_uses_external_seed_and_changes_initial_state() -> None:
+    vec = make_combat_vector_env_4v3(ENV_CONFIG, num_envs=1, num_env_workers=0, seed=300)
+    try:
+        obs1, _, _ = vec.reset_at(0, 12345)
+        obs2, _, _ = vec.reset_at(0, 12346)
+        obs3, _, _ = vec.reset_at(0, 12345)
+        assert not np.allclose(obs1, obs2)
+        assert np.allclose(obs1, obs3)
+    finally:
+        vec.close()
+
+
 def test_multiprocessing_vector_env_shapes_and_policy_modes() -> None:
     vec = make_combat_vector_env_4v3(ENV_CONFIG, num_envs=2, num_env_workers=1, seed=31)
     try:
@@ -249,6 +298,18 @@ def test_multiprocessing_vector_env_shapes_and_policy_modes() -> None:
         vec.close()
 
 
+def test_multiprocessing_vector_env_reset_at_matches_local_for_same_seed() -> None:
+    local = make_combat_vector_env_4v3(ENV_CONFIG, num_envs=1, num_env_workers=0, seed=310)
+    worker = make_combat_vector_env_4v3(ENV_CONFIG, num_envs=1, num_env_workers=1, seed=310)
+    try:
+        lo = local.reset_at(0, 777)
+        wo = worker.reset_at(0, 777)
+        assert all(np.allclose(a, b) for a, b in zip(lo, wo))
+    finally:
+        local.close()
+        worker.close()
+
+
 def test_vector_step_returns_team_reward_for_four_red_agents_contract() -> None:
     vec = make_combat_vector_env_4v3(ENV_CONFIG, num_envs=2, num_env_workers=0, seed=32)
     try:
@@ -258,6 +319,24 @@ def test_vector_step_returns_team_reward_for_four_red_agents_contract() -> None:
         assert np.isfinite(result.team_rewards).all()
     finally:
         vec.close()
+
+
+def test_happo_4v3_best_score_is_lexicographic_tuple() -> None:
+    from uav_combat.happo.trainer_4v3 import compute_best_score_4v3
+
+    high_success = {
+        "red_complete_elimination_success_rate": 0.2,
+        "red_at_least_two_attack_kill_rate": 0.1,
+        "red_any_attack_kill_rate": 0.1,
+        "mean_red_attack_kills": 0.2,
+    }
+    low_success_high_two_kill = {
+        "red_complete_elimination_success_rate": 0.1,
+        "red_at_least_two_attack_kill_rate": 1.0,
+        "red_any_attack_kill_rate": 1.0,
+        "mean_red_attack_kills": 2.9,
+    }
+    assert compute_best_score_4v3(high_success)[0] > compute_best_score_4v3(low_success_high_two_kill)[0]
 
 
 def test_happo_config_uses_four_actor_slots() -> None:
@@ -300,6 +379,41 @@ def test_happo_checkpoint_roundtrip_preserves_four_actors(tmp_path: Path) -> Non
         assert restored.update_count == 1
     finally:
         restored.close()
+
+
+def test_happo_checkpoint_roundtrip_preserves_episode_seed_rng(tmp_path: Path) -> None:
+    cfg = _tiny_train_config()
+    trainer = HAPPO4v3Trainer(ENV_CONFIG, cfg)
+    ckpt = tmp_path / "happo_4v3_seed.pt"
+    try:
+        first = [trainer._next_episode_seed() for _ in range(3)]
+        trainer.save_checkpoint(ckpt)
+        uninterrupted_next = [trainer._next_episode_seed() for _ in range(4)]
+    finally:
+        trainer.close()
+    restored = HAPPO4v3Trainer(ENV_CONFIG, cfg)
+    try:
+        restored.load_checkpoint(ckpt)
+        restored_next = [restored._next_episode_seed() for _ in range(4)]
+        assert len(set(first + uninterrupted_next)) == 7
+        assert restored_next == uninterrupted_next
+    finally:
+        restored.close()
+
+
+def test_happo_4v3_update_uses_one_rollout_agent_order_and_alive_masks() -> None:
+    cfg = _tiny_train_config()
+    trainer = HAPPO4v3Trainer(ENV_CONFIG, cfg)
+    try:
+        trainer.collect_rollout()
+        trainer.buffer.agent_alive_masks[:, :, 2] = 0.0
+        metrics = trainer.update()
+        assert sorted(trainer.last_agent_order) == [0, 1, 2, 3]
+        assert metrics["agents_updated"] == 3
+        assert metrics["actor_updates"] >= 3
+        assert np.isfinite(metrics["factor_mean"])
+    finally:
+        trainer.close()
 
 
 def test_best_score_fields_match_v9_order() -> None:

@@ -20,6 +20,7 @@ class FunctionalHeterogeneous4v3RulePolicy(NearestTargetPursuitPolicy3v3):
     policy_name = "functional_heterogeneous_4v3_nearest_pursuit_v9"
 
     def __init__(self, *args, team: str = "blue", **kwargs) -> None:
+        self.support_hold_distance = float(kwargs.pop("support_hold_distance", 1200.0))
         super().__init__(*args, **kwargs)
         if team not in ("red", "blue"):
             raise ValueError("team must be 'red' or 'blue'")
@@ -44,7 +45,7 @@ class FunctionalHeterogeneous4v3RulePolicy(NearestTargetPursuitPolicy3v3):
             np.mean([np.sin(a.state.psi) for a in alive_combat]),
             np.mean([np.cos(a.state.psi) for a in alive_combat]),
         ))
-        desired = centroid - np.array([np.cos(mean_heading), np.sin(mean_heading), 0.0]) * 1100.0
+        desired = centroid - np.array([np.cos(mean_heading), np.sin(mean_heading), 0.0]) * self.support_hold_distance
         los = desired - np.array([sx, sy, sz])
         desired_psi = float(np.arctan2(los[1], los[0]))
         horizontal = float(np.linalg.norm(los[:2]))
@@ -103,6 +104,7 @@ class FunctionalHeterogeneous4v3RulePolicy(NearestTargetPursuitPolicy3v3):
 def make_rule_policy_4v3(config: dict, team: str) -> FunctionalHeterogeneous4v3RulePolicy:
     action = config["action"]
     aircraft = config["aircraft"]
+    formation = config.get("support_formation", {})
     mode = config.get(f"{team}_rule_policy", {}).get("mode", "functional_heterogeneous_4v3_nearest_pursuit_v9")
     if mode != "functional_heterogeneous_4v3_nearest_pursuit_v9":
         raise ValueError(f"unsupported 4v3 rule policy mode for {team}: {mode!r}")
@@ -117,5 +119,6 @@ def make_rule_policy_4v3(config: dict, team: str) -> FunctionalHeterogeneous4v3R
         k_yaw=float(aircraft["k_yaw"]),
         k_pitch=float(aircraft["k_pitch"]),
         k_speed=float(aircraft["k_speed"]),
+        support_hold_distance=float(formation.get("rule_hold_distance", 1200.0)),
         team=team,
     )

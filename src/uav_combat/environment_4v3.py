@@ -123,10 +123,21 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
         self._share_to_direct_delays: list[int] = []
         self._share_to_kill_delays: list[int] = []
         self._episode_metrics: dict[str, float] = {}
+        self._episode_reward_components = {k: 0.0 for k in RED_REWARD_COMPONENT_KEYS_4V3}
         self._last_reward_components = {k: 0.0 for k in RED_REWARD_COMPONENT_KEYS_4V3}
 
     def _by_id(self, aid: str) -> Aircraft:
         return next(a for a in self.aircraft if a.aircraft_id == aid)
+
+    def _support_formation(self) -> dict[str, float]:
+        cfg = self.config.get("support_formation", {})
+        return {
+            "reward_optimal_min": float(cfg.get("reward_optimal_min", 800.0)),
+            "reward_optimal_max": float(cfg.get("reward_optimal_max", 1800.0)),
+            "reward_fade_near": float(cfg.get("reward_fade_near", 400.0)),
+            "reward_fade_far": float(cfg.get("reward_fade_far", 3000.0)),
+            "rear_alignment_threshold": float(cfg.get("rear_alignment_threshold", 0.7)),
+        }
 
     def _team(self, team: str) -> list[Aircraft]:
         return [a for a in self.aircraft if a.team == team]
@@ -195,6 +206,7 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
             "combat_readiness_sum": 0.0,
             "combat_threat_sum": 0.0,
         }
+        self._episode_reward_components = {k: 0.0 for k in RED_REWARD_COMPONENT_KEYS_4V3}
         self._last_reward_components = {k: 0.0 for k in RED_REWARD_COMPONENT_KEYS_4V3}
         return self._observations()
 
@@ -289,6 +301,7 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
         alive_combat = self._alive_red_combat()
         if not support.state.alive or not alive_combat:
             return 0.0, 0.0, 0.0
+        formation = self._support_formation()
         centroid = np.array([a.state.as_array()[:3] for a in alive_combat]).mean(axis=0)
         rel = support.state.as_array()[:3] - centroid
         dist = float(np.linalg.norm(rel[:2]))
@@ -296,16 +309,23 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
                                         np.mean([np.cos(a.state.psi) for a in alive_combat])))
         backward = -np.array([np.cos(mean_heading), np.sin(mean_heading)])
         behind = max(0.0, float(np.dot(rel[:2] / max(dist, 1e-8), backward)))
-        if dist < 500.0:
-            band = dist / 500.0
-        elif dist <= 1200.0:
+        fade_near = formation["reward_fade_near"]
+        optimal_min = formation["reward_optimal_min"]
+        optimal_max = formation["reward_optimal_max"]
+        fade_far = formation["reward_fade_far"]
+        if dist < fade_near:
+            band = dist / max(fade_near, 1e-8)
+        elif dist < optimal_min:
+            band = (dist - fade_near) / max(optimal_min - fade_near, 1e-8)
+        elif dist <= optimal_max:
             band = 1.0
-        elif dist >= 3500.0:
+        elif dist >= fade_far:
             band = 0.0
         else:
-            band = (3500.0 - dist) / (3500.0 - 1200.0)
+            band = (fade_far - dist) / max(fade_far - optimal_max, 1e-8)
         score = float(np.clip(behind * band, 0.0, 1.0))
-        return score, dist, 1.0 if behind > 0.7 and 1000.0 <= dist <= 1200.0 else 0.0
+        rear = 1.0 if behind > formation["rear_alignment_threshold"] and optimal_min <= dist <= optimal_max else 0.0
+        return score, dist, rear
 
     def _nearest_effective_target(self, combat: Aircraft, effective: dict[str, set[str]]) -> Aircraft | None:
         candidates = [self._by_id(bid) for bid in BLUE_IDS_4V3 if self._by_id(bid).state.alive and bid in effective[combat.aircraft_id]]
@@ -435,12 +455,19 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
         blue_alive = len(self._alive_blue())
         red_all_combat_dead = red_combat_alive == 0
         blue_all_dead = blue_alive == 0
-        if blue_all_dead and red_combat_alive > 0:
-            return True, "red", "red_complete_elimination_success"
+        strict_red_success = (
+            self._attack_kills["red"] == BLUE_TEAM_SIZE_4V3
+            and all(self._death_causes.get(bid) == DEATH_ATTACK for bid in BLUE_IDS_4V3)
+            and red_combat_alive > 0
+        )
         if red_all_combat_dead and blue_all_dead:
             return True, "draw", "mutual_combat_elimination"
         if red_all_combat_dead:
             return True, "blue", "red_all_combat_eliminated"
+        if strict_red_success:
+            return True, "red", "red_complete_elimination_success"
+        if blue_all_dead:
+            return True, "draw", "blue_noncombat_elimination"
         if self.step_count >= int(self.config["simulation"]["max_steps"]):
             return True, "blue" if blue_alive > 0 else "draw", "timeout"
         return False, None, None
@@ -520,6 +547,7 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
             self._episode_metrics["combat_attack_window_steps"] += 1
 
         assisted = 0
+        assisted_targets: set[str] = set()
         for target_id, attackers in attackers_by_target.items():
             target = self._by_id(target_id)
             if not target.state.alive:
@@ -535,9 +563,11 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
                     killer_id = red_attackers[0]
                     last = self._last_support_only_shared_step.get(killer_id, {}).get(target_id)
                     if last is not None and self.step_count - last <= 50:
-                        assisted = 1
-                        self._episode_metrics["support_assisted_kills"] += 1
-                        self._share_to_kill_delays.append(int(self.step_count - last))
+                        if target_id not in assisted_targets:
+                            assisted_targets.add(target_id)
+                            assisted += 1
+                            self._episode_metrics["support_assisted_kills"] += 1
+                            self._share_to_kill_delays.append(int(self.step_count - last))
 
         for aid, cause in step_deaths.items():
             if self._death_causes.get(aid, DEATH_NONE) == DEATH_NONE:
@@ -545,6 +575,8 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
 
         reward, components = self._compute_reward(direct, effective, step_deaths, assisted)
         self._last_reward_components = components
+        for key, value in components.items():
+            self._episode_reward_components[key] += float(value)
 
         # Update progress baseline after reward calculation.
         self._prev_target_distance.clear()
@@ -578,6 +610,7 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
             "red_win": bool(reason == "red_complete_elimination_success"),
             "red_complete_elimination_success": bool(reason == "red_complete_elimination_success"),
             "mutual_combat_elimination": bool(reason == "mutual_combat_elimination"),
+            "blue_noncombat_elimination": bool(reason == "blue_noncombat_elimination"),
             "red_all_combat_eliminated": bool(red_all_combat_eliminated),
             "red_attack_kills": int(self._attack_kills["red"]),
             "blue_attack_kills": int(self._attack_kills["blue"]),
@@ -587,7 +620,7 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
             "red_combat_survivors": int(red_combat_survivors),
             "support_survived": bool(support_alive),
             "death_causes": dict(self._death_causes),
-            "reward_components": dict(self._last_reward_components),
+            "reward_components": dict(self._episode_reward_components),
         }
         for team in ("red", "blue"):
             steps = self._attack_kill_steps[team]

@@ -86,8 +86,8 @@ class LocalCombatVectorEnv4v3:
             env.reset(self.seed + i)
         return _stack_reset(self.envs)
 
-    def reset_at(self, index: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        self.envs[int(index)].reset(self.seed + 1000003 + int(index))
+    def reset_at(self, index: int, seed: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        self.envs[int(index)].reset(int(seed))
         return self.envs[int(index)]._observations()
 
     def step(self, actions: np.ndarray) -> VectorStepResult4v3:
@@ -174,9 +174,9 @@ class SubprocessCombatVectorEnv4v3:
         obs, states, masks = zip(*self._recv_all())
         return np.stack(obs), np.stack(states), np.stack(masks)
 
-    def reset_at(self, index: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def reset_at(self, index: int, seed: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         idx = int(index)
-        self._parents[idx].send(("reset_at", self.seed + 1000003 + idx))
+        self._parents[idx].send(("reset_at", int(seed)))
         return self._parents[idx].recv()
 
     def step(self, actions: np.ndarray) -> VectorStepResult4v3:

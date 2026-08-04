@@ -55,6 +55,15 @@ scenario:
   speed_jitter: 8.0
   heading_jitter: 0.05235987755982989
 
+support_formation:
+  initial_trailing_distance: 1200.0
+  rule_hold_distance: 1200.0
+  reward_optimal_min: 800.0
+  reward_optimal_max: 1800.0
+  reward_fade_near: 400.0
+  reward_fade_far: 3000.0
+  rear_alignment_threshold: 0.7
+
 initial_state:
   red_0: {x: -3600.0, y: 0.0, altitude: 3000.0, v: 150.0, theta: 0.0, psi: 0.0}
   red_1: {x: -2500.0, y: -450.0, altitude: 3000.0, v: 150.0, theta: 0.0, psi: 0.0}
