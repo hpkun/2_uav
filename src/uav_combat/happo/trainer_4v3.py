@@ -176,6 +176,8 @@ class HAPPO4v3Trainer:
         self.total_env_steps = int(t["total_env_steps"])
         if self.total_env_steps <= 0 or self.total_env_steps % self.num_envs != 0:
             raise ValueError("training.total_env_steps must be a positive multiple of num_envs")
+        if self.total_env_steps > 3_000_000:
+            raise ValueError("training.total_env_steps must not exceed the formal 3M experiment budget")
         evaluation = self.config.get("evaluation", {})
         self.evaluation_seed_base = int(e["seed"]) + int(evaluation.get("selection_seed_offset", evaluation.get("seed_offset", 50000)))
         self.envs = make_combat_vector_env_4v3(
@@ -206,6 +208,10 @@ class HAPPO4v3Trainer:
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=self.current_critic_lr)
         self.buffer = HAPPORolloutBuffer3v3(self.rollout_steps, self.num_envs, RED_TEAM_SIZE_4V3, OBS_DIM_4V3, 3, GS_DIM_4V3)
         self.obs, self.global_states, self.alive_masks = self.envs.reset()
+        # VectorEnv.reset() uses the constructor seed plus the global env index.
+        # Keep those episode seeds alongside the live environment state so a
+        # completed summary is labelled before its replacement seed is drawn.
+        self.current_episode_seeds = [int(e["seed"]) + i for i in range(self.num_envs)]
         self.env_steps = 0
         self.vector_steps = 0
         self.update_count = 0
@@ -288,11 +294,12 @@ class HAPPO4v3Trainer:
             self.obs, self.global_states, self.alive_masks = result.observations, result.global_states, result.alive_masks
             for i, summary in enumerate(result.episode_summaries):
                 if summary is not None:
-                    seed = self._next_episode_seed()
                     summary = deepcopy(summary)
-                    summary["episode_seed"] = seed
+                    summary["episode_seed"] = int(self.current_episode_seeds[i])
                     episodes.append(summary)
-                    self.obs[i], self.global_states[i], self.alive_masks[i] = self.envs.reset_at(i, seed)
+                    next_seed = self._next_episode_seed()
+                    self.obs[i], self.global_states[i], self.alive_masks[i] = self.envs.reset_at(i, next_seed)
+                    self.current_episode_seeds[i] = next_seed
             self.vector_steps += 1
             self.env_steps += self.num_envs
         with torch.no_grad():
@@ -497,6 +504,7 @@ class HAPPO4v3Trainer:
             "recent_episodes": deepcopy(self.recent_episodes),
             "last_update_metrics": deepcopy(self.last_update_metrics),
             "last_rollout_reward_means": deepcopy(self.last_rollout_reward_means),
+            "current_episode_seeds": list(self.current_episode_seeds),
             "observations": self.obs,
             "global_states": self.global_states,
             "alive_masks": self.alive_masks,
@@ -552,6 +560,12 @@ class HAPPO4v3Trainer:
         self.recent_episodes = list(ckpt.get("recent_episodes", []))
         self.last_update_metrics = dict(ckpt.get("last_update_metrics", {}))
         self.last_rollout_reward_means = dict(ckpt.get("last_rollout_reward_means", {}))
+        loaded_episode_seeds = ckpt.get("current_episode_seeds")
+        if loaded_episode_seeds is None:
+            loaded_episode_seeds = [int(self.config["experiment"]["seed"]) + i for i in range(self.num_envs)]
+        if len(loaded_episode_seeds) != self.num_envs:
+            raise ValueError("checkpoint current_episode_seeds length does not match num_envs")
+        self.current_episode_seeds = [int(seed) for seed in loaded_episode_seeds]
         if "vector_env_state" in ckpt:
             self.envs.load_state_dict(ckpt["vector_env_state"])
             self.obs = np.asarray(ckpt["observations"], dtype=np.float32)

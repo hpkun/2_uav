@@ -107,6 +107,15 @@ def _aggregate_payload(summary: dict[str, Any], *, label: str, checkpoint: str |
     return payload
 
 
+def _refresh_evaluation_checkpoint_sha(path: Path, checkpoint_path: Path) -> None:
+    """Keep a periodic evaluation's recorded SHA aligned with its checkpoint."""
+    if not path.exists() or not checkpoint_path.exists():
+        return
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["checkpoint_sha256"] = _checkpoint_sha256(checkpoint_path)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=_json_default), encoding="utf-8")
+
+
 def _checkpoint_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as fh:
@@ -235,6 +244,35 @@ def _validate_milestones(cfg: dict[str, Any]) -> None:
             raise ValueError(f"{name} must be a positive multiple of num_envs")
 
 
+def rollout_lengths_to_milestone(
+    current_env_steps: int,
+    milestone_target: int,
+    num_envs: int,
+    configured_rollout_steps: int,
+) -> list[int]:
+    """Return full/partial rollout lengths needed to hit one exact target."""
+    current = int(current_env_steps)
+    target = int(milestone_target)
+    envs = int(num_envs)
+    configured = int(configured_rollout_steps)
+    if envs <= 0 or configured <= 0 or target < current:
+        raise ValueError("invalid rollout milestone arguments")
+    if (target - current) % envs:
+        raise ValueError("milestone target must be reachable in whole vector steps")
+    lengths: list[int] = []
+    while current < target:
+        steps = min(configured, (target - current) // envs)
+        if steps <= 0:
+            raise ValueError("milestone requires at least one vector step")
+        lengths.append(steps)
+        current += steps * envs
+    return lengths
+
+
+def training_throughput(env_steps: int, run_start_env_steps: int, elapsed_seconds: float) -> float:
+    return float(max(0, int(env_steps) - int(run_start_env_steps)) / max(float(elapsed_seconds), 1e-9))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--env-config", default="configs/heterogeneous_4v3_main_v9.yaml")
@@ -283,7 +321,6 @@ def main() -> None:
         "recent_mean_shared_only_pair_ratio",
     ]
     fields = [*metric_fields, *outcome_fields, *[f"mean_rollout_{key}" for key in RED_REWARD_COMPONENT_KEYS_4V3]]
-    started = time.perf_counter()
     resumed = bool(args.resume)
     try:
         if resumed:
@@ -314,7 +351,9 @@ def main() -> None:
             trainer.best_actual_env_steps = 0
             trainer.save_checkpoint(out / "best.pt", is_best=True, scheduled_env_steps=0)
 
-        header_exists = metrics_path.exists() and metrics_path.stat().st_size > 0
+        run_start_env_steps = int(trainer.env_steps)
+        started = time.perf_counter()
+        header_exists = resumed and metrics_path.exists() and metrics_path.stat().st_size > 0
         mode = "a" if resumed else "w"
         with metrics_path.open(mode, newline="", encoding="utf-8") as fh:
             writer = csv.DictWriter(fh, fieldnames=fields)
@@ -330,21 +369,25 @@ def main() -> None:
             eval_interval = int(cfg["training"]["evaluation_interval_env_steps"])
             ckpt_interval = int(cfg["training"]["checkpoint_interval_env_steps"])
             total_target = int(cfg["training"]["total_env_steps"])
-            while trainer.env_steps < total_target:
-                target = min(total_target, next_eval, next_ckpt)
-                remaining = target - int(trainer.env_steps)
-                trainer.collect_rollout(max_env_steps=remaining)
-                metrics = trainer.update()
-                actual = int(trainer.env_steps)
-                if actual != target:
-                    raise RuntimeError(f"inexact milestone: scheduled={target}, actual={actual}")
+
+            # A legacy checkpoint may have stored the threshold that was just
+            # reached. Normalize it before entering the next milestone.
+            while next_eval <= trainer.env_steps:
+                next_eval += eval_interval
+            while next_ckpt <= trainer.env_steps:
+                next_ckpt += ckpt_interval
+            trainer.next_evaluation_env_steps = next_eval
+            trainer.next_checkpoint_env_steps = next_ckpt
+
+            def record_update(metrics: dict[str, float]) -> dict[str, Any]:
                 recent = summarize_4v3_episodes(trainer.recent_episodes)
                 elapsed = time.perf_counter() - started
+                actual = int(trainer.env_steps)
                 row = {key: metrics.get(key, 0.0) for key in metric_fields}
                 row.update({
                     "total_env_steps": total_target,
                     "wall_clock_seconds": elapsed,
-                    "throughput_env_steps_per_second": actual / max(elapsed, 1e-9),
+                    "throughput_env_steps_per_second": training_throughput(actual, run_start_env_steps, elapsed),
                     "recent_red_win_rate": recent.get("red_win_rate", 0.0),
                     "recent_red_at_least_two_attack_kill_rate": recent.get("red_at_least_two_attack_kill_rate", 0.0),
                     "recent_red_any_attack_kill_rate": recent.get("red_any_attack_kill_rate", 0.0),
@@ -359,7 +402,37 @@ def main() -> None:
                 row.update(trainer.last_rollout_reward_means)
                 writer.writerow({key: row.get(key, 0.0) for key in fields})
                 fh.flush()
+                trainer.save_checkpoint(out / "latest.pt", scheduled_env_steps=actual)
+                print(
+                    f"env_steps={actual}/{total_target} update={trainer.update_count} "
+                    f"throughput={training_throughput(actual, run_start_env_steps, elapsed):.1f}/s "
+                    f"recent_win={recent.get('red_win_rate', 0.0):.3f} "
+                    f"kills={recent.get('mean_red_attack_kills', 0.0):.3f} "
+                    f"support_assisted={recent.get('support_assisted_kill_rate', 0.0):.3f}",
+                    flush=True,
+                )
+                return recent
 
+            while trainer.env_steps < total_target:
+                milestone_target = min(total_target, next_eval, next_ckpt)
+                for _ in rollout_lengths_to_milestone(
+                    trainer.env_steps,
+                    milestone_target,
+                    trainer.num_envs,
+                    trainer.rollout_steps,
+                ):
+                    remaining = milestone_target - int(trainer.env_steps)
+                    trainer.collect_rollout(max_env_steps=remaining)
+                    metrics = trainer.update()
+                    record_update(metrics)
+
+                if trainer.env_steps != milestone_target:
+                    raise RuntimeError(
+                        f"inexact milestone after inner rollout loop: "
+                        f"scheduled={milestone_target}, actual={trainer.env_steps}"
+                    )
+
+                actual = int(trainer.env_steps)
                 hit_ckpt = actual == next_ckpt
                 hit_eval = actual == next_eval
                 if hit_ckpt:
@@ -369,13 +442,17 @@ def main() -> None:
                 trainer.next_evaluation_env_steps = next_eval
                 trainer.next_checkpoint_env_steps = next_ckpt
                 if hit_ckpt:
-                    trainer.save_checkpoint(out / f"step_{actual:07d}.pt", scheduled_env_steps=target)
-                trainer.save_checkpoint(out / "latest.pt", scheduled_env_steps=target)
+                    trainer.save_checkpoint(out / f"step_{actual:07d}.pt", scheduled_env_steps=milestone_target)
                 if hit_eval:
                     periodic_label = f"evaluation_selection_step_{actual:07d}"
+                    periodic_checkpoint = (
+                        out / f"step_{actual:07d}.pt" if hit_ckpt else out / "latest.pt"
+                    )
+                    periodic_report_path = out / f"{periodic_label}_evaluation.json"
+                    periodic_report_existed = periodic_report_path.exists()
                     summary = _eval_and_write(
                         trainer, args.env_config, cfg, manifest, out,
-                        label=periodic_label, split="selection", checkpoint_path=out / "latest.pt",
+                        label=periodic_label, split="selection", checkpoint_path=periodic_checkpoint,
                         overwrite=not resumed,
                     )
                     score, score_fields = compute_best_score_4v3(summary)
@@ -387,14 +464,13 @@ def main() -> None:
                         trainer.best_scheduled_env_steps = actual
                         trainer.best_actual_env_steps = actual
                         trainer.save_checkpoint(out / "best.pt", is_best=True, scheduled_env_steps=actual)
-                print(
-                    f"env_steps={actual}/{total_target} update={trainer.update_count} "
-                    f"throughput={actual / max(elapsed, 1e-9):.1f}/s "
-                    f"recent_win={recent.get('red_win_rate', 0.0):.3f} "
-                    f"kills={recent.get('mean_red_attack_kills', 0.0):.3f} "
-                    f"support_assisted={recent.get('support_assisted_kill_rate', 0.0):.3f}",
-                    flush=True,
-                )
+                # This is intentionally after evaluation/best metadata updates.
+                trainer.save_checkpoint(out / "latest.pt", scheduled_env_steps=actual)
+                if hit_eval and (not resumed or not periodic_report_existed):
+                    _refresh_evaluation_checkpoint_sha(
+                        periodic_report_path,
+                        periodic_checkpoint,
+                    )
             trainer.next_evaluation_env_steps = next_eval
             trainer.next_checkpoint_env_steps = next_ckpt
             trainer.save_checkpoint(out / "final.pt", scheduled_env_steps=trainer.env_steps)
@@ -410,7 +486,7 @@ def main() -> None:
                     _eval_and_write(
                         report_trainer, args.env_config, cfg, manifest, out,
                         label=f"{checkpoint_name}_{split}", split=split, checkpoint_path=checkpoint_path,
-                        overwrite=not resumed,
+                        overwrite=True,
                     )
             finally:
                 report_trainer.close()
