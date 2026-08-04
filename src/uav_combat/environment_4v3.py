@@ -10,6 +10,7 @@ from .combat import SimplifiedAttackModel
 from .config import load_config
 from .controller import TargetStateController
 from .dynamics import PointMassDynamics
+from .formation_4v3 import compute_red_combat_formation_reference
 from .geometry import compute_pairwise_geometry
 from .integrator import RK4Integrator
 from .models import Aircraft, AircraftState
@@ -18,6 +19,7 @@ from .scenario_4v3 import (
     BLUE_IDS_4V3,
     RED_COMBAT_IDS_4V3,
     RED_IDS_4V3,
+    resolved_reward_contract_4v3,
     FunctionalHeterogeneous4v3Scenario,
     validate_heterogeneous_4v3_config,
 )
@@ -71,24 +73,30 @@ def _f_distance(distance: float, d_min: float, d_attack: float, d_tail: float) -
     return float(np.clip((d_tail - d) / max(d_tail - d_attack, 1e-8), 0.0, 1.0))
 
 
-def _attack_readiness(attacker: AircraftState, target: AircraftState, d_min: float, d_max: float) -> float:
+def _attack_readiness(
+    attacker: AircraftState,
+    target: AircraftState,
+    d_min: float,
+    d_max: float,
+    fade_distance: float = 2000.0,
+) -> float:
     g = compute_pairwise_geometry(attacker, target)
     f_ata = max(0.0, 1.0 - float(g.ata) / (np.pi / 6.0))
     f_aa = max(0.0, 1.0 - float(g.aa) / (np.pi / 2.0))
-    fd = _f_distance(float(g.distance), d_min, d_max, 2000.0)
+    fd = _f_distance(float(g.distance), d_min, d_max, fade_distance)
     return float(np.clip(fd * f_ata * f_aa, 0.0, 1.0))
 
 
-def _boundary_risk(ac: Aircraft, limits: dict[str, float]) -> float:
+def _boundary_risk(ac: Aircraft, limits: dict[str, float], soft_margin: float = 1000.0) -> float:
     if not ac.state.alive:
         return 0.0
     margin_xy = min(float(limits["x_limit"]) - abs(ac.state.x), float(limits["y_limit"]) - abs(ac.state.y))
     margin_alt = min(ac.state.altitude - float(limits["altitude_min"]),
                      float(limits["altitude_max"]) - ac.state.altitude)
     margin = min(margin_xy, margin_alt)
-    if margin >= 1000.0:
+    if margin >= soft_margin:
         return 0.0
-    return float(np.clip((1000.0 - margin) / 1000.0, 0.0, 1.0))
+    return float(np.clip((soft_margin - margin) / max(soft_margin, 1e-8), 0.0, 1.0))
 
 
 class FunctionalHeterogeneous4v3AirCombatEnv:
@@ -98,6 +106,7 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
         self.config_path = str(config_path)
         self.config = load_config(config_path)
         validate_heterogeneous_4v3_config(self.config)
+        self.reward_contract = resolved_reward_contract_4v3(self.config)
         sim, action, combat = self.config["simulation"], self.config["action"], self.config["combat"]
         self.scenario = FunctionalHeterogeneous4v3Scenario(self.config)
         self.dynamics = PointMassDynamics(float(sim["gravity"]))
@@ -128,6 +137,26 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
         self._episode_metrics: dict[str, float] = {}
         self._episode_reward_components = {k: 0.0 for k in RED_REWARD_COMPONENT_KEYS_4V3}
         self._last_reward_components = {k: 0.0 for k in RED_REWARD_COMPONENT_KEYS_4V3}
+        self._blue_rule_policy = None
+        self._red_rule_policy = None
+
+    def _rule_policy(self, team: str):
+        from .rule_policy_4v3 import make_rule_policy_4v3
+
+        if team == "blue":
+            if self._blue_rule_policy is None:
+                self._blue_rule_policy = make_rule_policy_4v3(self.config, "blue")
+            return self._blue_rule_policy
+        if self._red_rule_policy is None:
+            self._red_rule_policy = make_rule_policy_4v3(self.config, "red")
+        return self._red_rule_policy
+
+    def formation_reference(self) -> dict[str, Any]:
+        return compute_red_combat_formation_reference(
+            self._by_id("red_0"),
+            [self._by_id(cid) for cid in RED_COMBAT_IDS_4V3],
+            direction_validity_threshold=float(self.config["support_formation"]["direction_validity_threshold"]),
+        )
 
     def _by_id(self, aid: str) -> Aircraft:
         return next(a for a in self.aircraft if a.aircraft_id == aid)
@@ -201,6 +230,11 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
         self._episode_metrics = {
             "support_unique_detection_steps": 0,
             "support_shared_target_steps": 0,
+            "support_only_target_steps": 0,
+            "support_shared_pair_steps": 0,
+            "shared_only_combat_target_pairs": 0,
+            "shared_only_pair_ratio_sum": 0.0,
+            "support_active_steps": 0,
             "combat_early_acquisition_steps": 0,
             "support_assisted_kills": 0,
             "support_to_combat_centroid_distance_sum": 0.0,
@@ -264,15 +298,14 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
         if own.aircraft_id == "red_0":
             alive_combat = self._alive_red_combat()
             if alive_combat:
-                positions = np.array([a.state.as_array()[:3] for a in alive_combat])
-                centroid = positions.mean(axis=0)
-                rel = centroid - s.as_array()[:3]
-                mean_heading = float(np.arctan2(np.mean([np.sin(a.state.psi) for a in alive_combat]),
-                                                np.mean([np.cos(a.state.psi) for a in alive_combat])))
+                reference = self.formation_reference()
+                rel = reference["centroid"] - s.as_array()[:3]
+                direction = reference["horizontal_direction"]
+                mean_heading = float(np.arctan2(direction[1], direction[0])) if reference["direction_valid"] else 0.0
                 nearest_threat = min((compute_pairwise_geometry(b.state, s).distance for b in self._alive_blue()), default=6000.0)
                 support_only = self._support_only_target_count(direct)
                 values.extend([rel[0] / 6000.0, rel[1] / 6000.0, rel[2] / 3000.0,
-                               mean_heading / np.pi, np.linalg.norm(rel[:2]) / 6000.0,
+                               mean_heading / np.pi, reference["centroid_distance"] / 6000.0,
                                support_only / 3.0, nearest_threat / 6000.0])
         return _clip_obs(values)
 
@@ -300,19 +333,39 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
                 count += 1
         return count
 
+    def _support_only_pair_count(
+        self,
+        direct: dict[str, set[str]],
+        effective: dict[str, set[str]],
+    ) -> int:
+        support = self._by_id("red_0")
+        if not support.state.alive:
+            return 0
+        return sum(
+            1
+            for cid in RED_COMBAT_IDS_4V3
+            if self._by_id(cid).state.alive
+            for bid in BLUE_IDS_4V3
+            if self._by_id(bid).state.alive
+            and bid in direct["red_0"]
+            and bid not in direct[cid]
+            and bid in effective[cid]
+        )
+
+    def _support_only_pair_ratio(self, direct: dict[str, set[str]], effective: dict[str, set[str]]) -> float:
+        denominator = max(1, len(self._alive_red_combat()) * len(self._alive_blue()))
+        return float(self._support_only_pair_count(direct, effective) / denominator)
+
     def _support_position_score(self) -> tuple[float, float, float]:
         support = self._by_id("red_0")
         alive_combat = self._alive_red_combat()
         if not support.state.alive or not alive_combat:
             return 0.0, 0.0, 0.0
         formation = self._support_formation()
-        centroid = np.array([a.state.as_array()[:3] for a in alive_combat]).mean(axis=0)
-        rel = support.state.as_array()[:3] - centroid
-        dist = float(np.linalg.norm(rel[:2]))
-        mean_heading = float(np.arctan2(np.mean([np.sin(a.state.psi) for a in alive_combat]),
-                                        np.mean([np.cos(a.state.psi) for a in alive_combat])))
-        backward = -np.array([np.cos(mean_heading), np.sin(mean_heading)])
-        behind = max(0.0, float(np.dot(rel[:2] / max(dist, 1e-8), backward)))
+        reference = self.formation_reference()
+        rel = reference["support_relative"]
+        dist = float(reference["centroid_distance"])
+        behind = max(0.0, float(reference["rear_alignment"])) if reference["direction_valid"] else 0.0
         fade_near = formation["reward_fade_near"]
         optimal_min = formation["reward_optimal_min"]
         optimal_max = formation["reward_optimal_max"]
@@ -327,8 +380,8 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
             band = 0.0
         else:
             band = (fade_far - dist) / max(fade_far - optimal_max, 1e-8)
-        score = float(np.clip(behind * band, 0.0, 1.0))
-        rear = 1.0 if behind > formation["rear_alignment_threshold"] and optimal_min <= dist <= optimal_max else 0.0
+        score = float(np.clip((behind * band) if reference["direction_valid"] else band, 0.0, 1.0))
+        rear = 1.0 if reference["direction_valid"] and behind > formation["rear_alignment_threshold"] and optimal_min <= dist <= optimal_max else 0.0
         return score, dist, rear
 
     def _nearest_effective_target(self, combat: Aircraft, effective: dict[str, set[str]]) -> Aircraft | None:
@@ -340,6 +393,12 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
     def _compute_reward(self, direct: dict[str, set[str]], effective: dict[str, set[str]], step_deaths: dict[str, int], assisted: int) -> tuple[float, dict[str, float]]:
         combat = self.config["combat"]
         limits = self.config["battlefield"]
+        rewards = self.reward_contract
+        mission_rewards = rewards["mission"]
+        event_rewards = rewards["events"]
+        combat_dense = rewards["combat_dense"]
+        support_dense = rewards["support_dense"]
+        soft_margin = float(rewards["boundary"]["soft_margin"])
         d_min = float(combat["attack_distance_min"])
         d_max = float(combat["attack_distance_max"])
         components = {k: 0.0 for k in RED_REWARD_COMPONENT_KEYS_4V3}
@@ -350,14 +409,14 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
         for aid, cause in step_deaths.items():
             ac = self._by_id(aid)
             if cause == DEATH_ATTACK and ac.team == "blue":
-                components["kill_event_reward"] += 10.0
+                components["kill_event_reward"] += float(event_rewards["blue_combat_attack_kill"])
             elif cause == DEATH_ATTACK and ac.team == "red" and ac.role == "combat":
-                components["combat_loss_event_penalty"] -= 10.0
+                components["combat_loss_event_penalty"] += float(event_rewards["red_combat_attack_loss"])
             elif cause == DEATH_ATTACK and ac.aircraft_id == "red_0":
-                components["support_loss_event_penalty"] -= 12.0
+                components["support_loss_event_penalty"] += float(event_rewards["red_support_attack_loss"])
             elif cause in (DEATH_BOUNDARY_ALTITUDE, DEATH_BOUNDARY_XY) and ac.team == "red":
-                components["boundary_event_penalty"] -= 10.0
-        components["support_assisted_kill_reward"] += 2.0 * float(assisted)
+                components["boundary_event_penalty"] += float(event_rewards["red_boundary_loss"])
+        components["support_assisted_kill_reward"] += float(event_rewards["support_assisted_kill"]) * float(assisted)
 
         combat_approach = combat_readiness = combat_threat = combat_boundary = 0.0
         for cid in RED_COMBAT_IDS_4V3:
@@ -370,13 +429,20 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
                 if g.distance > d_max:
                     prev = self._prev_target_distance.get(cid)
                     if prev is not None and prev[0] == target.aircraft_id:
-                        combat_approach += 0.003 * float(np.clip((prev[1] - g.distance) / 100.0, -1.0, 1.0))
-                ready = 0.02 * _attack_readiness(c.state, target.state, d_min, d_max)
+                        combat_approach += float(combat_dense["approach_scale"]) * float(
+                            np.clip((prev[1] - g.distance) / float(combat_dense["approach_distance_normalizer"]), -1.0, 1.0)
+                        )
+                ready = float(combat_dense["readiness_scale"]) * _attack_readiness(
+                    c.state, target.state, d_min, d_max, float(combat_dense["readiness_fade_distance"])
+                )
                 combat_readiness += ready
             threats = [b for b in self._alive_blue() if c.aircraft_id in direct[b.aircraft_id]]
             if threats:
-                combat_threat += 0.015 * max(_attack_readiness(b.state, c.state, d_min, d_max) for b in threats)
-            combat_boundary += 0.01 * _boundary_risk(c, limits)
+                combat_threat += float(combat_dense["threat_scale"]) * max(
+                    _attack_readiness(b.state, c.state, d_min, d_max, float(combat_dense["readiness_fade_distance"]))
+                    for b in threats
+                )
+            combat_boundary += float(combat_dense["boundary_scale"]) * _boundary_risk(c, limits, soft_margin)
         components["combat_approach_reward"] = combat_approach / 3.0
         components["combat_readiness_reward"] = combat_readiness / 3.0
         components["combat_threat_penalty"] = -combat_threat / 3.0
@@ -386,15 +452,20 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
 
         support = self._by_id("red_0")
         support_only_count = self._support_only_target_count(direct)
+        support_only_pairs = self._support_only_pair_count(direct, effective)
+        pair_ratio = self._support_only_pair_ratio(direct, effective)
         alive_blue_count = max(1, blue_alive)
-        coverage = 0.006 * support_only_count / alive_blue_count if support.state.alive else 0.0
+        coverage = float(support_dense["coverage_scale"]) * pair_ratio if support.state.alive else 0.0
         pos_score, _, _ = self._support_position_score()
         support_threat = 0.0
         if support.state.alive and self._alive_blue():
-            support_threat = 0.01 * max(_attack_readiness(b.state, support.state, d_min, d_max) for b in self._alive_blue())
-        support_boundary = 0.01 * _boundary_risk(support, limits) if support.state.alive else 0.0
+            support_threat = float(support_dense["threat_scale"]) * max(
+                _attack_readiness(b.state, support.state, d_min, d_max, float(combat_dense["readiness_fade_distance"]))
+                for b in self._alive_blue()
+            )
+        support_boundary = float(support_dense["boundary_scale"]) * _boundary_risk(support, limits, soft_margin) if support.state.alive else 0.0
         components["support_coverage_reward"] = coverage
-        components["support_position_reward"] = 0.004 * pos_score
+        components["support_position_reward"] = float(support_dense["position_scale"]) * pos_score
         components["support_threat_penalty"] = -support_threat
         components["support_boundary_penalty"] = -support_boundary
 
@@ -404,18 +475,20 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
             components["support_coverage_reward"] + components["support_position_reward"] +
             components["support_threat_penalty"] + components["support_boundary_penalty"]
         )
-        components["total_dense_reward"] = float(np.clip(dense, -0.03, 0.03))
+        components["total_dense_reward"] = float(np.clip(dense, float(rewards["dense_clip"]["min"]), float(rewards["dense_clip"]["max"])))
 
         done, outcome, reason = self._termination()
         if done:
             if reason == "red_complete_elimination_success":
-                components["mission_reward"] += 30.0
+                components["mission_reward"] += float(mission_rewards["red_complete_elimination_success"])
             elif reason == "red_all_combat_eliminated":
-                components["mission_reward"] -= 30.0
+                components["mission_reward"] += float(mission_rewards["red_all_combat_eliminated"])
             elif reason == "timeout":
-                components["mission_reward"] -= 10.0
+                components["mission_reward"] += float(mission_rewards["timeout"])
             elif reason == "mutual_combat_elimination":
-                components["mission_reward"] -= 15.0
+                components["mission_reward"] += float(mission_rewards["mutual_combat_elimination"])
+            elif reason == "blue_noncombat_elimination":
+                components["mission_reward"] += float(mission_rewards["blue_noncombat_elimination"])
 
         event = (components["kill_event_reward"] + components["combat_loss_event_penalty"] +
                  components["support_loss_event_penalty"] + components["boundary_event_penalty"] +
@@ -423,13 +496,23 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
         components["team_total_reward"] = components["mission_reward"] + event + components["total_dense_reward"]
         return float(components["team_total_reward"]), components
 
-    def _update_support_metrics(self, direct: dict[str, set[str]], effective: dict[str, set[str]]) -> None:
+    def _record_support_share_metrics(self, direct: dict[str, set[str]], effective: dict[str, set[str]]) -> None:
         support = self._by_id("red_0")
         if not support.state.alive:
             return
+        if not self._alive_red_combat():
+            return
+        self._episode_metrics["support_active_steps"] += 1
         support_only_count = self._support_only_target_count(direct)
+        support_only_pairs = self._support_only_pair_count(direct, effective)
+        pair_ratio = self._support_only_pair_ratio(direct, effective)
         if support_only_count > 0:
             self._episode_metrics["support_unique_detection_steps"] += 1
+            self._episode_metrics["support_only_target_steps"] += 1
+        if support_only_pairs > 0:
+            self._episode_metrics["support_shared_pair_steps"] += 1
+        self._episode_metrics["shared_only_combat_target_pairs"] += support_only_pairs
+        self._episode_metrics["shared_only_pair_ratio_sum"] += pair_ratio
         shared_this_step = 0
         for cid in RED_COMBAT_IDS_4V3:
             combat = self._by_id(cid)
@@ -440,27 +523,50 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
                     self._first_support_only_shared_step[cid].setdefault(bid, self.step_count)
                     self._last_support_only_shared_step[cid][bid] = self.step_count
                     shared_this_step += 1
-                if bid in direct[cid] and bid in self._last_support_only_shared_step[cid]:
-                    # The first share measures discovery lead time; the last
-                    # share remains the credit source for the assisted-kill window.
-                    first_share = self._first_support_only_shared_step[cid].get(bid)
-                    if first_share is None:
-                        # Keep manually constructed legacy test states usable;
-                        # normal episode state always records first and last together.
-                        first_share = self._last_support_only_shared_step[cid][bid]
-                    delay = self.step_count - first_share
-                    key = (cid, bid)
-                    if delay >= 0 and key not in self._share_to_direct_recorded:
-                        self._share_to_direct_delays.append(int(delay))
-                        self._episode_metrics["combat_early_acquisition_steps"] += 1
-                        self._share_to_direct_recorded.add(key)
         if shared_this_step > 0:
             self._episode_metrics["support_shared_target_steps"] += 1
         pos_score, dist, rear = self._support_position_score()
         self._episode_metrics["support_to_combat_centroid_distance_sum"] += dist
         self._episode_metrics["support_rear_position_steps"] += rear
-        if self._alive_blue() and max(_attack_readiness(b.state, support.state, 100.0, 1000.0) for b in self._alive_blue()) > 0.0:
+        if self._alive_blue() and max(
+            _attack_readiness(
+                b.state,
+                support.state,
+                float(self.config["combat"]["attack_distance_min"]),
+                float(self.config["combat"]["attack_distance_max"]),
+                float(self.reward_contract["combat_dense"]["readiness_fade_distance"]),
+            )
+            for b in self._alive_blue()
+        ) > 0.0:
             self._episode_metrics["support_threat_exposure_steps"] += 1
+
+    def _record_direct_observations_after_dynamics(self, direct: dict[str, set[str]]) -> None:
+        for cid in RED_COMBAT_IDS_4V3:
+            if not self._by_id(cid).state.alive:
+                continue
+            for bid in BLUE_IDS_4V3:
+                if bid not in direct[cid]:
+                    continue
+                first_share = self._first_support_only_shared_step[cid].get(bid)
+                if first_share is None:
+                    # Legacy diagnostics may seed only the last-share map;
+                    # normal episode state records both maps together.
+                    first_share = self._last_support_only_shared_step[cid].get(bid)
+                if first_share is None:
+                    continue
+                key = (cid, bid)
+                if key in self._share_to_direct_recorded:
+                    continue
+                delay = self.step_count - first_share
+                if delay >= 0:
+                    self._share_to_direct_delays.append(int(delay))
+                    self._episode_metrics["combat_early_acquisition_steps"] += 1
+                    self._share_to_direct_recorded.add(key)
+
+    def _update_support_metrics(self, direct: dict[str, set[str]], effective: dict[str, set[str]]) -> None:
+        """Compatibility wrapper used by diagnostics and focused tests."""
+        self._record_support_share_metrics(direct, effective)
+        self._record_direct_observations_after_dynamics(direct)
 
     def _termination(self) -> tuple[bool, str | None, str | None]:
         red_combat_alive = len(self._alive_red_combat())
@@ -490,22 +596,18 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
         This helper is for rule-vs-rule reachability checks. RL training still
         supplies red actions externally.
         """
-        from .rule_policy_4v3 import make_rule_policy_4v3
-
         direct = self._direct_visible_ids()
         effective = self._effective_visible_ids(direct)
-        policy = make_rule_policy_4v3(self.config, "red")
+        policy = self._rule_policy("red")
         return policy.select_actions(self._team("red"), self._team("blue"), visibility=effective)
 
     def step(self, red_actions: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, bool, bool, dict[str, Any]]:
         if not self._running:
             raise RuntimeError("environment must be reset before step")
         self.step_count += 1
-        from .rule_policy_4v3 import make_rule_policy_4v3
-
         direct_pre = self._direct_visible_ids()
         effective_pre = self._effective_visible_ids(direct_pre)
-        self._update_support_metrics(direct_pre, effective_pre)
+        self._record_support_share_metrics(direct_pre, effective_pre)
 
         # Persist previous target distances for progress reward.
         for cid in RED_COMBAT_IDS_4V3:
@@ -514,7 +616,7 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
             if target is not None:
                 self._prev_target_distance.setdefault(cid, (target.aircraft_id, compute_pairwise_geometry(c.state, target.state).distance))
 
-        blue_policy = make_rule_policy_4v3(self.config, "blue")
+        blue_policy = self._rule_policy("blue")
         blue_actions, _ = blue_policy.select_actions(self._team("blue"), self._team("red"), visibility=direct_pre)
 
         all_actions: dict[str, np.ndarray] = {}
@@ -541,6 +643,9 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
 
         direct = self._direct_visible_ids()
         effective = self._effective_visible_ids(direct)
+        # Direct visibility is evaluated again after dynamics and before attack
+        # resolution, so a newly acquired target cannot lose its first-direct event.
+        self._record_direct_observations_after_dynamics(direct)
         attackers_by_target: dict[str, list[str]] = {}
         for ac in self.aircraft:
             if not ac.state.alive or not ac.can_attack:
@@ -572,14 +677,22 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
             if killing_team == "red" and target_id in BLUE_IDS_4V3:
                 red_attackers = sorted(aid for aid in attackers if aid in RED_COMBAT_IDS_4V3)
                 if red_attackers:
-                    killer_id = red_attackers[0]
-                    last = self._last_support_only_shared_step.get(killer_id, {}).get(target_id)
-                    if last is not None and self.step_count - last <= 50:
-                        if target_id not in assisted_targets:
-                            assisted_targets.add(target_id)
-                            assisted += 1
-                            self._episode_metrics["support_assisted_kills"] += 1
-                            self._share_to_kill_delays.append(int(self.step_count - last))
+                    window = int(self.reward_contract["support_credit"]["assisted_window_steps"])
+                    eligible: list[tuple[int, float, str]] = []
+                    for attacker_id in red_attackers:
+                        last = self._last_support_only_shared_step.get(attacker_id, {}).get(target_id)
+                        if last is None or self.step_count - last > window:
+                            continue
+                        distance = float(compute_pairwise_geometry(self._by_id(attacker_id).state, target.state).distance)
+                        eligible.append((int(last), distance, attacker_id))
+                    if eligible and target_id not in assisted_targets:
+                        # Prefer the most recent valid share, then the closest
+                        # participating combat aircraft at the kill step.
+                        last, _, _ = sorted(eligible, key=lambda item: (-item[0], item[1], item[2]))[0]
+                        assisted_targets.add(target_id)
+                        assisted += 1
+                        self._episode_metrics["support_assisted_kills"] += 1
+                        self._share_to_kill_delays.append(int(self.step_count - last))
 
         for aid, cause in step_deaths.items():
             if self._death_causes.get(aid, DEATH_NONE) == DEATH_NONE:
@@ -615,6 +728,8 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
         red_all_combat_eliminated = red_combat_survivors == 0
         support_alive = self._by_id("red_0").state.alive
         length = max(1, int(self.step_count))
+        support_active = int(self._episode_metrics["support_active_steps"])
+        support_denominator = max(1, support_active)
         summary = {
             "episode_length": int(self.step_count),
             "environment_outcome": outcome,
@@ -643,16 +758,85 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
             "support_shared_target_steps": int(self._episode_metrics["support_shared_target_steps"]),
             "support_assisted_kills": int(self._episode_metrics["support_assisted_kills"]),
             "support_assisted_kill_rate": float(self._episode_metrics["support_assisted_kills"] / max(1, self._attack_kills["red"])),
+            "support_assisted_episode_rate": float(self._episode_metrics["support_assisted_kills"] > 0),
+            "support_active_steps": support_active,
+            "support_only_target_steps": int(self._episode_metrics["support_only_target_steps"]),
+            "support_shared_pair_steps": int(self._episode_metrics["support_shared_pair_steps"]),
+            "mean_shared_only_combat_target_pairs": float(self._episode_metrics["shared_only_combat_target_pairs"] / support_denominator),
+            "mean_shared_only_pair_ratio": float(self._episode_metrics["shared_only_pair_ratio_sum"] / support_denominator),
+            "support_only_target_step_rate": float(self._episode_metrics["support_only_target_steps"] / support_denominator),
+            "support_shared_pair_step_rate": float(self._episode_metrics["support_shared_pair_steps"] / support_denominator),
+            "share_to_direct_event_count": int(len(self._share_to_direct_delays)),
+            "share_to_kill_event_count": int(len(self._share_to_kill_delays)),
             "mean_share_to_direct_delay": float(np.mean(self._share_to_direct_delays)) if self._share_to_direct_delays else None,
             "mean_share_to_kill_delay": float(np.mean(self._share_to_kill_delays)) if self._share_to_kill_delays else None,
+            "combat_early_acquisition_events": int(self._episode_metrics["combat_early_acquisition_steps"]),
             "combat_early_acquisition_steps": int(self._episode_metrics["combat_early_acquisition_steps"]),
-            "support_unique_detection_step_rate": float(self._episode_metrics["support_unique_detection_steps"] / length),
-            "support_shared_target_step_rate": float(self._episode_metrics["support_shared_target_steps"] / length),
+            "support_unique_detection_step_rate": float(self._episode_metrics["support_unique_detection_steps"] / support_denominator),
+            "support_shared_target_step_rate": float(self._episode_metrics["support_shared_target_steps"] / support_denominator),
             "combat_attack_window_step_rate": float(self._episode_metrics["combat_attack_window_steps"] / length),
             "combat_readiness_mean": float(self._episode_metrics["combat_readiness_sum"] / length),
             "combat_threat_mean": float(self._episode_metrics["combat_threat_sum"] / length),
-            "mean_support_to_combat_centroid_distance": float(self._episode_metrics["support_to_combat_centroid_distance_sum"] / length),
-            "support_rear_position_rate": float(self._episode_metrics["support_rear_position_steps"] / length),
-            "support_threat_exposure_rate": float(self._episode_metrics["support_threat_exposure_steps"] / length),
+            "mean_support_to_combat_centroid_distance": float(self._episode_metrics["support_to_combat_centroid_distance_sum"] / support_denominator) if support_active else 0.0,
+            "support_rear_position_rate": float(self._episode_metrics["support_rear_position_steps"] / support_denominator) if support_active else 0.0,
+            "support_threat_exposure_rate": float(self._episode_metrics["support_threat_exposure_steps"] / support_denominator) if support_active else 0.0,
         })
         return summary
+
+    def state_dict(self) -> dict[str, Any]:
+        """Serialize all mutable episode state needed for exact checkpoint resume."""
+        return {
+            "aircraft": {
+                ac.aircraft_id: {
+                    "state": ac.state.as_array().tolist(),
+                    "alive": bool(ac.state.alive),
+                }
+                for ac in self.aircraft
+            },
+            "step_count": int(self.step_count),
+            "running": bool(self._running),
+            "death_causes": dict(self._death_causes),
+            "attack_kills": dict(self._attack_kills),
+            "attack_kill_steps": {team: list(steps) for team, steps in self._attack_kill_steps.items()},
+            "prev_target_distance": {key: [value[0], float(value[1])] for key, value in self._prev_target_distance.items()},
+            "first_support_only_shared_step": {
+                cid: dict(values) for cid, values in self._first_support_only_shared_step.items()
+            },
+            "last_support_only_shared_step": {
+                cid: dict(values) for cid, values in self._last_support_only_shared_step.items()
+            },
+            "share_to_direct_recorded": [list(key) for key in self._share_to_direct_recorded],
+            "share_to_direct_delays": list(self._share_to_direct_delays),
+            "share_to_kill_delays": list(self._share_to_kill_delays),
+            "episode_metrics": dict(self._episode_metrics),
+            "episode_reward_components": dict(self._episode_reward_components),
+            "last_reward_components": dict(self._last_reward_components),
+        }
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        if not self.aircraft:
+            self.aircraft = self.scenario.reset(0)
+        for aid, saved in state["aircraft"].items():
+            ac = self._by_id(aid)
+            values = [float(v) for v in saved["state"]]
+            ac.state = AircraftState(*values, bool(saved["alive"]))
+        self.step_count = int(state["step_count"])
+        self._running = bool(state["running"])
+        self._death_causes = {str(k): int(v) for k, v in state["death_causes"].items()}
+        self._attack_kills = {str(k): int(v) for k, v in state["attack_kills"].items()}
+        self._attack_kill_steps = {str(k): [int(v) for v in values] for k, values in state["attack_kill_steps"].items()}
+        self._prev_target_distance = {str(k): (str(v[0]), float(v[1])) for k, v in state["prev_target_distance"].items()}
+        self._first_support_only_shared_step = {
+            str(cid): {str(bid): int(step) for bid, step in values.items()}
+            for cid, values in state["first_support_only_shared_step"].items()
+        }
+        self._last_support_only_shared_step = {
+            str(cid): {str(bid): int(step) for bid, step in values.items()}
+            for cid, values in state["last_support_only_shared_step"].items()
+        }
+        self._share_to_direct_recorded = {tuple(key) for key in state["share_to_direct_recorded"]}
+        self._share_to_direct_delays = [int(v) for v in state["share_to_direct_delays"]]
+        self._share_to_kill_delays = [int(v) for v in state["share_to_kill_delays"]]
+        self._episode_metrics = {str(k): float(v) for k, v in state["episode_metrics"].items()}
+        self._episode_reward_components = {str(k): float(v) for k, v in state["episode_reward_components"].items()}
+        self._last_reward_components = {str(k): float(v) for k, v in state["last_reward_components"].items()}

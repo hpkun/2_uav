@@ -1,6 +1,8 @@
 """Functional heterogeneous red 4v3 main-experiment scenario."""
 from __future__ import annotations
 
+from copy import deepcopy
+import math
 from typing import Any
 
 import numpy as np
@@ -23,6 +25,45 @@ FIXED_ROLES_4V3 = {
     "blue_1": "combat",
     "blue_2": "combat",
 }
+
+REWARD_CONTRACT_REQUIRED_4V3 = {
+    "mission": (
+        "red_complete_elimination_success",
+        "red_all_combat_eliminated",
+        "timeout",
+        "mutual_combat_elimination",
+        "blue_noncombat_elimination",
+    ),
+    "events": (
+        "blue_combat_attack_kill",
+        "red_combat_attack_loss",
+        "red_support_attack_loss",
+        "red_boundary_loss",
+        "support_assisted_kill",
+    ),
+    "combat_dense": (
+        "approach_scale",
+        "approach_distance_normalizer",
+        "readiness_scale",
+        "threat_scale",
+        "boundary_scale",
+        "readiness_fade_distance",
+    ),
+    "support_dense": (
+        "coverage_scale",
+        "position_scale",
+        "threat_scale",
+        "boundary_scale",
+    ),
+    "dense_clip": ("min", "max"),
+    "support_credit": ("assisted_window_steps",),
+    "boundary": ("soft_margin",),
+}
+
+
+def resolved_reward_contract_4v3(config: dict[str, Any]) -> dict[str, Any]:
+    """Return the validated, resolved reward contract without mutable aliases."""
+    return deepcopy(config["rewards"])
 
 
 def validate_heterogeneous_4v3_config(config: dict[str, Any]) -> None:
@@ -61,6 +102,7 @@ def validate_heterogeneous_4v3_config(config: dict[str, Any]) -> None:
         "reward_fade_near",
         "reward_fade_far",
         "rear_alignment_threshold",
+        "direction_validity_threshold",
     )
     missing = [key for key in required_formation if key not in formation]
     if missing:
@@ -78,6 +120,51 @@ def validate_heterogeneous_4v3_config(config: dict[str, Any]) -> None:
             "support_formation distances must satisfy "
             "0 < reward_fade_near <= reward_optimal_min <= reward_optimal_max <= reward_fade_far"
         )
+    direction_threshold = float(formation["direction_validity_threshold"])
+    if not math.isfinite(direction_threshold) or direction_threshold < 0.0:
+        raise ValueError("support_formation.direction_validity_threshold must be finite and non-negative")
+    if not (0.0 <= float(formation["rear_alignment_threshold"]) <= 1.0):
+        raise ValueError("support_formation.rear_alignment_threshold must be in [0, 1]")
+
+    rewards = config.get("rewards")
+    if not isinstance(rewards, dict):
+        raise KeyError("missing rewards contract")
+    for section, required in REWARD_CONTRACT_REQUIRED_4V3.items():
+        values = rewards.get(section)
+        if not isinstance(values, dict):
+            raise KeyError(f"missing rewards.{section} contract section")
+        missing_reward = [key for key in required if key not in values]
+        if missing_reward:
+            raise KeyError(f"missing rewards.{section} fields: {', '.join(missing_reward)}")
+        for key in required:
+            value = float(values[key])
+            if not math.isfinite(value):
+                raise ValueError(f"rewards.{section}.{key} must be finite")
+    mission = rewards["mission"]
+    events = rewards["events"]
+    dense_clip = rewards["dense_clip"]
+    if mission["red_complete_elimination_success"] <= 0.0:
+        raise ValueError("red_complete_elimination_success mission reward must be positive")
+    for key in ("red_all_combat_eliminated", "timeout", "mutual_combat_elimination", "blue_noncombat_elimination"):
+        if float(mission[key]) >= 0.0:
+            raise ValueError(f"rewards.mission.{key} must be negative")
+    if float(events["blue_combat_attack_kill"]) <= 0.0 or float(events["support_assisted_kill"]) <= 0.0:
+        raise ValueError("positive event rewards must be positive")
+    for key in ("red_combat_attack_loss", "red_support_attack_loss", "red_boundary_loss"):
+        if float(events[key]) >= 0.0:
+            raise ValueError(f"rewards.events.{key} must be negative")
+    for section in ("combat_dense", "support_dense"):
+        for key, value in rewards[section].items():
+            if key != "readiness_fade_distance" and float(value) <= 0.0:
+                raise ValueError(f"rewards.{section}.{key} must be positive")
+    if float(rewards["combat_dense"]["readiness_fade_distance"]) <= 0.0:
+        raise ValueError("rewards.combat_dense.readiness_fade_distance must be positive")
+    if float(dense_clip["min"]) >= float(dense_clip["max"]):
+        raise ValueError("rewards.dense_clip.min must be less than max")
+    if int(rewards["support_credit"]["assisted_window_steps"]) <= 0:
+        raise ValueError("rewards.support_credit.assisted_window_steps must be positive")
+    if float(rewards["boundary"]["soft_margin"]) <= 0.0:
+        raise ValueError("rewards.boundary.soft_margin must be positive")
 
 
 class FunctionalHeterogeneous4v3Scenario:

@@ -11,7 +11,7 @@ network:
 
 training:
   training_mode: fixed_rule_blue_heterogeneous_4v3_happo
-  total_env_steps: 1000000
+  total_env_steps: 3000000
   num_envs: 8
   num_env_workers: 4
   rollout_steps: 256
@@ -40,9 +40,11 @@ training:
   checkpoint_interval_env_steps: 100000
 
 evaluation:
-  episodes: 60
   deterministic: true
-  seed_offset: 50000
+  selection_episodes: 60
+  test_episodes: 200
+  selection_seed_offset: 50000
+  test_seed_offset: 150000
 
 notes:
   source_algorithm: "HAPPO update is unchanged; this config only changes the red team size and v9 environment contract."

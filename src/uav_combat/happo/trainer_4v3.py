@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from ..config import load_config
 from ..environment_4v3 import GS_DIM_4V3, OBS_DIM_4V3
 from ..mappo.trainer_3v3 import linear_schedule, resolve_device
 from ..mappo.vector_env_4v3 import RED_REWARD_COMPONENT_KEYS_4V3, RED_TEAM_SIZE_4V3, make_combat_vector_env_4v3
+from ..scenario_4v3 import resolved_reward_contract_4v3
 from .buffer_3v3 import HAPPORolloutBuffer3v3
 from .metrics import explained_variance
 from .networks import CentralizedValueCritic, IndependentHAPPOActors
@@ -27,6 +29,11 @@ from .trainer_3v3 import (
 
 CHECKPOINT_FAMILY_HAPPO_4V3 = "functional_heterogeneous_4v3_v9_happo"
 CHECKPOINT_VERSION_HAPPO_4V3 = 1
+
+
+def _sha256_json(value: Any) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def best_score_fields_4v3() -> list[str]:
@@ -67,6 +74,9 @@ def summarize_4v3_episodes(records: list[dict[str, Any]]) -> dict[str, Any]:
     def reward_mean(key: str) -> float:
         return float(np.mean([r.get("reward_components", {}).get(key, 0.0) for r in records]))
 
+    total_red_attack_kills = sum(int(r.get("red_attack_kills", 0)) for r in records)
+    total_support_assisted_kills = sum(int(r.get("support_assisted_kills", 0)) for r in records)
+
     out = {
         "episodes": float(n),
         "red_win_rate": float(np.mean([r.get("red_win", False) for r in records])),
@@ -75,7 +85,8 @@ def summarize_4v3_episodes(records: list[dict[str, Any]]) -> dict[str, Any]:
         "red_any_attack_kill_rate": float(np.mean([r.get("red_any_attack_kill", False) for r in records])),
         "mean_red_attack_kills": float(np.mean([r.get("red_attack_kills", 0) for r in records])),
         "mean_blue_attack_kills": float(np.mean([r.get("blue_attack_kills", 0) for r in records])),
-        "support_assisted_kill_rate": float(np.mean([r.get("support_assisted_kill_rate", 0.0) for r in records])),
+        "support_assisted_kill_rate": float(total_support_assisted_kills / max(1, total_red_attack_kills)),
+        "support_assisted_episode_rate": float(np.mean([int(r.get("support_assisted_kills", 0)) > 0 for r in records])),
         "mean_support_assisted_kills": float(np.mean([r.get("support_assisted_kills", 0) for r in records])),
         "mean_red_combat_survivors": float(np.mean([r.get("red_combat_survivors", 0) for r in records])),
         "timeout_rate": float(np.mean([r.get("termination_reason") == "timeout" for r in records])),
@@ -97,8 +108,16 @@ def summarize_4v3_episodes(records: list[dict[str, Any]]) -> dict[str, Any]:
         "red_all_combat_eliminated_rate": float(np.mean([r.get("red_all_combat_eliminated", False) for r in records])),
         "support_unique_detection_step_rate": float(np.mean([r.get("support_unique_detection_step_rate", 0.0) for r in records])),
         "support_shared_target_step_rate": float(np.mean([r.get("support_shared_target_step_rate", 0.0) for r in records])),
+        "support_only_target_step_rate": float(np.mean([r.get("support_only_target_step_rate", 0.0) for r in records])),
+        "support_shared_pair_step_rate": float(np.mean([r.get("support_shared_pair_step_rate", 0.0) for r in records])),
+        "mean_shared_only_combat_target_pairs": float(np.mean([r.get("mean_shared_only_combat_target_pairs", 0.0) for r in records])),
+        "mean_shared_only_pair_ratio": float(np.mean([r.get("mean_shared_only_pair_ratio", 0.0) for r in records])),
+        "mean_support_active_steps": float(np.mean([r.get("support_active_steps", 0) for r in records])),
         "mean_share_to_direct_delay": mean_optional("mean_share_to_direct_delay"),
         "mean_share_to_kill_delay": mean_optional("mean_share_to_kill_delay"),
+        "share_to_direct_event_count": float(sum(int(r.get("share_to_direct_event_count", 0)) for r in records)),
+        "share_to_kill_event_count": float(sum(int(r.get("share_to_kill_event_count", 0)) for r in records)),
+        "mean_combat_early_acquisition_events": float(np.mean([r.get("combat_early_acquisition_events", r.get("combat_early_acquisition_steps", 0)) for r in records])),
         "mean_combat_early_acquisition_steps": float(np.mean([r.get("combat_early_acquisition_steps", 0) for r in records])),
         "combat_attack_window_step_rate": float(np.mean([r.get("combat_attack_window_step_rate", 0.0) for r in records])),
         "combat_readiness_mean": float(np.mean([r.get("combat_readiness_mean", 0.0) for r in records])),
@@ -110,8 +129,24 @@ def summarize_4v3_episodes(records: list[dict[str, Any]]) -> dict[str, Any]:
     out.update({key: reward_mean(key) for key in RED_REWARD_COMPONENT_KEYS_4V3})
     kill_distribution = {str(k): 0.0 for k in range(4)}
     for r in records:
-        kill_distribution[str(int(r.get("red_attack_kills", 0)))] += 1.0
+        kills = int(r.get("red_attack_kills", 0))
+        kill_distribution[str(min(3, max(0, kills)))] += 1.0
     out["red_attack_kill_distribution"] = {k: v / n for k, v in kill_distribution.items()}  # type: ignore[assignment]
+    out["mean_support_only_target_steps"] = float(np.mean([r.get("support_only_target_steps", 0) for r in records]))
+    out["mean_support_shared_pair_steps"] = float(np.mean([r.get("support_shared_pair_steps", 0) for r in records]))
+    out["mean_support_unique_detection_steps"] = float(np.mean([r.get("support_unique_detection_steps", 0) for r in records]))
+    out["mean_support_shared_target_steps"] = float(np.mean([r.get("support_shared_target_steps", 0) for r in records]))
+    out["mean_share_to_direct_event_count"] = float(np.mean([r.get("share_to_direct_event_count", 0) for r in records]))
+    out["mean_share_to_kill_event_count"] = float(np.mean([r.get("share_to_kill_event_count", 0) for r in records]))
+    out["mean_combat_early_acquisition_events"] = float(np.mean([
+        r.get("combat_early_acquisition_events", r.get("combat_early_acquisition_steps", 0))
+        for r in records
+    ]))
+    out["mean_combat_early_acquisition_steps"] = out["mean_combat_early_acquisition_events"]
+    out["death_cause_counts"] = {
+        str(cause): int(sum(1 for r in records for value in r.get("death_causes", {}).values() if int(value) == cause))
+        for cause in (0, 1, 2, 5)
+    }
     return out
 
 
@@ -121,6 +156,7 @@ class HAPPO4v3Trainer:
     def __init__(self, env_config: str | Path, config: dict[str, Any]) -> None:
         self.env_config = str(env_config)
         self.env_contract_config = load_config(self.env_config)
+        self.reward_contract = resolved_reward_contract_4v3(self.env_contract_config)
         self.config = deepcopy(config)
         t, n, e = self.config["training"], self.config["network"], self.config["experiment"]
         if t.get("training_mode") != "fixed_rule_blue_heterogeneous_4v3_happo":
@@ -135,8 +171,13 @@ class HAPPO4v3Trainer:
         self.episode_seed_rng = np.random.default_rng(int(e["seed"]) + 1009)
         self.num_envs = int(t["num_envs"])
         self.rollout_steps = int(t["rollout_steps"])
+        if self.rollout_steps <= 0:
+            raise ValueError("training.rollout_steps must be positive")
         self.total_env_steps = int(t["total_env_steps"])
-        self.evaluation_seed_base = int(e["seed"]) + int(self.config.get("evaluation", {}).get("seed_offset", 50000))
+        if self.total_env_steps <= 0 or self.total_env_steps % self.num_envs != 0:
+            raise ValueError("training.total_env_steps must be a positive multiple of num_envs")
+        evaluation = self.config.get("evaluation", {})
+        self.evaluation_seed_base = int(e["seed"]) + int(evaluation.get("selection_seed_offset", evaluation.get("seed_offset", 50000)))
         self.envs = make_combat_vector_env_4v3(
             self.env_config,
             self.num_envs,
@@ -168,6 +209,7 @@ class HAPPO4v3Trainer:
         self.env_steps = 0
         self.vector_steps = 0
         self.update_count = 0
+        self.effective_rollout_steps = self.rollout_steps
         self.last_agent_order: list[int] = list(range(RED_TEAM_SIZE_4V3))
         self.best_score: tuple[float, ...] | None = None
         self.best_score_fields: dict[str, float] = {}
@@ -179,6 +221,9 @@ class HAPPO4v3Trainer:
         self.recent_episodes: list[dict[str, Any]] = []
         self.last_update_metrics: dict[str, float] = {}
         self.last_rollout_reward_means: dict[str, float] = {}
+        self.seed_manifest: dict[str, Any] = {}
+        self.next_evaluation_env_steps: int | None = None
+        self.next_checkpoint_env_steps: int | None = None
 
     def _next_episode_seed(self) -> int:
         return int(self.episode_seed_rng.integers(0, 2**31 - 1))
@@ -189,6 +234,7 @@ class HAPPO4v3Trainer:
             "checkpoint_family": CHECKPOINT_FAMILY_HAPPO_4V3,
             "checkpoint_version": CHECKPOINT_VERSION_HAPPO_4V3,
             "env_config_sha256": sha256_file(self.env_config),
+            "reward_contract_sha256": _sha256_json(self.reward_contract),
             "team_size": RED_TEAM_SIZE_4V3,
             "obs_dim": OBS_DIM_4V3,
             "state_dim": GS_DIM_4V3,
@@ -207,12 +253,24 @@ class HAPPO4v3Trainer:
             values.detach().cpu().numpy().astype(np.float32),
         )
 
-    def collect_rollout(self) -> list[dict[str, Any]]:
+    def collect_rollout(self, max_env_steps: int | None = None) -> list[dict[str, Any]]:
+        if max_env_steps is None:
+            steps = self.rollout_steps
+        else:
+            remaining = int(max_env_steps)
+            if remaining < self.num_envs:
+                raise ValueError("max_env_steps must allow at least one vector step")
+            steps = min(self.rollout_steps, remaining // self.num_envs)
+        if steps <= 0:
+            raise ValueError("effective rollout must contain at least one vector step")
+        if self.buffer.rollout_steps != steps:
+            self.buffer = HAPPORolloutBuffer3v3(steps, self.num_envs, RED_TEAM_SIZE_4V3, OBS_DIM_4V3, 3, GS_DIM_4V3)
+        self.effective_rollout_steps = steps
         self.buffer.clear()
         episodes: list[dict[str, Any]] = []
         reward_component_sum = np.zeros(len(RED_REWARD_COMPONENT_KEYS_4V3), dtype=np.float64)
         reward_component_count = 0
-        for _ in range(self.rollout_steps):
+        for _ in range(steps):
             actions, log_probs, values = self._select_actions(self.obs)
             result = self.envs.step(actions)
             reward_component_sum += result.red_reward_components.sum(axis=0)
@@ -230,8 +288,10 @@ class HAPPO4v3Trainer:
             self.obs, self.global_states, self.alive_masks = result.observations, result.global_states, result.alive_masks
             for i, summary in enumerate(result.episode_summaries):
                 if summary is not None:
-                    episodes.append(summary)
                     seed = self._next_episode_seed()
+                    summary = deepcopy(summary)
+                    summary["episode_seed"] = seed
+                    episodes.append(summary)
                     self.obs[i], self.global_states[i], self.alive_masks[i] = self.envs.reset_at(i, seed)
             self.vector_steps += 1
             self.env_steps += self.num_envs
@@ -251,7 +311,8 @@ class HAPPO4v3Trainer:
 
     def update(self) -> dict[str, float]:
         t = self.config["training"]
-        total = self.rollout_steps * self.num_envs
+        rollout_steps = int(self.buffer.rollout_steps)
+        total = rollout_steps * self.num_envs
         obs = torch.as_tensor(self.buffer.observations.reshape(total, RED_TEAM_SIZE_4V3, OBS_DIM_4V3), dtype=torch.float32, device=self.device)
         states = torch.as_tensor(self.buffer.global_states.reshape(total, GS_DIM_4V3), dtype=torch.float32, device=self.device)
         actions = torch.as_tensor(self.buffer.actions.reshape(total, RED_TEAM_SIZE_4V3, 3), dtype=torch.float32, device=self.device)
@@ -370,6 +431,9 @@ class HAPPO4v3Trainer:
             "env_steps": float(self.env_steps),
             "vector_steps": float(self.vector_steps),
             "update_count": float(self.update_count),
+            "effective_rollout_steps": float(rollout_steps),
+            "total_env_steps": float(self.total_env_steps),
+            "unique_alive_actor_samples": int(np.count_nonzero(np.any(self.buffer.agent_alive_masks > 0.5, axis=2))),
             "current_actor_lr": self.current_actor_lr,
             "current_critic_lr": self.current_critic_lr,
             "current_entropy_coef": self.current_entropy_coef,
@@ -380,6 +444,10 @@ class HAPPO4v3Trainer:
             "effective_std_pitch": std_dim[1],
             "effective_std_speed": std_dim[2],
         }
+        for agent_id, actor in enumerate(self.actors.actors):
+            for dim, name in enumerate(("yaw", "pitch", "speed")):
+                metrics[f"actor_{agent_id}_log_std_{name}"] = actor.effective_log_std_by_dim[dim]
+                metrics[f"actor_{agent_id}_std_{name}"] = actor.effective_std_by_dim[dim]
         if not all(np.isfinite(v) for v in metrics.values()):
             raise FloatingPointError(f"non-finite HAPPO 4v3 update metrics: {metrics}")
         metrics.update(self.last_rollout_reward_means)
@@ -397,6 +465,10 @@ class HAPPO4v3Trainer:
             "checkpoint_family": CHECKPOINT_FAMILY_HAPPO_4V3,
             "checkpoint_version": CHECKPOINT_VERSION_HAPPO_4V3,
             "training_signature": self.training_signature(),
+            "config": deepcopy(self.config),
+            "env_config": self.env_config,
+            "reward_contract": deepcopy(self.reward_contract),
+            "reward_contract_sha256": _sha256_json(self.reward_contract),
             "actors": self.actors.state_dict(),
             "critic": self.critic.state_dict(),
             "actor_optimizers": [o.state_dict() for o in self.actor_optimizers],
@@ -415,14 +487,35 @@ class HAPPO4v3Trainer:
             "best_scheduled_env_steps": self.best_scheduled_env_steps,
             "best_actual_env_steps": self.best_actual_env_steps,
             "evaluation_history": self.evaluation_history,
+            "effective_rollout_steps": self.effective_rollout_steps,
+            "current_actor_lr": self.current_actor_lr,
+            "current_critic_lr": self.current_critic_lr,
+            "current_entropy_coef": self.current_entropy_coef,
+            "next_evaluation_env_steps": self.next_evaluation_env_steps,
+            "next_checkpoint_env_steps": self.next_checkpoint_env_steps,
+            "seed_manifest": deepcopy(self.seed_manifest),
+            "recent_episodes": deepcopy(self.recent_episodes),
+            "last_update_metrics": deepcopy(self.last_update_metrics),
+            "last_rollout_reward_means": deepcopy(self.last_rollout_reward_means),
+            "observations": self.obs,
+            "global_states": self.global_states,
+            "alive_masks": self.alive_masks,
+            "vector_env_state": self.envs.state_dict(),
             "numpy_rng_state": self.rng.bit_generator.state,
             "episode_seed_rng_state": self.episode_seed_rng.bit_generator.state,
             "torch_cpu_rng_state": torch.get_rng_state(),
             "torch_cuda_rng_state": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
             "is_best": bool(is_best),
         }
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        torch.save(ckpt, path)
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(target.name + ".tmp")
+        with temporary.open("wb") as fh:
+            torch.save(ckpt, fh)
+            fh.flush()
+            import os
+            os.fsync(fh.fileno())
+        temporary.replace(target)
 
     def load_checkpoint(self, path: str | Path) -> None:
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
@@ -449,7 +542,23 @@ class HAPPO4v3Trainer:
         self.best_scheduled_env_steps = ckpt.get("best_scheduled_env_steps")
         self.best_actual_env_steps = ckpt.get("best_actual_env_steps")
         self.evaluation_history = list(ckpt.get("evaluation_history", []))
-        self.obs, self.global_states, self.alive_masks = self.envs.reset()
+        self.effective_rollout_steps = int(ckpt.get("effective_rollout_steps", self.rollout_steps))
+        self.current_actor_lr = float(ckpt.get("current_actor_lr", self.current_actor_lr))
+        self.current_critic_lr = float(ckpt.get("current_critic_lr", self.current_critic_lr))
+        self.current_entropy_coef = float(ckpt.get("current_entropy_coef", self.current_entropy_coef))
+        self.next_evaluation_env_steps = ckpt.get("next_evaluation_env_steps")
+        self.next_checkpoint_env_steps = ckpt.get("next_checkpoint_env_steps")
+        self.seed_manifest = deepcopy(ckpt.get("seed_manifest", {}))
+        self.recent_episodes = list(ckpt.get("recent_episodes", []))
+        self.last_update_metrics = dict(ckpt.get("last_update_metrics", {}))
+        self.last_rollout_reward_means = dict(ckpt.get("last_rollout_reward_means", {}))
+        if "vector_env_state" in ckpt:
+            self.envs.load_state_dict(ckpt["vector_env_state"])
+            self.obs = np.asarray(ckpt["observations"], dtype=np.float32)
+            self.global_states = np.asarray(ckpt["global_states"], dtype=np.float32)
+            self.alive_masks = np.asarray(ckpt["alive_masks"], dtype=np.float32)
+        else:
+            self.obs, self.global_states, self.alive_masks = self.envs.reset()
         self.rng.bit_generator.state = ckpt["numpy_rng_state"]
         if "episode_seed_rng_state" in ckpt:
             self.episode_seed_rng.bit_generator.state = ckpt["episode_seed_rng_state"]
@@ -474,6 +583,11 @@ class HAPPO4v3Trainer:
             "best_actual_env_steps": self.best_actual_env_steps,
             "final_actual_env_steps": self.env_steps,
             "evaluation_seed_base": self.evaluation_seed_base,
+            "reward_contract": deepcopy(self.reward_contract),
+            "reward_contract_sha256": _sha256_json(self.reward_contract),
+            "seed_manifest": deepcopy(self.seed_manifest),
+            "next_evaluation_env_steps": self.next_evaluation_env_steps,
+            "next_checkpoint_env_steps": self.next_checkpoint_env_steps,
             "final_evaluation": self.evaluation_history[-1]["summary"] if self.evaluation_history else None,
             "evaluation_history": self.evaluation_history,
             "best_score_schema": best_score_fields_4v3(),

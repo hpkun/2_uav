@@ -4,6 +4,7 @@ from __future__ import annotations
 import numpy as np
 
 from .geometry import compute_pairwise_geometry
+from .formation_4v3 import compute_red_combat_formation_reference
 from .math_utils import angle_difference
 from .models import Aircraft
 from .rule_policy_3v3 import NearestTargetPursuitPolicy3v3
@@ -21,6 +22,7 @@ class FunctionalHeterogeneous4v3RulePolicy(NearestTargetPursuitPolicy3v3):
 
     def __init__(self, *args, team: str = "blue", **kwargs) -> None:
         self.support_hold_distance = float(kwargs.pop("support_hold_distance", 1200.0))
+        self._formation = kwargs.pop("formation", {})
         super().__init__(*args, **kwargs)
         if team not in ("red", "blue"):
             raise ValueError("team must be 'red' or 'blue'")
@@ -38,14 +40,16 @@ class FunctionalHeterogeneous4v3RulePolicy(NearestTargetPursuitPolicy3v3):
         alive_combat = [a for a in own_aircraft if a.role == "combat" and a.state.alive]
         if not alive_combat:
             return self._zero()
-        positions = np.array([a.state.as_array()[:3] for a in alive_combat], dtype=float)
-        centroid = positions.mean(axis=0)
+        reference = compute_red_combat_formation_reference(
+            support,
+            alive_combat,
+            direction_validity_threshold=float(self._formation.get("direction_validity_threshold", 1e-6)),
+        )
+        centroid = reference["centroid"]
         sx, sy, sz = support.state.as_array()[:3]
-        mean_heading = float(np.arctan2(
-            np.mean([np.sin(a.state.psi) for a in alive_combat]),
-            np.mean([np.cos(a.state.psi) for a in alive_combat]),
-        ))
-        desired = centroid - np.array([np.cos(mean_heading), np.sin(mean_heading), 0.0]) * self.support_hold_distance
+        if not reference["direction_valid"]:
+            return self._zero()
+        desired = centroid - np.pad(reference["horizontal_direction"], (0, 1)) * self.support_hold_distance
         los = desired - np.array([sx, sy, sz])
         desired_psi = float(np.arctan2(los[1], los[0]))
         horizontal = float(np.linalg.norm(los[:2]))
@@ -104,7 +108,7 @@ class FunctionalHeterogeneous4v3RulePolicy(NearestTargetPursuitPolicy3v3):
 def make_rule_policy_4v3(config: dict, team: str) -> FunctionalHeterogeneous4v3RulePolicy:
     action = config["action"]
     aircraft = config["aircraft"]
-    formation = config.get("support_formation", {})
+    formation = config["support_formation"]
     mode = config.get(f"{team}_rule_policy", {}).get("mode", "functional_heterogeneous_4v3_nearest_pursuit_v9")
     if mode != "functional_heterogeneous_4v3_nearest_pursuit_v9":
         raise ValueError(f"unsupported 4v3 rule policy mode for {team}: {mode!r}")
@@ -120,5 +124,6 @@ def make_rule_policy_4v3(config: dict, team: str) -> FunctionalHeterogeneous4v3R
         k_pitch=float(aircraft["k_pitch"]),
         k_speed=float(aircraft["k_speed"]),
         support_hold_distance=float(formation.get("rule_hold_distance", 1200.0)),
+        formation=formation,
         team=team,
     )

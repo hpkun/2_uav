@@ -62,15 +62,40 @@ support_formation:
   reward_fade_near: 400.0
   reward_fade_far: 3000.0
   rear_alignment_threshold: 0.7
+  direction_validity_threshold: 1.0e-6
 
-initial_state:
-  red_0: {x: -3600.0, y: 0.0, altitude: 3000.0, v: 150.0, theta: 0.0, psi: 0.0}
-  red_1: {x: -2500.0, y: -450.0, altitude: 3000.0, v: 150.0, theta: 0.0, psi: 0.0}
-  red_2: {x: -2500.0, y: 0.0, altitude: 3000.0, v: 150.0, theta: 0.0, psi: 0.0}
-  red_3: {x: -2500.0, y: 450.0, altitude: 3000.0, v: 150.0, theta: 0.0, psi: 0.0}
-  blue_0: {x: 2500.0, y: 450.0, altitude: 3000.0, v: 150.0, theta: 0.0, psi: 3.141592653589793}
-  blue_1: {x: 2500.0, y: 0.0, altitude: 3000.0, v: 150.0, theta: 0.0, psi: 3.141592653589793}
-  blue_2: {x: 2500.0, y: -450.0, altitude: 3000.0, v: 150.0, theta: 0.0, psi: 3.141592653589793}
+rewards:
+  mission:
+    red_complete_elimination_success: 30.0
+    red_all_combat_eliminated: -30.0
+    timeout: -10.0
+    mutual_combat_elimination: -15.0
+    blue_noncombat_elimination: -10.0
+  events:
+    blue_combat_attack_kill: 10.0
+    red_combat_attack_loss: -10.0
+    red_support_attack_loss: -12.0
+    red_boundary_loss: -10.0
+    support_assisted_kill: 2.0
+  combat_dense:
+    approach_scale: 0.003
+    approach_distance_normalizer: 100.0
+    readiness_scale: 0.02
+    threat_scale: 0.015
+    boundary_scale: 0.01
+    readiness_fade_distance: 2000.0
+  support_dense:
+    coverage_scale: 0.006
+    position_scale: 0.004
+    threat_scale: 0.01
+    boundary_scale: 0.01
+  dense_clip:
+    min: -0.03
+    max: 0.03
+  support_credit:
+    assisted_window_steps: 50
+  boundary:
+    soft_margin: 1000.0
 
 heterogeneous:
   enabled: true
