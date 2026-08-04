@@ -12,6 +12,7 @@ import yaml
 
 from uav_combat.happo.evaluation_4v3 import evaluate_happo_fixed_blue_4v3
 from uav_combat.happo.trainer_4v3 import HAPPO4v3Trainer, best_score_fields_4v3, compute_best_score_4v3, summarize_4v3_episodes
+from uav_combat.environment_4v3 import RED_REWARD_COMPONENT_KEYS_4V3
 
 
 def load_train_config(path: str | Path, args: argparse.Namespace) -> dict[str, Any]:
@@ -48,6 +49,11 @@ def _write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=_json_default), encoding="utf-8")
 
 
+def _evaluation_seed_base(cfg: dict[str, Any]) -> int:
+    """Return the stable seed base shared by initial, periodic, and final evals."""
+    return int(cfg["experiment"]["seed"]) + int(cfg["evaluation"].get("seed_offset", 50000))
+
+
 def _evaluate_and_maybe_save_best(
     trainer: HAPPO4v3Trainer,
     env_config: str,
@@ -55,9 +61,11 @@ def _evaluate_and_maybe_save_best(
     out: Path,
     *,
     label: str,
-    env_steps: int,
+    scheduled_env_steps: int,
+    actual_env_steps: int,
     checkpoint_name: str | None = None,
-) -> dict[str, float]:
+) -> dict[str, Any]:
+    evaluation_seed_base = int(getattr(trainer, "evaluation_seed_base", _evaluation_seed_base(cfg)))
     summary = evaluate_happo_fixed_blue_4v3(
         trainer.actors,
         env_config,
@@ -65,14 +73,27 @@ def _evaluate_and_maybe_save_best(
         num_envs=min(int(cfg["training"]["num_envs"]), 4),
         num_env_workers=0,
         device=trainer.device,
-        seed=int(cfg["experiment"]["seed"]) + 50000 + int(env_steps),
+        seed=evaluation_seed_base,
     )
     eval_path = out / f"evaluation_{label}.json"
-    _write_json(eval_path, summary)
     score, score_fields = compute_best_score_4v3(summary)
+    evaluation_payload = {
+        **summary,
+        "label": label,
+        "scheduled_env_steps": int(scheduled_env_steps),
+        "actual_env_steps": int(actual_env_steps),
+        "checkpoint": checkpoint_name,
+        "score": list(score),
+        "score_fields": score_fields,
+        "evaluation_seed_base": evaluation_seed_base,
+        "summary": summary,
+    }
+    _write_json(eval_path, evaluation_payload)
     row = {
         "label": label,
-        "env_steps": int(env_steps),
+        "env_steps": int(actual_env_steps),
+        "scheduled_env_steps": int(scheduled_env_steps),
+        "actual_env_steps": int(actual_env_steps),
         "summary": summary,
         "score": list(score),
         "score_fields": score_fields,
@@ -84,8 +105,29 @@ def _evaluate_and_maybe_save_best(
         trainer.best_score_fields = score_fields
         trainer.best_evaluation = summary
         trainer.best_checkpoint_name = checkpoint_name or f"evaluation_{label}"
-        trainer.save_checkpoint(out / "best.pt", is_best=True)
+        trainer.best_scheduled_env_steps = int(scheduled_env_steps)
+        trainer.best_actual_env_steps = int(actual_env_steps)
+        trainer.save_checkpoint(
+            out / "best.pt",
+            is_best=True,
+            scheduled_env_steps=scheduled_env_steps,
+        )
     return summary
+
+
+def _save_actual_step_checkpoint(
+    trainer: HAPPO4v3Trainer,
+    out: Path,
+    *,
+    scheduled_env_steps: int,
+) -> str:
+    actual_env_steps = int(trainer.env_steps)
+    checkpoint_name = f"step_{actual_env_steps:07d}.pt"
+    trainer.save_checkpoint(
+        out / checkpoint_name,
+        scheduled_env_steps=int(scheduled_env_steps),
+    )
+    return checkpoint_name
 
 
 def main() -> None:
@@ -117,21 +159,26 @@ def main() -> None:
         "recent_red_at_least_two_attack_kill_rate", "recent_red_any_attack_kill_rate",
         "recent_mean_red_attack_kills", "recent_timeout_rate",
     ]
-    reward_fields = [f"mean_rollout_{key}" for key in (
-        "mission_reward", "kill_event_reward", "combat_loss_event_penalty",
-        "support_loss_event_penalty", "boundary_event_penalty", "support_assisted_kill_reward",
-        "total_dense_reward", "team_total_reward",
-    )]
+    reward_fields = [f"mean_rollout_{key}" for key in RED_REWARD_COMPONENT_KEYS_4V3]
     fields = [
         *metric_fields, *outcome_fields, *reward_fields,
     ]
     try:
-        trainer.save_checkpoint(out / "initial.pt")
+        trainer.save_checkpoint(out / "initial.pt", scheduled_env_steps=0)
         _evaluate_and_maybe_save_best(
-            trainer, args.env_config, cfg, out, label="initial", env_steps=0, checkpoint_name="initial.pt"
+            trainer,
+            args.env_config,
+            cfg,
+            out,
+            label="initial",
+            scheduled_env_steps=0,
+            actual_env_steps=trainer.env_steps,
+            checkpoint_name="initial.pt",
         )
         next_eval = int(cfg["training"].get("evaluation_interval_env_steps", 100000))
         next_ckpt = int(cfg["training"].get("checkpoint_interval_env_steps", 100000))
+        eval_interval = int(cfg["training"].get("evaluation_interval_env_steps", 100000))
+        ckpt_interval = int(cfg["training"].get("checkpoint_interval_env_steps", 100000))
         with metrics_path.open("w", newline="", encoding="utf-8") as fh:
             writer = csv.DictWriter(fh, fieldnames=fields)
             writer.writeheader()
@@ -150,51 +197,52 @@ def main() -> None:
                 })
                 writer.writerow({k: row.get(k, 0.0) for k in fields})
                 fh.flush()
-                while trainer.env_steps >= next_ckpt:
-                    ckpt_name = f"step_{next_ckpt:07d}.pt"
-                    trainer.save_checkpoint(out / ckpt_name)
-                    next_ckpt += int(cfg["training"].get("checkpoint_interval_env_steps", 100000))
-                while trainer.env_steps >= next_eval:
-                    checkpoint_name = f"step_{next_eval:07d}.pt"
-                    if not (out / checkpoint_name).exists():
-                        trainer.save_checkpoint(out / checkpoint_name)
-                    _evaluate_and_maybe_save_best(
-                        trainer,
-                        args.env_config,
-                        cfg,
-                        out,
-                        label=f"step_{next_eval:07d}",
-                        env_steps=next_eval,
-                        checkpoint_name=checkpoint_name,
-                    )
-                    next_eval += int(cfg["training"].get("evaluation_interval_env_steps", 100000))
+                actual_env_steps = int(trainer.env_steps)
+                crossed_checkpoints: list[int] = []
+                while actual_env_steps >= next_ckpt:
+                    crossed_checkpoints.append(next_ckpt)
+                    next_ckpt += ckpt_interval
+                crossed_evaluations: list[int] = []
+                while actual_env_steps >= next_eval:
+                    crossed_evaluations.append(next_eval)
+                    next_eval += eval_interval
 
-        eval_summary = evaluate_happo_fixed_blue_4v3(
-            trainer.actors,
+                # A rollout may cross several planned milestones. The current
+                # model is saved once and evaluated once, with the first
+                # crossed evaluation threshold retained as its scheduled label.
+                crossed = [*crossed_checkpoints, *crossed_evaluations]
+                if crossed:
+                    checkpoint_schedule = min(crossed)
+                    checkpoint_name = _save_actual_step_checkpoint(
+                        trainer,
+                        out,
+                        scheduled_env_steps=checkpoint_schedule,
+                    )
+                    if crossed_evaluations:
+                        scheduled_eval = crossed_evaluations[0]
+                        _evaluate_and_maybe_save_best(
+                            trainer,
+                            args.env_config,
+                            cfg,
+                            out,
+                            label=f"step_{actual_env_steps:07d}",
+                            scheduled_env_steps=scheduled_eval,
+                            actual_env_steps=actual_env_steps,
+                            checkpoint_name=checkpoint_name,
+                        )
+
+        final_actual_env_steps = int(trainer.env_steps)
+        trainer.save_checkpoint(out / "final.pt", scheduled_env_steps=final_actual_env_steps)
+        _evaluate_and_maybe_save_best(
+            trainer,
             args.env_config,
-            episodes=int(cfg["evaluation"]["episodes"]),
-            num_envs=min(int(cfg["training"]["num_envs"]), 4),
-            num_env_workers=0,
-            device=trainer.device,
-            seed=int(cfg["experiment"]["seed"]) + 50000,
+            cfg,
+            out,
+            label="final",
+            scheduled_env_steps=final_actual_env_steps,
+            actual_env_steps=final_actual_env_steps,
+            checkpoint_name="final.pt",
         )
-        _write_json(out / "evaluation_final.json", eval_summary)
-        score, score_fields = compute_best_score_4v3(eval_summary)
-        trainer.evaluation_history.append({
-            "label": "final",
-            "env_steps": trainer.env_steps,
-            "summary": eval_summary,
-            "score": list(score),
-            "score_fields": score_fields,
-            "checkpoint": "final.pt",
-        })
-        if trainer.best_score is None or score > trainer.best_score:
-            trainer.best_score = score
-            trainer.best_score_fields = score_fields
-            trainer.best_evaluation = eval_summary
-            trainer.best_checkpoint_name = "final.pt"
-            trainer.save_checkpoint(out / "best.pt", is_best=True)
-        trainer.save_checkpoint(out / "final.pt")
         if not (out / "best.pt").exists():
             shutil.copyfile(out / "final.pt", out / "best.pt")
         trainer.write_summary(out)

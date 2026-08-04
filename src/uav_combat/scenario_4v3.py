@@ -50,6 +50,35 @@ def validate_heterogeneous_4v3_config(config: dict[str, Any]) -> None:
     if not bool(hetero.get("information_sharing", {}).get("red_support_to_red_combat", False)):
         raise ValueError("4v3 v9 requires red support-to-combat information sharing enabled")
 
+    formation = config.get("support_formation")
+    if not isinstance(formation, dict):
+        raise KeyError("missing support_formation configuration")
+    required_formation = (
+        "initial_trailing_distance",
+        "rule_hold_distance",
+        "reward_optimal_min",
+        "reward_optimal_max",
+        "reward_fade_near",
+        "reward_fade_far",
+        "rear_alignment_threshold",
+    )
+    missing = [key for key in required_formation if key not in formation]
+    if missing:
+        raise KeyError(f"missing support_formation fields: {', '.join(missing)}")
+    initial_trailing = float(formation["initial_trailing_distance"])
+    rule_hold = float(formation["rule_hold_distance"])
+    fade_near = float(formation["reward_fade_near"])
+    optimal_min = float(formation["reward_optimal_min"])
+    optimal_max = float(formation["reward_optimal_max"])
+    fade_far = float(formation["reward_fade_far"])
+    if initial_trailing <= 0.0 or rule_hold <= 0.0:
+        raise ValueError("support_formation initial_trailing_distance and rule_hold_distance must be positive")
+    if not (0.0 < fade_near <= optimal_min <= optimal_max <= fade_far):
+        raise ValueError(
+            "support_formation distances must satisfy "
+            "0 < reward_fade_near <= reward_optimal_min <= reward_optimal_max <= reward_fade_far"
+        )
+
 
 class FunctionalHeterogeneous4v3Scenario:
     """Seven-aircraft head-on scenario: red support + 3 combat vs 3 blue combat."""
@@ -87,12 +116,7 @@ class FunctionalHeterogeneous4v3Scenario:
         separation = float(rng.uniform(settings["separation_min"], settings["separation_max"]))
         lateral_spacing = float(settings["lateral_spacing"])
         formation = self.config.get("support_formation", {})
-        support_trailing = float(
-            formation.get(
-                "initial_trailing_distance",
-                settings.get("support_initial_trailing_distance", 1200.0),
-            )
-        )
+        support_trailing = float(formation["initial_trailing_distance"])
         altitude_center = float(settings["altitude_center"])
         altitude_jitter = float(settings["altitude_jitter"])
         speed_center = float(settings["speed_center"])

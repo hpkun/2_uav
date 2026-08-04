@@ -42,6 +42,7 @@ training:
 evaluation:
   episodes: 60
   deterministic: true
+  seed_offset: 50000
 
 notes:
   source_algorithm: "HAPPO update is unchanged; this config only changes the red team size and v9 environment contract."

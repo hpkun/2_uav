@@ -48,7 +48,6 @@ scenario:
   separation_min: 4500.0
   separation_max: 5500.0
   lateral_spacing: 450.0
-  support_initial_trailing_distance: 400.0
   altitude_center: 3000.0
   altitude_jitter: 80.0
   speed_center: 150.0

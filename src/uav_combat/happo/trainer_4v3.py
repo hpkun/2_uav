@@ -136,6 +136,7 @@ class HAPPO4v3Trainer:
         self.num_envs = int(t["num_envs"])
         self.rollout_steps = int(t["rollout_steps"])
         self.total_env_steps = int(t["total_env_steps"])
+        self.evaluation_seed_base = int(e["seed"]) + int(self.config.get("evaluation", {}).get("seed_offset", 50000))
         self.envs = make_combat_vector_env_4v3(
             self.env_config,
             self.num_envs,
@@ -172,6 +173,8 @@ class HAPPO4v3Trainer:
         self.best_score_fields: dict[str, float] = {}
         self.best_evaluation: dict[str, Any] | None = None
         self.best_checkpoint_name: str | None = None
+        self.best_scheduled_env_steps: int | None = None
+        self.best_actual_env_steps: int | None = None
         self.evaluation_history: list[dict[str, Any]] = []
         self.recent_episodes: list[dict[str, Any]] = []
         self.last_update_metrics: dict[str, float] = {}
@@ -383,7 +386,13 @@ class HAPPO4v3Trainer:
         self.last_update_metrics = metrics
         return metrics
 
-    def save_checkpoint(self, path: str | Path, *, is_best: bool = False) -> None:
+    def save_checkpoint(
+        self,
+        path: str | Path,
+        *,
+        is_best: bool = False,
+        scheduled_env_steps: int | None = None,
+    ) -> None:
         ckpt = {
             "checkpoint_family": CHECKPOINT_FAMILY_HAPPO_4V3,
             "checkpoint_version": CHECKPOINT_VERSION_HAPPO_4V3,
@@ -393,6 +402,9 @@ class HAPPO4v3Trainer:
             "actor_optimizers": [o.state_dict() for o in self.actor_optimizers],
             "critic_optimizer": self.critic_optimizer.state_dict(),
             "env_steps": self.env_steps,
+            "actual_env_steps": self.env_steps,
+            "scheduled_env_steps": scheduled_env_steps,
+            "evaluation_seed_base": self.evaluation_seed_base,
             "vector_steps": self.vector_steps,
             "update_count": self.update_count,
             "last_agent_order": self.last_agent_order,
@@ -400,6 +412,8 @@ class HAPPO4v3Trainer:
             "best_score_fields": self.best_score_fields,
             "best_evaluation": self.best_evaluation,
             "best_checkpoint_name": self.best_checkpoint_name,
+            "best_scheduled_env_steps": self.best_scheduled_env_steps,
+            "best_actual_env_steps": self.best_actual_env_steps,
             "evaluation_history": self.evaluation_history,
             "numpy_rng_state": self.rng.bit_generator.state,
             "episode_seed_rng_state": self.episode_seed_rng.bit_generator.state,
@@ -423,6 +437,7 @@ class HAPPO4v3Trainer:
             opt.load_state_dict(state)
         self.critic_optimizer.load_state_dict(ckpt["critic_optimizer"])
         self.env_steps = int(ckpt["env_steps"])
+        self.evaluation_seed_base = int(ckpt.get("evaluation_seed_base", self.evaluation_seed_base))
         self.vector_steps = int(ckpt["vector_steps"])
         self.update_count = int(ckpt["update_count"])
         self.last_agent_order = list(ckpt.get("last_agent_order", list(range(RED_TEAM_SIZE_4V3))))
@@ -431,6 +446,8 @@ class HAPPO4v3Trainer:
         self.best_score_fields = dict(ckpt.get("best_score_fields", {}))
         self.best_evaluation = ckpt.get("best_evaluation")
         self.best_checkpoint_name = ckpt.get("best_checkpoint_name")
+        self.best_scheduled_env_steps = ckpt.get("best_scheduled_env_steps")
+        self.best_actual_env_steps = ckpt.get("best_actual_env_steps")
         self.evaluation_history = list(ckpt.get("evaluation_history", []))
         self.obs, self.global_states, self.alive_masks = self.envs.reset()
         self.rng.bit_generator.state = ckpt["numpy_rng_state"]
@@ -453,6 +470,10 @@ class HAPPO4v3Trainer:
             "best_score_fields": self.best_score_fields,
             "best_checkpoint_name": self.best_checkpoint_name,
             "best_evaluation": self.best_evaluation,
+            "best_scheduled_env_steps": self.best_scheduled_env_steps,
+            "best_actual_env_steps": self.best_actual_env_steps,
+            "final_actual_env_steps": self.env_steps,
+            "evaluation_seed_base": self.evaluation_seed_base,
             "final_evaluation": self.evaluation_history[-1]["summary"] if self.evaluation_history else None,
             "evaluation_history": self.evaluation_history,
             "best_score_schema": best_score_fields_4v3(),

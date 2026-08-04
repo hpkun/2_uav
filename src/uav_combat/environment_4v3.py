@@ -116,6 +116,9 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
         self._attack_kills = {"red": 0, "blue": 0}
         self._attack_kill_steps = {"red": [], "blue": []}
         self._prev_target_distance: dict[str, tuple[str, float]] = {}
+        self._first_support_only_shared_step: dict[str, dict[str, int]] = {
+            cid: {} for cid in RED_COMBAT_IDS_4V3
+        }
         self._last_support_only_shared_step: dict[str, dict[str, int]] = {
             cid: {} for cid in RED_COMBAT_IDS_4V3
         }
@@ -190,6 +193,7 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
         self._attack_kills = {"red": 0, "blue": 0}
         self._attack_kill_steps = {"red": [], "blue": []}
         self._prev_target_distance.clear()
+        self._first_support_only_shared_step = {cid: {} for cid in RED_COMBAT_IDS_4V3}
         self._last_support_only_shared_step = {cid: {} for cid in RED_COMBAT_IDS_4V3}
         self._share_to_direct_recorded = set()
         self._share_to_direct_delays = []
@@ -433,10 +437,18 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
                 continue
             for bid in BLUE_IDS_4V3:
                 if bid in direct["red_0"] and bid not in direct[cid] and bid in effective[cid]:
+                    self._first_support_only_shared_step[cid].setdefault(bid, self.step_count)
                     self._last_support_only_shared_step[cid][bid] = self.step_count
                     shared_this_step += 1
                 if bid in direct[cid] and bid in self._last_support_only_shared_step[cid]:
-                    delay = self.step_count - self._last_support_only_shared_step[cid][bid]
+                    # The first share measures discovery lead time; the last
+                    # share remains the credit source for the assisted-kill window.
+                    first_share = self._first_support_only_shared_step[cid].get(bid)
+                    if first_share is None:
+                        # Keep manually constructed legacy test states usable;
+                        # normal episode state always records first and last together.
+                        first_share = self._last_support_only_shared_step[cid][bid]
+                    delay = self.step_count - first_share
                     key = (cid, bid)
                     if delay >= 0 and key not in self._share_to_direct_recorded:
                         self._share_to_direct_delays.append(int(delay))
