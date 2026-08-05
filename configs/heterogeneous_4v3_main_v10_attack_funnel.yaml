@@ -36,6 +36,7 @@ battlefield:
 
 combat:
   reward_mode: functional_heterogeneous_4v3_team_v9
+  reward_contract_version: v10_attack_funnel
   attack_distance_min: 100.0
   attack_distance_max: 1000.0
   attack_ata_max: 0.5235987755982988
@@ -64,30 +65,28 @@ support_formation:
   rear_alignment_threshold: 0.7
   direction_validity_threshold: 1.0e-6
 
-# v10 intervention: prioritize combat progress and make support credit reachable
-# at the measured 151-217 step share-to-direct delays.
 rewards:
   mission:
-    red_complete_elimination_success: 45.0
-    red_all_combat_eliminated: -45.0
+    red_complete_elimination_success: 30.0
+    red_all_combat_eliminated: -30.0
     timeout: -10.0
     mutual_combat_elimination: -15.0
     blue_noncombat_elimination: -10.0
   events:
-    blue_combat_attack_kill: 20.0
+    blue_combat_attack_kill: 10.0
     red_combat_attack_loss: -10.0
     red_support_attack_loss: -12.0
     red_boundary_loss: -10.0
-    support_assisted_kill: 5.0
+    support_assisted_kill: 2.0
   combat_dense:
-    approach_scale: 0.008
+    approach_scale: 0.003
     approach_distance_normalizer: 100.0
-    readiness_scale: 0.08
+    readiness_scale: 0.020
     threat_scale: 0.01
     boundary_scale: 0.006
     readiness_fade_distance: 2000.0
   support_dense:
-    coverage_scale: 0.002
+    coverage_scale: 0.003
     position_scale: 0.002
     threat_scale: 0.008
     boundary_scale: 0.008
@@ -95,7 +94,7 @@ rewards:
     min: -0.03
     max: 0.03
   support_credit:
-    assisted_window_steps: 200
+    assisted_window_steps: 50
   boundary:
     soft_margin: 1000.0
 

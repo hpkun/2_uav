@@ -73,18 +73,29 @@ def _f_distance(distance: float, d_min: float, d_attack: float, d_tail: float) -
     return float(np.clip((d_tail - d) / max(d_tail - d_attack, 1e-8), 0.0, 1.0))
 
 
+def _angle_score(ata: float, aa: float) -> float:
+    """Continuous TAM-HAPPO-style angle score for ATA and AA."""
+    angle_score_raw = 1.0 - (float(ata) + float(aa)) / np.pi
+    return float(np.clip((angle_score_raw + 1.0) / 2.0, 0.0, 1.0))
+
+
 def _attack_readiness(
     attacker: AircraftState,
     target: AircraftState,
     d_min: float,
     d_max: float,
     fade_distance: float = 2000.0,
+    mode: str = "v9_product",
 ) -> float:
     g = compute_pairwise_geometry(attacker, target)
+    distance_score = _f_distance(float(g.distance), d_min, d_max, fade_distance)
+    if mode == "v10_additive_angle_distance":
+        return float(np.clip(0.5 * _angle_score(g.ata, g.aa) + 0.5 * distance_score, 0.0, 1.0))
+    if mode != "v9_product":
+        raise ValueError(f"unsupported attack readiness mode: {mode!r}")
     f_ata = max(0.0, 1.0 - float(g.ata) / (np.pi / 6.0))
     f_aa = max(0.0, 1.0 - float(g.aa) / (np.pi / 2.0))
-    fd = _f_distance(float(g.distance), d_min, d_max, fade_distance)
-    return float(np.clip(fd * f_ata * f_aa, 0.0, 1.0))
+    return float(np.clip(distance_score * f_ata * f_aa, 0.0, 1.0))
 
 
 def _boundary_risk(ac: Aircraft, limits: dict[str, float], soft_margin: float = 1000.0) -> float:
@@ -107,6 +118,12 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
         self.config = load_config(config_path)
         validate_heterogeneous_4v3_config(self.config)
         self.reward_contract = resolved_reward_contract_4v3(self.config)
+        self.reward_contract_version = self.config["combat"].get("reward_contract_version")
+        self._readiness_mode = (
+            "v10_additive_angle_distance"
+            if self.reward_contract_version == "v10_attack_funnel"
+            else "v9_product"
+        )
         sim, action, combat = self.config["simulation"], self.config["action"], self.config["combat"]
         self.scenario = FunctionalHeterogeneous4v3Scenario(self.config)
         self.dynamics = PointMassDynamics(float(sim["gravity"]))
@@ -243,9 +260,16 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
             "combat_attack_window_steps": 0,
             "combat_readiness_sum": 0.0,
             "combat_threat_sum": 0.0,
+            "dense_clip_positive_saturation_steps": 0,
+            "dense_clip_negative_saturation_steps": 0,
+            "raw_dense_reward_sum": 0.0,
+            "raw_dense_reward_count": 0,
+            "raw_dense_reward_min": 0.0,
+            "raw_dense_reward_max": 0.0,
         }
         self._episode_reward_components = {k: 0.0 for k in RED_REWARD_COMPONENT_KEYS_4V3}
         self._last_reward_components = {k: 0.0 for k in RED_REWARD_COMPONENT_KEYS_4V3}
+        self._last_raw_dense_reward = 0.0
         return self._observations()
 
     def _observations(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -433,13 +457,13 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
                             np.clip((prev[1] - g.distance) / float(combat_dense["approach_distance_normalizer"]), -1.0, 1.0)
                         )
                 ready = float(combat_dense["readiness_scale"]) * _attack_readiness(
-                    c.state, target.state, d_min, d_max, float(combat_dense["readiness_fade_distance"])
+                    c.state, target.state, d_min, d_max, float(combat_dense["readiness_fade_distance"]), self._readiness_mode
                 )
                 combat_readiness += ready
             threats = [b for b in self._alive_blue() if c.aircraft_id in direct[b.aircraft_id]]
             if threats:
                 combat_threat += float(combat_dense["threat_scale"]) * max(
-                    _attack_readiness(b.state, c.state, d_min, d_max, float(combat_dense["readiness_fade_distance"]))
+                    _attack_readiness(b.state, c.state, d_min, d_max, float(combat_dense["readiness_fade_distance"]), self._readiness_mode)
                     for b in threats
                 )
             combat_boundary += float(combat_dense["boundary_scale"]) * _boundary_risk(c, limits, soft_margin)
@@ -460,7 +484,7 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
         support_threat = 0.0
         if support.state.alive and self._alive_blue():
             support_threat = float(support_dense["threat_scale"]) * max(
-                _attack_readiness(b.state, support.state, d_min, d_max, float(combat_dense["readiness_fade_distance"]))
+                _attack_readiness(b.state, support.state, d_min, d_max, float(combat_dense["readiness_fade_distance"]), self._readiness_mode)
                 for b in self._alive_blue()
             )
         support_boundary = float(support_dense["boundary_scale"]) * _boundary_risk(support, limits, soft_margin) if support.state.alive else 0.0
@@ -469,13 +493,30 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
         components["support_threat_penalty"] = -support_threat
         components["support_boundary_penalty"] = -support_boundary
 
-        dense = (
+        raw_dense_reward = (
             components["combat_approach_reward"] + components["combat_readiness_reward"] +
             components["combat_threat_penalty"] + components["combat_boundary_penalty"] +
             components["support_coverage_reward"] + components["support_position_reward"] +
             components["support_threat_penalty"] + components["support_boundary_penalty"]
         )
-        components["total_dense_reward"] = float(np.clip(dense, float(rewards["dense_clip"]["min"]), float(rewards["dense_clip"]["max"])))
+        clip_min = float(rewards["dense_clip"]["min"])
+        clip_max = float(rewards["dense_clip"]["max"])
+        self._last_raw_dense_reward = float(raw_dense_reward)
+        self._episode_metrics["raw_dense_reward_sum"] += float(raw_dense_reward)
+        self._episode_metrics["raw_dense_reward_count"] += 1
+        if self._episode_metrics["raw_dense_reward_count"] == 1:
+            self._episode_metrics["raw_dense_reward_min"] = float(raw_dense_reward)
+            self._episode_metrics["raw_dense_reward_max"] = float(raw_dense_reward)
+        else:
+            self._episode_metrics["raw_dense_reward_min"] = min(
+                self._episode_metrics["raw_dense_reward_min"], float(raw_dense_reward)
+            )
+            self._episode_metrics["raw_dense_reward_max"] = max(
+                self._episode_metrics["raw_dense_reward_max"], float(raw_dense_reward)
+            )
+        self._episode_metrics["dense_clip_positive_saturation_steps"] += int(raw_dense_reward > clip_max)
+        self._episode_metrics["dense_clip_negative_saturation_steps"] += int(raw_dense_reward < clip_min)
+        components["total_dense_reward"] = float(np.clip(raw_dense_reward, clip_min, clip_max))
 
         done, outcome, reason = self._termination()
         if done:
@@ -535,6 +576,7 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
                 float(self.config["combat"]["attack_distance_min"]),
                 float(self.config["combat"]["attack_distance_max"]),
                 float(self.reward_contract["combat_dense"]["readiness_fade_distance"]),
+                self._readiness_mode,
             )
             for b in self._alive_blue()
         ) > 0.0:
@@ -718,6 +760,7 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
         info = {
             "episode_summary": self._episode_summary(outcome, reason) if done else None,
             "reward_components": components,
+            "raw_dense_reward": float(self._last_raw_dense_reward),
         }
         return obs, gs, mask, reward, done, False, info
 
@@ -730,6 +773,9 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
         length = max(1, int(self.step_count))
         support_active = int(self._episode_metrics["support_active_steps"])
         support_denominator = max(1, support_active)
+        dense_count = max(1, int(self._episode_metrics["raw_dense_reward_count"]))
+        positive_saturation = int(self._episode_metrics["dense_clip_positive_saturation_steps"])
+        negative_saturation = int(self._episode_metrics["dense_clip_negative_saturation_steps"])
         summary = {
             "episode_length": int(self.step_count),
             "environment_outcome": outcome,
@@ -748,6 +794,14 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
             "support_survived": bool(support_alive),
             "death_causes": dict(self._death_causes),
             "reward_components": dict(self._episode_reward_components),
+            "dense_clip_positive_saturation_steps": positive_saturation,
+            "dense_clip_negative_saturation_steps": negative_saturation,
+            "dense_clip_positive_saturation_rate": float(positive_saturation / dense_count),
+            "dense_clip_negative_saturation_rate": float(negative_saturation / dense_count),
+            "dense_clip_saturation_rate": float((positive_saturation + negative_saturation) / dense_count),
+            "raw_dense_reward_mean": float(self._episode_metrics["raw_dense_reward_sum"] / dense_count),
+            "raw_dense_reward_min": float(self._episode_metrics["raw_dense_reward_min"]),
+            "raw_dense_reward_max": float(self._episode_metrics["raw_dense_reward_max"]),
         }
         for team in ("red", "blue"):
             steps = self._attack_kill_steps[team]
@@ -811,6 +865,7 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
             "episode_metrics": dict(self._episode_metrics),
             "episode_reward_components": dict(self._episode_reward_components),
             "last_reward_components": dict(self._last_reward_components),
+            "last_raw_dense_reward": float(self._last_raw_dense_reward),
         }
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
@@ -838,5 +893,12 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
         self._share_to_direct_delays = [int(v) for v in state["share_to_direct_delays"]]
         self._share_to_kill_delays = [int(v) for v in state["share_to_kill_delays"]]
         self._episode_metrics = {str(k): float(v) for k, v in state["episode_metrics"].items()}
+        self._episode_metrics.setdefault("dense_clip_positive_saturation_steps", 0.0)
+        self._episode_metrics.setdefault("dense_clip_negative_saturation_steps", 0.0)
+        self._episode_metrics.setdefault("raw_dense_reward_sum", 0.0)
+        self._episode_metrics.setdefault("raw_dense_reward_count", 0.0)
+        self._episode_metrics.setdefault("raw_dense_reward_min", 0.0)
+        self._episode_metrics.setdefault("raw_dense_reward_max", 0.0)
         self._episode_reward_components = {str(k): float(v) for k, v in state["episode_reward_components"].items()}
         self._last_reward_components = {str(k): float(v) for k, v in state["last_reward_components"].items()}
+        self._last_raw_dense_reward = float(state.get("last_raw_dense_reward", 0.0))

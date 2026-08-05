@@ -156,6 +156,8 @@ def _write_contract(
     contract = {
         "checkpoint_family": "functional_heterogeneous_4v3_v9_happo",
         "checkpoint_version": 1,
+        "variant": train_cfg.get("experiment", {}).get("variant"),
+        "reward_contract_version": env_cfg.get("combat", {}).get("reward_contract_version"),
         "environment_config_sha256": _checkpoint_sha256(Path(env_config_path)),
         "training_config_sha256": _checkpoint_sha256(Path(train_config_path)),
         "resolved_environment_config_sha256": sha256_json_4v3(env_cfg),
@@ -319,6 +321,8 @@ def main() -> None:
         "recent_mean_red_attack_kills", "recent_timeout_rate", "recent_support_assisted_kill_rate",
         "recent_support_assisted_episode_rate", "recent_support_active_steps", "recent_support_shared_pair_step_rate",
         "recent_mean_shared_only_pair_ratio",
+        "recent_dense_clip_positive_saturation_rate", "recent_dense_clip_negative_saturation_rate",
+        "recent_dense_clip_saturation_rate",
     ]
     fields = [*metric_fields, *outcome_fields, *[f"mean_rollout_{key}" for key in RED_REWARD_COMPONENT_KEYS_4V3]]
     resumed = bool(args.resume)
@@ -398,6 +402,9 @@ def main() -> None:
                     "recent_support_active_steps": recent.get("mean_support_active_steps", 0.0),
                     "recent_support_shared_pair_step_rate": recent.get("support_shared_pair_step_rate", 0.0),
                     "recent_mean_shared_only_pair_ratio": recent.get("mean_shared_only_pair_ratio", 0.0),
+                    "recent_dense_clip_positive_saturation_rate": recent.get("mean_dense_clip_positive_saturation_rate", 0.0),
+                    "recent_dense_clip_negative_saturation_rate": recent.get("mean_dense_clip_negative_saturation_rate", 0.0),
+                    "recent_dense_clip_saturation_rate": recent.get("mean_dense_clip_saturation_rate", 0.0),
                 })
                 row.update(trainer.last_rollout_reward_means)
                 writer.writerow({key: row.get(key, 0.0) for key in fields})

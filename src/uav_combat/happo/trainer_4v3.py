@@ -138,6 +138,12 @@ def summarize_4v3_episodes(records: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_support_to_combat_centroid_distance": float(np.mean([r.get("mean_support_to_combat_centroid_distance", 0.0) for r in records])),
         "support_rear_position_rate": float(np.mean([r.get("support_rear_position_rate", 0.0) for r in records])),
         "support_threat_exposure_rate": float(np.mean([r.get("support_threat_exposure_rate", 0.0) for r in records])),
+        "mean_dense_clip_positive_saturation_rate": float(np.mean([r.get("dense_clip_positive_saturation_rate", 0.0) for r in records])),
+        "mean_dense_clip_negative_saturation_rate": float(np.mean([r.get("dense_clip_negative_saturation_rate", 0.0) for r in records])),
+        "mean_dense_clip_saturation_rate": float(np.mean([r.get("dense_clip_saturation_rate", 0.0) for r in records])),
+        "mean_raw_dense_reward": float(np.mean([r.get("raw_dense_reward_mean", 0.0) for r in records])),
+        "min_raw_dense_reward": float(np.min([r.get("raw_dense_reward_min", 0.0) for r in records])),
+        "max_raw_dense_reward": float(np.max([r.get("raw_dense_reward_max", 0.0) for r in records])),
     }
     out.update({key: reward_mean(key) for key in RED_REWARD_COMPONENT_KEYS_4V3})
     kill_distribution = {str(k): 0.0 for k in range(4)}
@@ -171,6 +177,8 @@ class HAPPO4v3Trainer:
         self.env_contract_config = load_config(self.env_config)
         self.reward_contract = resolved_reward_contract_4v3(self.env_contract_config)
         self.config = deepcopy(config)
+        self.experiment_variant = self.config["experiment"].get("variant")
+        self.reward_contract_version = self.env_contract_config["combat"].get("reward_contract_version")
         t, n, e = self.config["training"], self.config["network"], self.config["experiment"]
         if t.get("training_mode") != "fixed_rule_blue_heterogeneous_4v3_happo":
             raise ValueError("training_mode must be fixed_rule_blue_heterogeneous_4v3_happo")
@@ -249,7 +257,7 @@ class HAPPO4v3Trainer:
 
     def training_signature(self) -> dict[str, Any]:
         t = self.config["training"]
-        return {
+        signature = {
             "checkpoint_family": CHECKPOINT_FAMILY_HAPPO_4V3,
             "checkpoint_version": CHECKPOINT_VERSION_HAPPO_4V3,
             "env_config_sha256": sha256_file(self.env_config),
@@ -260,6 +268,13 @@ class HAPPO4v3Trainer:
             "num_envs": int(t["num_envs"]),
             "rollout_steps": int(t["rollout_steps"]),
         }
+        # Keep legacy v9 signatures loadable while requiring explicit variant
+        # identity for v10 checkpoints.
+        if self.experiment_variant is not None:
+            signature["variant"] = str(self.experiment_variant)
+        if self.reward_contract_version is not None:
+            signature["reward_contract_version"] = str(self.reward_contract_version)
+        return signature
 
     @torch.no_grad()
     def _select_actions(self, obs: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -484,6 +499,8 @@ class HAPPO4v3Trainer:
         ckpt = {
             "checkpoint_family": CHECKPOINT_FAMILY_HAPPO_4V3,
             "checkpoint_version": CHECKPOINT_VERSION_HAPPO_4V3,
+            "variant": self.experiment_variant,
+            "reward_contract_version": self.reward_contract_version,
             "training_signature": self.training_signature(),
             "config": deepcopy(self.config),
             "env_config": self.env_config,
@@ -601,6 +618,8 @@ class HAPPO4v3Trainer:
             "vector_steps": self.vector_steps,
             "update_count": self.update_count,
             "device": str(self.device),
+            "variant": self.experiment_variant,
+            "reward_contract_version": self.reward_contract_version,
             "last_update_metrics": self.last_update_metrics,
             "best_score": self.best_score,
             "best_score_fields": self.best_score_fields,

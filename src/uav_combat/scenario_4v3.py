@@ -72,6 +72,9 @@ def validate_heterogeneous_4v3_config(config: dict[str, Any]) -> None:
         raise ValueError("heterogeneous 4v3 v9 requires scenario.red_team_size=4 and blue_team_size=3")
     if config.get("combat", {}).get("reward_mode") != "functional_heterogeneous_4v3_team_v9":
         raise ValueError("4v3 v9 requires combat.reward_mode=functional_heterogeneous_4v3_team_v9")
+    reward_contract_version = config.get("combat", {}).get("reward_contract_version")
+    if reward_contract_version not in (None, "v10_attack_funnel"):
+        raise ValueError(f"unsupported 4v3 reward_contract_version: {reward_contract_version!r}")
 
     hetero = config.get("heterogeneous", {})
     roles = hetero.get("roles", {})

@@ -106,6 +106,8 @@ def main() -> None:
         "checkpoint_sha256": _sha256_file(checkpoint_path),
         "checkpoint_family": checkpoint.get("checkpoint_family"),
         "checkpoint_version": checkpoint.get("checkpoint_version"),
+        "variant": checkpoint.get("variant", checkpoint.get("config", {}).get("experiment", {}).get("variant")),
+        "reward_contract_version": checkpoint.get("reward_contract_version"),
         "checkpoint_actual_env_steps": checkpoint.get("actual_env_steps", checkpoint.get("env_steps")),
         "seed_list": seeds,
         "episode_record_count": len(records),
