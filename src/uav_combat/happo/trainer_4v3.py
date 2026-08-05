@@ -31,6 +31,19 @@ CHECKPOINT_FAMILY_HAPPO_4V3 = "functional_heterogeneous_4v3_v9_happo"
 CHECKPOINT_VERSION_HAPPO_4V3 = 1
 
 
+def _restore_cuda_rng_state(states: Any) -> None:
+    """Restore CUDA RNG states as CPU byte tensors required by PyTorch."""
+    if isinstance(states, torch.Tensor):
+        states = [states]
+    normalized = []
+    for state in states:
+        if isinstance(state, torch.Tensor):
+            normalized.append(state.detach().to(device="cpu", dtype=torch.uint8).contiguous())
+        else:
+            normalized.append(torch.as_tensor(state, dtype=torch.uint8, device="cpu").contiguous())
+    torch.cuda.set_rng_state_all(normalized)
+
+
 def _sha256_json(value: Any) -> str:
     payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
@@ -578,7 +591,7 @@ class HAPPO4v3Trainer:
             self.episode_seed_rng.bit_generator.state = ckpt["episode_seed_rng_state"]
         torch.set_rng_state(ckpt["torch_cpu_rng_state"].cpu() if hasattr(ckpt["torch_cpu_rng_state"], "cpu") else ckpt["torch_cpu_rng_state"])
         if torch.cuda.is_available() and ckpt.get("torch_cuda_rng_state") is not None:
-            torch.cuda.set_rng_state_all(ckpt["torch_cuda_rng_state"])
+            _restore_cuda_rng_state(ckpt["torch_cuda_rng_state"])
 
     def write_summary(self, output_dir: str | Path) -> None:
         out = Path(output_dir)
