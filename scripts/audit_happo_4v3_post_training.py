@@ -24,11 +24,14 @@ from uav_combat.scenario_4v3 import BLUE_IDS_4V3, RED_COMBAT_IDS_4V3, RED_IDS_4V
 
 ACTION_NAMES = ("yaw", "pitch", "speed")
 PAIR_FIELDS = (
-    "checkpoint", "episode_seed", "step", "combat_id", "target_id",
-    "target_is_current_effective_target", "visibility_source", "distance", "ATA", "AA",
-    "distance_score", "angle_score", "geometry_readiness", "distance_gate", "ATA_gate",
-    "AA_gate", "attack_window", "combat_action_yaw", "combat_action_pitch",
-    "combat_action_speed", "combat_alive", "target_alive",
+    "checkpoint", "episode_seed", "transition_step", "combat_id", "target_id",
+    "pre_action_target_is_current_effective_target", "pre_action_visibility_source",
+    "pre_action_distance", "pre_action_ATA", "pre_action_AA", "pre_action_distance_score",
+    "pre_action_angle_score", "pre_action_geometry_readiness", "pre_action_distance_gate",
+    "pre_action_ATA_gate", "pre_action_AA_gate", "pre_action_attack_window",
+    "action_yaw", "action_pitch", "action_speed", "pre_action_combat_alive",
+    "pre_action_target_alive", "transition_reward", "transition_raw_dense_reward",
+    "transition_done", "transition_termination_reason",
 )
 
 
@@ -38,10 +41,6 @@ def _json_default(value: Any) -> Any:
     if hasattr(value, "tolist"):
         return value.tolist()
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
-
-
-def _mean(values: list[float]) -> float:
-    return float(np.mean(values)) if values else 0.0
 
 
 def _std(values: list[float]) -> float:
@@ -61,39 +60,6 @@ def _actor_stats(values: np.ndarray, prefix: str) -> dict[str, Any]:
             if prefix == "deterministic_action":
                 out[f"{prefix}_actor_{actor_id}_{name}_saturation_rate_095"] = float(np.mean(np.abs(series) >= 0.95))
     return out
-
-
-def _geometry_funnel(env: FunctionalHeterogeneous4v3AirCombatEnv) -> dict[str, int]:
-    counts = {
-        "red_combat_visible_pair_count": 0,
-        "red_combat_distance_gate_pair_count": 0,
-        "red_combat_ata_gate_pair_count": 0,
-        "red_combat_aa_gate_pair_count": 0,
-        "red_combat_attack_window_pair_count": 0,
-    }
-    d_min = float(env.config["combat"]["attack_distance_min"])
-    d_max = float(env.config["combat"]["attack_distance_max"])
-    ata_max = float(env.config["combat"]["attack_ata_max"])
-    aa_max = float(env.config["combat"]["attack_aa_max"])
-    direct = env._direct_visible_ids()
-    for cid in RED_COMBAT_IDS_4V3:
-        combat = env._by_id(cid)
-        if not combat.state.alive:
-            continue
-        for bid in BLUE_IDS_4V3:
-            target = env._by_id(bid)
-            if not target.state.alive or bid not in direct[cid]:
-                continue
-            counts["red_combat_visible_pair_count"] += 1
-            pair = compute_pairwise_geometry(combat.state, target.state)
-            distance_ok = d_min <= pair.distance <= d_max
-            ata_ok = pair.ata <= ata_max
-            aa_ok = pair.aa <= aa_max
-            counts["red_combat_distance_gate_pair_count"] += int(distance_ok)
-            counts["red_combat_ata_gate_pair_count"] += int(ata_ok)
-            counts["red_combat_aa_gate_pair_count"] += int(aa_ok)
-            counts["red_combat_attack_window_pair_count"] += int(distance_ok and ata_ok and aa_ok)
-    return counts
 
 
 def _run_episode(
@@ -124,6 +90,7 @@ def _run_episode(
             d_max = float(env.config["combat"]["attack_distance_max"])
             fade_distance = float(env.reward_contract["combat_dense"]["readiness_fade_distance"])
             pair_rows: list[dict[str, Any]] = []
+            # Geometry and gates are measured immediately before the selected action.
             current_targets = {
                 cid: env._nearest_effective_target(env._by_id(cid), effective)
                 for cid in RED_COMBAT_IDS_4V3
@@ -155,33 +122,37 @@ def _run_episode(
                     pair_rows.append({
                         "checkpoint": checkpoint_name,
                         "episode_seed": int(seed),
-                        "step": int(env.step_count + 1),
+                        "transition_step": int(env.step_count + 1),
                         "combat_id": cid,
                         "target_id": bid,
-                        "target_is_current_effective_target": bool(current_targets[cid] is target),
-                        "visibility_source": visibility_source,
-                        "distance": float(pair.distance),
-                        "ATA": float(pair.ata),
-                        "AA": float(pair.aa),
-                        "distance_score": float(distance_score),
-                        "angle_score": float(angle_score),
-                        "geometry_readiness": float(readiness),
-                        "distance_gate": distance_gate,
-                        "ATA_gate": ata_gate,
-                        "AA_gate": aa_gate,
-                        "attack_window": bool(visibility_source == "direct" and distance_gate and ata_gate and aa_gate),
-                        "combat_action_yaw": float(action[combat_index, 0]),
-                        "combat_action_pitch": float(action[combat_index, 1]),
-                        "combat_action_speed": float(action[combat_index, 2]),
-                        "combat_alive": bool(combat.state.alive),
-                        "target_alive": bool(target.state.alive),
+                        "pre_action_target_is_current_effective_target": bool(current_targets[cid] is target),
+                        "pre_action_visibility_source": visibility_source,
+                        "pre_action_distance": float(pair.distance),
+                        "pre_action_ATA": float(pair.ata),
+                        "pre_action_AA": float(pair.aa),
+                        "pre_action_distance_score": float(distance_score),
+                        "pre_action_angle_score": float(angle_score),
+                        "pre_action_geometry_readiness": float(readiness),
+                        "pre_action_distance_gate": distance_gate,
+                        "pre_action_ATA_gate": ata_gate,
+                        "pre_action_AA_gate": aa_gate,
+                        "pre_action_attack_window": bool(visibility_source == "direct" and distance_gate and ata_gate and aa_gate),
+                        "action_yaw": float(action[combat_index, 0]),
+                        "action_pitch": float(action[combat_index, 1]),
+                        "action_speed": float(action[combat_index, 2]),
+                        "pre_action_combat_alive": bool(combat.state.alive),
+                        "pre_action_target_alive": bool(target.state.alive),
                     })
             observations, _, _, reward, done, _, info = env.step({aid: action[i] for i, aid in enumerate(RED_IDS_4V3)})
             components = info.get("reward_components", {})
+            episode_summary = info.get("episode_summary") or {}
+            # Reward/components and termination belong to the transition produced by that action.
             for row in pair_rows:
                 row.update({
-                    "reward": float(reward),
-                    "raw_dense_reward": float(info.get("raw_dense_reward", 0.0)),
+                    "transition_reward": float(reward),
+                    "transition_raw_dense_reward": float(info.get("raw_dense_reward", 0.0)),
+                    "transition_done": bool(done),
+                    "transition_termination_reason": episode_summary.get("termination_reason") if done else None,
                     "deterministic_action_mean": float(np.mean(action)),
                     "deterministic_action_std": float(np.std(action)),
                     "deterministic_action_any_saturated_095": bool(np.any(np.abs(action) >= 0.95)),
@@ -198,7 +169,7 @@ def _run_episode(
             "checkpoint": checkpoint_name,
             "episode_seed": int(seed),
             "total_reward_from_steps": float(total_reward),
-            "trajectory_steps": int(len({int(row["step"]) for row in rows})),
+            "trajectory_steps": int(len({int(row["transition_step"]) for row in rows})),
             "trajectory_pair_rows": int(len(rows)),
         })
         raw_np = np.asarray(raw_actions, dtype=np.float64)
@@ -207,27 +178,27 @@ def _run_episode(
         summary.update(_actor_stats(det_np, "deterministic_action"))
         pair_count = len(rows)
         summary.update({
-            "pair_current_effective_target_rate": float(np.mean([
-                row["target_is_current_effective_target"] for row in rows
+            "pre_action_pair_current_effective_target_rate": float(np.mean([
+                row["pre_action_target_is_current_effective_target"] for row in rows
             ]) if rows else 0.0),
-            "pair_direct_visibility_rate": float(np.mean([
-                row["visibility_source"] == "direct" for row in rows
+            "pre_action_pair_direct_visibility_rate": float(np.mean([
+                row["pre_action_visibility_source"] == "direct" for row in rows
             ]) if rows else 0.0),
-            "pair_shared_visibility_rate": float(np.mean([
-                row["visibility_source"] == "shared" for row in rows
+            "pre_action_pair_shared_visibility_rate": float(np.mean([
+                row["pre_action_visibility_source"] == "shared" for row in rows
             ]) if rows else 0.0),
-            "pair_hidden_visibility_rate": float(np.mean([
-                row["visibility_source"] == "hidden" for row in rows
+            "pre_action_pair_hidden_visibility_rate": float(np.mean([
+                row["pre_action_visibility_source"] == "hidden" for row in rows
             ]) if rows else 0.0),
-            "pair_distance_gate_rate": float(np.mean([row["distance_gate"] for row in rows]) if rows else 0.0),
-            "pair_ATA_gate_rate": float(np.mean([row["ATA_gate"] for row in rows]) if rows else 0.0),
-            "pair_AA_gate_rate": float(np.mean([row["AA_gate"] for row in rows]) if rows else 0.0),
-            "pair_attack_window_rate": float(np.mean([row["attack_window"] for row in rows]) if rows else 0.0),
-            "pair_min_distance": float(min((row["distance"] for row in rows), default=0.0)),
-            "pair_min_ATA": float(min((row["ATA"] for row in rows), default=0.0)),
-            "pair_min_AA": float(min((row["AA"] for row in rows), default=0.0)),
-            "pair_max_geometry_readiness": float(max((row["geometry_readiness"] for row in rows), default=0.0)),
-            "pair_count": int(pair_count),
+            "pre_action_pair_distance_gate_rate": float(np.mean([row["pre_action_distance_gate"] for row in rows]) if rows else 0.0),
+            "pre_action_pair_ATA_gate_rate": float(np.mean([row["pre_action_ATA_gate"] for row in rows]) if rows else 0.0),
+            "pre_action_pair_AA_gate_rate": float(np.mean([row["pre_action_AA_gate"] for row in rows]) if rows else 0.0),
+            "pre_action_pair_attack_window_rate": float(np.mean([row["pre_action_attack_window"] for row in rows]) if rows else 0.0),
+            "pre_action_pair_min_distance": float(min((row["pre_action_distance"] for row in rows), default=0.0)),
+            "pre_action_pair_min_ATA": float(min((row["pre_action_ATA"] for row in rows), default=0.0)),
+            "pre_action_pair_min_AA": float(min((row["pre_action_AA"] for row in rows), default=0.0)),
+            "pre_action_pair_max_geometry_readiness": float(max((row["pre_action_geometry_readiness"] for row in rows), default=0.0)),
+            "pre_action_pair_count": int(pair_count),
         })
         return summary, rows
     finally:

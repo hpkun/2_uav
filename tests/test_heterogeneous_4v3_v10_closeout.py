@@ -16,6 +16,7 @@ from uav_combat.environment_4v3 import (
     _angle_score,
     _attack_readiness,
     _f_distance,
+    _threat_readiness,
 )
 from uav_combat.geometry import compute_pairwise_geometry
 from uav_combat.models import AircraftState
@@ -113,11 +114,48 @@ def test_dense_clip_records_raw_positive_and_negative_saturation(monkeypatch: py
     assert env._last_raw_dense_reward > 0.03
 
     monkeypatch.setattr("uav_combat.environment_4v3._boundary_risk", lambda *args, **kwargs: 1.0)
+    env.reward_contract["support_dense"]["position_scale"] = 0.0
+    monkeypatch.setattr(env, "_support_position_score", lambda: (0.0, 0.0, 0.0))
     env.reward_contract["support_dense"]["boundary_scale"] = 1.0
     env._compute_reward(visibility, visibility, {}, 0)
     assert env._episode_metrics["dense_clip_negative_saturation_steps"] == 1
     assert env._episode_metrics["raw_dense_reward_count"] == 2
     assert env._episode_metrics["raw_dense_reward_min"] < -0.03
+    assert env._episode_metrics["raw_dense_reward_max"] > 0.03
+
+
+def test_v10_combat_guidance_and_threat_readiness_are_separate() -> None:
+    env = _env()
+    attacker = AircraftState(0.0, 0.0, -3000.0, 150.0, 0.0, 0.0)
+    far_target = AircraftState(2500.0, 0.0, -3000.0, 150.0, 0.0, 0.0)
+    near_target = AircraftState(700.0, 0.0, -3000.0, 150.0, 0.0, 0.0)
+    assert _attack_readiness(attacker, far_target, 100.0, 1000.0, 2000.0, env._readiness_mode) > 0.0
+    assert _threat_readiness(attacker, far_target, 100.0, 1000.0, 2000.0) == 0.0
+    assert _threat_readiness(attacker, near_target, 100.0, 1000.0, 2000.0) > 0.0
+
+
+def test_v9_combat_guidance_keeps_product_readiness() -> None:
+    env = FunctionalHeterogeneous4v3AirCombatEnv("configs/heterogeneous_4v3_main_v9.yaml")
+    env.reset(701)
+    attacker = AircraftState(0.0, 0.0, -3000.0, 150.0, 0.0, 0.0)
+    target = AircraftState(1500.0, 0.0, -3000.0, 150.0, 0.0, 0.0)
+    assert env._readiness_mode == "v9_product"
+    assert _attack_readiness(attacker, target, 100.0, 1000.0, 2000.0, env._readiness_mode) == pytest.approx(0.5)
+
+
+def test_support_threat_exposure_uses_product_readiness() -> None:
+    env = _env()
+    for ac in env.aircraft:
+        ac.state.alive = False
+    _set_state(env, "red_0", 0.0, 0.0, np.pi)
+    _set_state(env, "red_1", -500.0, 0.0, 0.0)
+    _set_state(env, "blue_0", 2500.0, 0.0, np.pi)
+    visibility = _empty_visibility(env)
+    env._record_support_share_metrics(visibility, visibility)
+    assert env._episode_metrics["support_threat_exposure_steps"] == 0
+    _set_state(env, "blue_0", 700.0, 0.0, np.pi)
+    env._record_support_share_metrics(visibility, visibility)
+    assert env._episode_metrics["support_threat_exposure_steps"] == 1
 
 
 def test_assisted_window_51_steps_old_fails_and_50_steps_old_succeeds() -> None:
@@ -160,10 +198,14 @@ def test_dense_summary_and_state_restore_include_compatibility_defaults() -> Non
 
 def test_pair_level_audit_contract_names_are_explicit() -> None:
     required = {
-        "checkpoint", "episode_seed", "step", "combat_id", "target_id",
-        "target_is_current_effective_target", "visibility_source", "distance", "ATA", "AA",
-        "distance_score", "angle_score", "geometry_readiness", "distance_gate", "ATA_gate",
-        "AA_gate", "attack_window", "combat_action_yaw", "combat_action_pitch",
-        "combat_action_speed", "combat_alive", "target_alive",
+        "checkpoint", "episode_seed", "transition_step", "combat_id", "target_id",
+        "pre_action_target_is_current_effective_target", "pre_action_visibility_source",
+        "pre_action_distance", "pre_action_ATA", "pre_action_AA", "pre_action_distance_score",
+        "pre_action_angle_score", "pre_action_geometry_readiness", "pre_action_distance_gate",
+        "pre_action_ATA_gate", "pre_action_AA_gate", "pre_action_attack_window",
+        "action_yaw", "action_pitch", "action_speed", "pre_action_combat_alive",
+        "pre_action_target_alive", "transition_reward", "transition_raw_dense_reward",
+        "transition_done", "transition_termination_reason",
     }
     assert required <= set(PAIR_FIELDS)
+    assert not {"distance", "ATA", "AA", "attack_window", "reward"} & set(PAIR_FIELDS)

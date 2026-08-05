@@ -98,6 +98,17 @@ def _attack_readiness(
     return float(np.clip(distance_score * f_ata * f_aa, 0.0, 1.0))
 
 
+def _threat_readiness(
+    attacker: AircraftState,
+    target: AircraftState,
+    d_min: float,
+    d_max: float,
+    fade_distance: float = 2000.0,
+) -> float:
+    """Keep threat exposure on the legacy strict distance-angle product."""
+    return _attack_readiness(attacker, target, d_min, d_max, fade_distance, mode="v9_product")
+
+
 def _boundary_risk(ac: Aircraft, limits: dict[str, float], soft_margin: float = 1000.0) -> float:
     if not ac.state.alive:
         return 0.0
@@ -463,7 +474,7 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
             threats = [b for b in self._alive_blue() if c.aircraft_id in direct[b.aircraft_id]]
             if threats:
                 combat_threat += float(combat_dense["threat_scale"]) * max(
-                    _attack_readiness(b.state, c.state, d_min, d_max, float(combat_dense["readiness_fade_distance"]), self._readiness_mode)
+                    _threat_readiness(b.state, c.state, d_min, d_max, float(combat_dense["readiness_fade_distance"]))
                     for b in threats
                 )
             combat_boundary += float(combat_dense["boundary_scale"]) * _boundary_risk(c, limits, soft_margin)
@@ -484,7 +495,7 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
         support_threat = 0.0
         if support.state.alive and self._alive_blue():
             support_threat = float(support_dense["threat_scale"]) * max(
-                _attack_readiness(b.state, support.state, d_min, d_max, float(combat_dense["readiness_fade_distance"]), self._readiness_mode)
+                _threat_readiness(b.state, support.state, d_min, d_max, float(combat_dense["readiness_fade_distance"]))
                 for b in self._alive_blue()
             )
         support_boundary = float(support_dense["boundary_scale"]) * _boundary_risk(support, limits, soft_margin) if support.state.alive else 0.0
@@ -570,13 +581,12 @@ class FunctionalHeterogeneous4v3AirCombatEnv:
         self._episode_metrics["support_to_combat_centroid_distance_sum"] += dist
         self._episode_metrics["support_rear_position_steps"] += rear
         if self._alive_blue() and max(
-            _attack_readiness(
+            _threat_readiness(
                 b.state,
                 support.state,
                 float(self.config["combat"]["attack_distance_min"]),
                 float(self.config["combat"]["attack_distance_max"]),
                 float(self.reward_contract["combat_dense"]["readiness_fade_distance"]),
-                self._readiness_mode,
             )
             for b in self._alive_blue()
         ) > 0.0:
