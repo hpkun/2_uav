@@ -239,8 +239,6 @@ def _validate_milestones(cfg: dict[str, Any]) -> None:
     ckpt_interval = int(training["checkpoint_interval_env_steps"])
     if total <= 0 or total % num_envs:
         raise ValueError("total_env_steps must be a positive multiple of num_envs")
-    if total > 3_000_000:
-        raise ValueError("total_env_steps must not exceed the formal 3M experiment budget")
     for name, value in (("evaluation_interval_env_steps", eval_interval), ("checkpoint_interval_env_steps", ckpt_interval)):
         if value <= 0 or value % num_envs:
             raise ValueError(f"{name} must be a positive multiple of num_envs")

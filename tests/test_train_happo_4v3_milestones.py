@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 import yaml
 
-from scripts.train_happo_4v3 import rollout_lengths_to_milestone, training_throughput
+from scripts.train_happo_4v3 import _validate_milestones, rollout_lengths_to_milestone, training_throughput
 from uav_combat.happo.trainer_4v3 import HAPPO4v3Trainer, _restore_cuda_rng_state
 
 
@@ -44,6 +44,22 @@ def test_3m_milestone_terminates_exactly_without_overshoot() -> None:
     assert sum(lengths) * 8 == 3_000_000
     assert all(1 <= length <= 256 for length in lengths)
     assert len(lengths) == 1465
+
+
+def test_10m_training_target_is_accepted() -> None:
+    cfg = _tiny_config()
+    cfg["training"].update({
+        "total_env_steps": 10_000_000,
+        "evaluation_interval_env_steps": 100_000,
+        "checkpoint_interval_env_steps": 100_000,
+    })
+    _validate_milestones(cfg)
+
+    trainer = HAPPO4v3Trainer(ENV_CONFIG, cfg)
+    try:
+        assert trainer.total_env_steps == 10_000_000
+    finally:
+        trainer.close()
 
 
 def test_each_rollout_length_represents_one_update() -> None:

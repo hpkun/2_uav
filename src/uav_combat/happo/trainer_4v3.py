@@ -301,8 +301,6 @@ class HAPPO4v3Trainer:
         self.total_env_steps = int(t["total_env_steps"])
         if self.total_env_steps <= 0 or self.total_env_steps % self.num_envs != 0:
             raise ValueError("training.total_env_steps must be a positive multiple of num_envs")
-        if self.total_env_steps > 3_000_000:
-            raise ValueError("training.total_env_steps must not exceed the formal 3M experiment budget")
         evaluation = self.config.get("evaluation", {})
         self.evaluation_seed_base = int(e["seed"]) + int(evaluation.get("selection_seed_offset", evaluation.get("seed_offset", 50000)))
         vector_factory = make_combat_vector_env_4v3_v11 if self.is_v11 else make_combat_vector_env_4v3
