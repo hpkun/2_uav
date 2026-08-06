@@ -121,7 +121,7 @@ def test_lock_decays_when_target_is_not_directly_visible():
     env = _lock_setup()
     env.lock_progress["red_1"] = 0.6
     env._update_locks(visibility(env))
-    assert env.lock_progress["red_1"] == pytest.approx(0.55)
+    assert env.lock_progress["red_1"] == pytest.approx(0.6 - env.profile["lock_decay_per_step"])
 
 
 def test_threshold_produces_deterministic_kill_candidate():

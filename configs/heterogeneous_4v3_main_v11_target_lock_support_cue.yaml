@@ -54,8 +54,11 @@ combat_profile:
   lock_distance_fade_max: 2500.0
   lock_ata_fade_max: 1.5707963268
   lock_aa_fade_max: 2.6179938780
-  lock_increment_scale: 0.15
-  lock_decay_per_step: 0.05
+  # Calibration 1: the initial 0.15 setting yielded rule any-kill=0.69.
+  # 0.17 remains within the requested lock mechanism and keeps both sides identical.
+  lock_increment_scale: 0.17
+  # Calibration 2 (final): preserve a valid lock through brief geometry loss.
+  lock_decay_per_step: 0.03
   lock_kill_threshold: 1.0
   target_min_hold_steps: 30
   target_lost_release_steps: 10

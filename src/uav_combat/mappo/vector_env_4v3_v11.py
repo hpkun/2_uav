@@ -49,7 +49,7 @@ def _hold(env: FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv):
 
 
 def _pack(results: list[tuple[Any, ...]]) -> VectorStepResult4v3V11:
-    obs, states, rewards, terms, truncs, masks, infos = zip(*results)
+    obs, states, masks, rewards, terms, truncs, infos = zip(*results)
     components = np.zeros((len(results), len(REWARD_COMPONENT_KEYS_V11)), dtype=np.float32)
     summaries: list[dict[str, Any] | None] = []
     valid = np.zeros(len(results), dtype=bool)
@@ -183,7 +183,7 @@ class SubprocessCombatVectorEnv4v3V11:
     def _recv(self):
         values = [parent.recv() for parent in self._parents]
         for value in values:
-            if isinstance(value, tuple) and len(value) == 3 and value[0] == "error":
+            if isinstance(value, tuple) and len(value) == 3 and isinstance(value[0], str) and value[0] == "error":
                 raise RuntimeError(f"worker {value[1]} error:\n{value[2]}")
         return values
 

@@ -11,6 +11,7 @@ from typing import Any, Sequence
 
 import numpy as np
 import torch
+import yaml
 
 from ..environment_4v3 import FunctionalHeterogeneous4v3AirCombatEnv
 from ..environment_4v3_v11 import FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv
@@ -201,7 +202,7 @@ def evaluate_rule_vs_rule_4v3(
     red_policy: str = "rule",
 ) -> dict[str, Any]:
     seed_list = _resolve_seeds(episodes, seeds, seed)
-    config = json.loads(json.dumps(__import__("yaml").safe_load(Path(env_config).read_text(encoding="utf-8"))))
+    config = yaml.safe_load(Path(env_config).read_text(encoding="utf-8"))
     if config.get("combat", {}).get("reward_contract_version") == "v11_target_lock_support_cue":
         if red_policy not in ("rule", "random"):
             raise ValueError("v11 red_policy must be 'rule' or 'random'")

@@ -555,6 +555,7 @@ def main() -> None:
                         print(format_eval_log_v11(actual, summary), flush=True)
                     score, score_fields = compute_best_score_4v3(summary)
                     if trainer.best_score is None or score > trainer.best_score:
+                        previous_best_name = trainer.best_checkpoint_name
                         trainer.best_score = score
                         trainer.best_score_fields = score_fields
                         trainer.best_evaluation = summary
@@ -563,7 +564,7 @@ def main() -> None:
                         trainer.best_actual_env_steps = actual
                         trainer.save_checkpoint(out / "best.pt", is_best=True, scheduled_env_steps=actual)
                         if is_v11:
-                            print(f"[best] step={actual} previous={trainer.best_checkpoint_name} new=best.pt score_fields={score_fields}", flush=True)
+                            print(f"[best] step={actual} previous={previous_best_name} new=best.pt score_fields={score_fields}", flush=True)
                 # This is intentionally after evaluation/best metadata updates.
                 trainer.save_checkpoint(out / "latest.pt", scheduled_env_steps=actual)
                 if hit_eval and (not resumed or not periodic_report_existed):

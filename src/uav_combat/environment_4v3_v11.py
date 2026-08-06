@@ -165,7 +165,7 @@ class FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv:
                     assignments[combat.aircraft_id] = target.aircraft_id
         return assignments
 
-    def _update_support_cues(self, direct: dict[str, set[str],], force: bool = False) -> None:
+    def _update_support_cues(self, direct: dict[str, set[str]], force: bool = False) -> None:
         if not force and self.step_count % 20 != 0:
             return
         new_cues = self._support_cue_ids(direct)
@@ -326,7 +326,7 @@ class FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv:
             "support_assisted_kills": 0.0, "lock_episode_steps": 0.0, "half_lock_episode_steps": 0.0,
             "max_lock_sum": 0.0, "max_lock_count": 0.0, "dense_positive_saturation_steps": 0.0,
             "dense_negative_saturation_steps": 0.0, "dense_steps": 0.0, "raw_dense_sum": 0.0,
-            "raw_dense_min": 0.0, "raw_dense_max": 0.0,
+            "raw_dense_min": 0.0, "raw_dense_max": 0.0, "lock_ever": 0.0, "half_lock_ever": 0.0,
         }
         direct = self._direct_visible_ids()
         self._update_support_cues(direct, force=True)
@@ -447,6 +447,8 @@ class FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv:
                     killers[target_id] = attacker_id
         self._episode_metrics["max_lock_sum"] += max(self.lock_progress.values(), default=0.0)
         self._episode_metrics["max_lock_count"] += 1.0
+        self._episode_metrics["lock_ever"] = max(self._episode_metrics["lock_ever"], float(any(value > 0.0 for value in self.lock_progress.values())))
+        self._episode_metrics["half_lock_ever"] = max(self._episode_metrics["half_lock_ever"], float(any(value >= 0.5 for value in self.lock_progress.values())))
         self._episode_metrics["lock_episode_steps"] += float(any(value > 0.0 for value in self.lock_progress.values()))
         self._episode_metrics["half_lock_episode_steps"] += float(any(value >= 0.5 for value in self.lock_progress.values()))
         return half_events, killers
@@ -534,7 +536,11 @@ class FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv:
         if done:
             mission = self.reward_contract["mission"]
             components["mission_outcome_reward"] = float(mission[reason])
-        event_total = sum(components[key] for key in REWARD_COMPONENT_KEYS_V11 if key.endswith("_reward") and key not in {"mission_outcome_reward", "total_dense_reward", "team_total_reward", "combat_geometry_progress_reward", "combat_lock_progress_reward", "combat_half_lock_event_reward", "support_formation_progress_reward"})
+        event_total = sum(components[key] for key in (
+            "blue_kill_event_reward", "red_combat_loss_event_penalty", "support_loss_event_penalty",
+            "boundary_event_penalty", "support_unique_detection_reward", "support_cue_to_direct_reward",
+            "support_cue_to_half_lock_reward", "support_assisted_kill_reward",
+        ))
         event_total += components["combat_half_lock_event_reward"]
         components["team_total_reward"] = components["mission_outcome_reward"] + event_total + components["total_dense_reward"] + components["combat_geometry_progress_reward"] + components["combat_lock_progress_reward"] + components["support_formation_progress_reward"]
         return float(components["team_total_reward"]), components
@@ -576,18 +582,18 @@ class FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv:
                 deaths[aircraft.aircraft_id] = DEATH_BOUNDARY_V11
 
         direct_post = self._direct_visible_ids()
-        self._record_support_events(direct_post, self._effective_targets(direct_post))
-        # These counters are per-transition, while the episode counters above are cumulative.
+        before_unique = len(self._support_seen)
         before_direct = len(self._cue_to_direct_pairs)
+        self._record_support_events(direct_post, self._effective_targets(direct_post))
+        self._episode_metrics["support_unique_detection_events_step"] = float(len(self._support_seen) - before_unique)
+        self._episode_metrics["support_cue_to_direct_events_step"] = float(len(self._cue_to_direct_pairs) - before_direct)
+        # These counters are per-transition, while the episode counters above are cumulative.
         before_half = len(self._cue_to_half_pairs)
         half_events, killers = self._update_locks(direct_post)
         for pair in half_events:
             if pair in self._cue_pairs:
                 pass
-        self._episode_metrics["support_cue_to_direct_events_step"] = 0.0
         self._episode_metrics["support_cue_to_half_lock_events_step"] = float(max(0, len(self._cue_to_half_pairs) - before_half))
-        # Direct events are recorded above; count only new events for this transition.
-        self._episode_metrics["support_cue_to_direct_events_step"] = float(max(0, len(self._cue_to_direct_pairs) - before_direct))
         for target_id, killer_id in killers.items():
             if self._alive(target_id):
                 self._by_id(target_id).state.alive = False
@@ -595,6 +601,13 @@ class FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv:
                 team = self._by_id(killer_id).team
                 self._attack_kills[team] += 1
                 self._kill_steps[team].append(self.step_count)
+                if killer_id in RED_COMBAT_IDS_V11 and target_id in BLUE_IDS_V11:
+                    last_cue = self._cue_last_step.get((killer_id, target_id))
+                    if last_cue is not None and self.step_count - last_cue <= 50:
+                        self._episode_metrics["support_assisted_kills"] += 1.0
+        for aircraft_id, cause in deaths.items():
+            if self._death_causes.get(aircraft_id, DEATH_NONE_V11) == DEATH_NONE_V11:
+                self._death_causes[aircraft_id] = cause
         self._record_support_events(direct_post, self._effective_targets(direct_post))
         reward, components = self._compute_reward(pre_targets, pre_potentials, pre_locks, deaths, half_events, killers, direct_post)
         self._episode_return += reward
@@ -634,8 +647,8 @@ class FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv:
             "red_combat_survivors": int(red_alive), "blue_combat_survivors": int(blue_alive),
             "support_survived": bool(self._alive("red_0")), "death_causes": dict(self._death_causes),
             "first_kill_time": self._kill_steps["red"][0] if self._kill_steps["red"] else None,
-            "lock_episode_rate": float(self._episode_metrics["lock_episode_steps"] / length),
-            "half_lock_episode_rate": float(self._episode_metrics["half_lock_episode_steps"] / length),
+            "lock_episode_rate": float(self._episode_metrics["lock_ever"]),
+            "half_lock_episode_rate": float(self._episode_metrics["half_lock_ever"]),
             "mean_max_lock_progress": float(self._episode_metrics["max_lock_sum"] / max(1.0, self._episode_metrics["max_lock_count"])),
             "target_switch_count": int(self.target_switch_count),
             "support_cue_rate": float(self._episode_metrics["support_cue_steps"] / length),

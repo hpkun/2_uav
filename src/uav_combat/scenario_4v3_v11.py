@@ -87,6 +87,9 @@ def validate_heterogeneous_4v3_v11_config(config: dict[str, Any]) -> None:
     for key in required_profile:
         if not math.isfinite(float(profile[key])):
             raise ValueError(f"combat_profile.{key} must be finite")
+    for key in ("v_min", "v_max", "theta_min", "theta_max", "yaw_rate_max", "pitch_rate_max", "acceleration_max"):
+        if not np.isclose(float(config["aircraft"][key]), float(profile[key]), rtol=1e-9, atol=1e-9):
+            raise ValueError(f"aircraft.{key} must match combat_profile.{key} for v11 combat symmetry")
     if not (0.0 < float(profile["lock_distance_min"]) < float(profile["lock_distance_optimal_max"]) < float(profile["lock_distance_fade_max"])):
         raise ValueError("v11 lock distance ranges must be strictly increasing")
     if not (0.0 < float(profile["lock_increment_scale"]) and 0.0 < float(profile["lock_decay_per_step"])):
