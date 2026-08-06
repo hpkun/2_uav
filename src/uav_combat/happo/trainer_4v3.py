@@ -13,9 +13,12 @@ from torch import nn
 
 from ..config import load_config
 from ..environment_4v3 import GS_DIM_4V3, OBS_DIM_4V3
+from ..environment_4v3_v11 import GS_DIM_V11, OBS_DIM_V11
 from ..mappo.trainer_3v3 import linear_schedule, resolve_device
 from ..mappo.vector_env_4v3 import RED_REWARD_COMPONENT_KEYS_4V3, RED_TEAM_SIZE_4V3, make_combat_vector_env_4v3
+from ..mappo.vector_env_4v3_v11 import REWARD_COMPONENT_KEYS_V11, make_combat_vector_env_4v3_v11
 from ..scenario_4v3 import resolved_reward_contract_4v3
+from ..scenario_4v3_v11 import resolved_reward_contract_v11
 from .buffer_3v3 import HAPPORolloutBuffer3v3
 from .metrics import explained_variance
 from .networks import CentralizedValueCritic, IndependentHAPPOActors
@@ -49,7 +52,13 @@ def _sha256_json(value: Any) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def best_score_fields_4v3() -> list[str]:
+def best_score_fields_4v3(v11: bool = False) -> list[str]:
+    if v11:
+        return [
+            "task_win_rate", "full_elimination_rate", "at_least_two_kill_rate",
+            "any_kill_rate", "mean_red_kills", "support_assisted_kill_rate",
+            "mean_red_combat_survivors", "negative_mean_episode_length",
+        ]
     return [
         "red_complete_elimination_success_rate",
         "red_at_least_two_attack_kill_rate",
@@ -63,6 +72,18 @@ def best_score_fields_4v3() -> list[str]:
 
 
 def compute_best_score_4v3(summary: dict[str, float]) -> tuple[tuple[float, ...], dict[str, float]]:
+    if "task_win_rate" in summary:
+        fields = {
+            "task_win_rate": float(summary.get("task_win_rate", 0.0)),
+            "full_elimination_rate": float(summary.get("full_elimination_rate", 0.0)),
+            "at_least_two_kill_rate": float(summary.get("at_least_two_kill_rate", 0.0)),
+            "any_kill_rate": float(summary.get("any_kill_rate", 0.0)),
+            "mean_red_kills": float(summary.get("mean_red_kills", 0.0)),
+            "support_assisted_kill_rate": float(summary.get("support_assisted_kill_rate", 0.0)),
+            "mean_red_combat_survivors": float(summary.get("mean_red_combat_survivors", 0.0)),
+            "negative_mean_episode_length": -float(summary.get("mean_episode_length", 0.0)),
+        }
+        return tuple(fields[key] for key in best_score_fields_4v3(True)), fields
     fields = {
         "red_complete_elimination_success_rate": float(summary.get("red_complete_elimination_success_rate", 0.0)),
         "red_at_least_two_attack_kill_rate": float(summary.get("red_at_least_two_attack_kill_rate", 0.0)),
@@ -76,9 +97,68 @@ def compute_best_score_4v3(summary: dict[str, float]) -> tuple[tuple[float, ...]
     return tuple(fields[key] for key in best_score_fields_4v3()), fields
 
 
+def _summarize_v11_episodes(records: list[dict[str, Any]]) -> dict[str, Any]:
+    if not records:
+        return {"episodes": 0.0}
+    n = len(records)
+    mean = lambda key, default=0.0: float(np.mean([float(record.get(key, default)) for record in records]))
+    total_kills = sum(int(record.get("red_attack_kills", 0)) for record in records)
+    total_assists = sum(int(record.get("support_assisted_kills", 0)) for record in records)
+    summary = {
+        "episodes": float(n),
+        "task_win_rate": mean("task_win"),
+        "full_elimination_rate": mean("full_elimination"),
+        "timeout_win_rate": mean("timeout_red_win"),
+        "timeout_loss_rate": mean("timeout_red_loss"),
+        "timeout_draw_rate": mean("timeout_draw"),
+        "timeout_rate": float(np.mean([str(record.get("termination_reason", "")).startswith("timeout") for record in records])),
+        "any_kill_rate": mean("red_any_attack_kill"),
+        "at_least_two_kill_rate": float(np.mean([int(record.get("red_attack_kills", 0)) >= 2 for record in records])),
+        "mean_red_kills": mean("red_attack_kills"),
+        "mean_blue_kills": mean("blue_attack_kills"),
+        "support_assisted_kill_rate": float(total_assists / max(1, total_kills)),
+        "support_assisted_episode_rate": mean("support_assisted_episode_rate"),
+        "mean_red_combat_survivors": mean("red_combat_survivors"),
+        "mean_episode_length": mean("episode_length"),
+        "mean_return": mean("episode_return"),
+        "mean_first_kill_time": float(np.mean([record["first_kill_time"] for record in records if record.get("first_kill_time") is not None])) if any(record.get("first_kill_time") is not None for record in records) else None,
+        "lock_episode_rate": mean("lock_episode_rate"),
+        "half_lock_episode_rate": mean("half_lock_episode_rate"),
+        "mean_max_lock_progress": mean("mean_max_lock_progress"),
+        "mean_target_switch_count": mean("target_switch_count"),
+        "support_cue_rate": mean("support_cue_rate"),
+        "support_cue_to_direct_rate": mean("support_cue_to_direct_rate"),
+        "support_assisted_kill_rate_episode_denominator": mean("support_assisted_episode_rate"),
+        "mean_dense_clip_positive_saturation_rate": mean("dense_clip_positive_saturation_rate"),
+        "mean_dense_clip_negative_saturation_rate": mean("dense_clip_negative_saturation_rate"),
+        "mean_dense_clip_saturation_rate": mean("dense_clip_saturation_rate"),
+        "mean_raw_dense_reward": mean("raw_dense_reward_mean"),
+        "min_raw_dense_reward": float(np.min([float(record.get("raw_dense_reward_min", 0.0)) for record in records])),
+        "max_raw_dense_reward": float(np.max([float(record.get("raw_dense_reward_max", 0.0)) for record in records])),
+        # Compatibility aliases used by the existing 4v3 reporting code.
+        "red_win_rate": mean("task_win"),
+        "red_complete_elimination_success_rate": mean("full_elimination"),
+        "red_at_least_two_attack_kill_rate": float(np.mean([int(record.get("red_attack_kills", 0)) >= 2 for record in records])),
+        "red_any_attack_kill_rate": mean("red_any_attack_kill"),
+        "mean_red_attack_kills": mean("red_attack_kills"),
+    }
+    for key in REWARD_COMPONENT_KEYS_V11:
+        if key != "team_total_reward":
+            summary[key] = float(np.mean([record.get("reward_components", {}).get(key, 0.0) for record in records]))
+    summary["team_total_reward"] = float(np.mean([record.get("reward_components", {}).get("team_total_reward", record.get("episode_return", 0.0)) for record in records]))
+    distribution = {str(index): 0.0 for index in range(4)}
+    for record in records:
+        distribution[str(min(3, int(record.get("red_attack_kills", 0))))] += 1.0 / n
+    summary["red_attack_kill_distribution"] = distribution
+    summary["episode_records"] = deepcopy(records)
+    return summary
+
+
 def summarize_4v3_episodes(records: list[dict[str, Any]]) -> dict[str, Any]:
     if not records:
         return {"episodes": 0}
+    if records[0].get("environment_variant") == "functional_heterogeneous_4v3_v11_target_lock_support_cue":
+        return _summarize_v11_episodes(records)
     n = len(records)
     def mean_optional(key: str) -> float | None:
         values = [float(r[key]) for r in records if r.get(key) is not None]
@@ -175,10 +255,17 @@ class HAPPO4v3Trainer:
     def __init__(self, env_config: str | Path, config: dict[str, Any]) -> None:
         self.env_config = str(env_config)
         self.env_contract_config = load_config(self.env_config)
-        self.reward_contract = resolved_reward_contract_4v3(self.env_contract_config)
         self.config = deepcopy(config)
         self.experiment_variant = self.config["experiment"].get("variant")
         self.reward_contract_version = self.env_contract_config["combat"].get("reward_contract_version")
+        self.is_v11 = self.reward_contract_version == "v11_target_lock_support_cue"
+        self.reward_contract = (
+            resolved_reward_contract_v11(self.env_contract_config)
+            if self.is_v11 else resolved_reward_contract_4v3(self.env_contract_config)
+        )
+        self.obs_dim = OBS_DIM_V11 if self.is_v11 else OBS_DIM_4V3
+        self.gs_dim = GS_DIM_V11 if self.is_v11 else GS_DIM_4V3
+        self.reward_keys = REWARD_COMPONENT_KEYS_V11 if self.is_v11 else RED_REWARD_COMPONENT_KEYS_4V3
         t, n, e = self.config["training"], self.config["network"], self.config["experiment"]
         if t.get("training_mode") != "fixed_rule_blue_heterogeneous_4v3_happo":
             raise ValueError("training_mode must be fixed_rule_blue_heterogeneous_4v3_happo")
@@ -201,21 +288,17 @@ class HAPPO4v3Trainer:
             raise ValueError("training.total_env_steps must not exceed the formal 3M experiment budget")
         evaluation = self.config.get("evaluation", {})
         self.evaluation_seed_base = int(e["seed"]) + int(evaluation.get("selection_seed_offset", evaluation.get("seed_offset", 50000)))
-        self.envs = make_combat_vector_env_4v3(
-            self.env_config,
-            self.num_envs,
-            int(t.get("num_env_workers", 0)),
-            int(e["seed"]),
-        )
+        vector_factory = make_combat_vector_env_4v3_v11 if self.is_v11 else make_combat_vector_env_4v3
+        self.envs = vector_factory(self.env_config, self.num_envs, int(t.get("num_env_workers", 0)), int(e["seed"]))
         self.actors = IndependentHAPPOActors(
-            [OBS_DIM_4V3] * RED_TEAM_SIZE_4V3,
+            [self.obs_dim] * RED_TEAM_SIZE_4V3,
             [3] * RED_TEAM_SIZE_4V3,
             hidden_dim=int(n["hidden_dim"]),
             log_std_init=float(n["log_std_init"]),
             log_std_min=float(n["log_std_min"]),
             log_std_max=float(n["log_std_max"]),
         ).to(self.device)
-        self.critic = CentralizedValueCritic(GS_DIM_4V3, hidden_dim=int(n["hidden_dim"])).to(self.device)
+        self.critic = CentralizedValueCritic(self.gs_dim, hidden_dim=int(n["hidden_dim"])).to(self.device)
         self.initial_actor_lr = float(t["actor_learning_rate"])
         self.final_actor_lr = float(t.get("actor_learning_rate_final", self.initial_actor_lr * 0.1))
         self.initial_critic_lr = float(t["critic_learning_rate"])
@@ -227,7 +310,7 @@ class HAPPO4v3Trainer:
         self.current_entropy_coef = self.initial_entropy_coef
         self.actor_optimizers = [torch.optim.Adam(actor.parameters(), lr=self.current_actor_lr) for actor in self.actors.actors]
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=self.current_critic_lr)
-        self.buffer = HAPPORolloutBuffer3v3(self.rollout_steps, self.num_envs, RED_TEAM_SIZE_4V3, OBS_DIM_4V3, 3, GS_DIM_4V3)
+        self.buffer = HAPPORolloutBuffer3v3(self.rollout_steps, self.num_envs, RED_TEAM_SIZE_4V3, self.obs_dim, 3, self.gs_dim)
         self.obs, self.global_states, self.alive_masks = self.envs.reset()
         # VectorEnv.reset() uses the constructor seed plus the global env index.
         # Keep those episode seeds alongside the live environment state so a
@@ -263,8 +346,8 @@ class HAPPO4v3Trainer:
             "env_config_sha256": sha256_file(self.env_config),
             "reward_contract_sha256": _sha256_json(self.reward_contract),
             "team_size": RED_TEAM_SIZE_4V3,
-            "obs_dim": OBS_DIM_4V3,
-            "state_dim": GS_DIM_4V3,
+            "obs_dim": self.obs_dim,
+            "state_dim": self.gs_dim,
             "num_envs": int(t["num_envs"]),
             "rollout_steps": int(t["rollout_steps"]),
         }
@@ -298,11 +381,11 @@ class HAPPO4v3Trainer:
         if steps <= 0:
             raise ValueError("effective rollout must contain at least one vector step")
         if self.buffer.rollout_steps != steps:
-            self.buffer = HAPPORolloutBuffer3v3(steps, self.num_envs, RED_TEAM_SIZE_4V3, OBS_DIM_4V3, 3, GS_DIM_4V3)
+            self.buffer = HAPPORolloutBuffer3v3(steps, self.num_envs, RED_TEAM_SIZE_4V3, self.obs_dim, 3, self.gs_dim)
         self.effective_rollout_steps = steps
         self.buffer.clear()
         episodes: list[dict[str, Any]] = []
-        reward_component_sum = np.zeros(len(RED_REWARD_COMPONENT_KEYS_4V3), dtype=np.float64)
+        reward_component_sum = np.zeros(len(self.reward_keys), dtype=np.float64)
         reward_component_count = 0
         for _ in range(steps):
             actions, log_probs, values = self._select_actions(self.obs)
@@ -338,7 +421,7 @@ class HAPPO4v3Trainer:
         if reward_component_count > 0:
             self.last_rollout_reward_means = {
                 f"mean_rollout_{key}": float(value)
-                for key, value in zip(RED_REWARD_COMPONENT_KEYS_4V3, reward_component_sum / reward_component_count)
+                for key, value in zip(self.reward_keys, reward_component_sum / reward_component_count)
             }
         else:
             self.last_rollout_reward_means = {}
@@ -348,8 +431,8 @@ class HAPPO4v3Trainer:
         t = self.config["training"]
         rollout_steps = int(self.buffer.rollout_steps)
         total = rollout_steps * self.num_envs
-        obs = torch.as_tensor(self.buffer.observations.reshape(total, RED_TEAM_SIZE_4V3, OBS_DIM_4V3), dtype=torch.float32, device=self.device)
-        states = torch.as_tensor(self.buffer.global_states.reshape(total, GS_DIM_4V3), dtype=torch.float32, device=self.device)
+        obs = torch.as_tensor(self.buffer.observations.reshape(total, RED_TEAM_SIZE_4V3, self.obs_dim), dtype=torch.float32, device=self.device)
+        states = torch.as_tensor(self.buffer.global_states.reshape(total, self.gs_dim), dtype=torch.float32, device=self.device)
         actions = torch.as_tensor(self.buffer.actions.reshape(total, RED_TEAM_SIZE_4V3, 3), dtype=torch.float32, device=self.device)
         old_log_probs = torch.as_tensor(self.buffer.log_probs.reshape(total, RED_TEAM_SIZE_4V3), dtype=torch.float32, device=self.device)
         masks = torch.as_tensor(self.buffer.agent_alive_masks.reshape(total, RED_TEAM_SIZE_4V3), dtype=torch.float32, device=self.device)
@@ -636,7 +719,7 @@ class HAPPO4v3Trainer:
             "next_checkpoint_env_steps": self.next_checkpoint_env_steps,
             "final_evaluation": self.evaluation_history[-1]["summary"] if self.evaluation_history else None,
             "evaluation_history": self.evaluation_history,
-            "best_score_schema": best_score_fields_4v3(),
+            "best_score_schema": best_score_fields_4v3(self.is_v11),
             "policy_modes": self.envs.policy_modes(),
         }
         (out / "run_summary.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")

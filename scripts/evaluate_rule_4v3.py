@@ -1,4 +1,4 @@
-"""Rule-vs-rule reachability check for functional heterogeneous 4v3 v9."""
+"""Rule/random reachability check for functional heterogeneous 4v3 environments."""
 from __future__ import annotations
 
 import argparse
@@ -17,9 +17,10 @@ def main() -> None:
     parser.add_argument("--output")
     parser.add_argument("--output-dir")
     parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--red-policy", choices=("rule", "random"), default="rule")
     args = parser.parse_args()
 
-    summary = evaluate_rule_vs_rule_4v3(args.env_config, episodes=args.episodes, seed=args.seed, workers=args.workers)
+    summary = evaluate_rule_vs_rule_4v3(args.env_config, episodes=args.episodes, seed=args.seed, workers=args.workers, red_policy=args.red_policy)
     records = summary.pop("episode_records", [])
     text = json.dumps(summary, indent=2, ensure_ascii=False)
     print(text)

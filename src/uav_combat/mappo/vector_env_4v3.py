@@ -318,6 +318,11 @@ class SubprocessCombatVectorEnv4v3:
 
 
 def make_combat_vector_env_4v3(config_path: str | Path, num_envs: int, num_env_workers: int = 0, seed: int = 0):
+    config = load_config(config_path)
+    if config.get("combat", {}).get("reward_contract_version") == "v11_target_lock_support_cue":
+        from .vector_env_4v3_v11 import make_combat_vector_env_4v3_v11
+
+        return make_combat_vector_env_4v3_v11(config_path, num_envs, num_env_workers, seed)
     if int(num_env_workers) <= 0:
         return LocalCombatVectorEnv4v3(config_path, num_envs, seed)
     return SubprocessCombatVectorEnv4v3(config_path, num_envs, num_env_workers, seed)

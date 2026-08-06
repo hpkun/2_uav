@@ -275,6 +275,38 @@ def training_throughput(env_steps: int, run_start_env_steps: int, elapsed_second
     return float(max(0, int(env_steps) - int(run_start_env_steps)) / max(float(elapsed_seconds), 1e-9))
 
 
+def format_train_log_v11(
+    *, step: int, total: int, update: int, throughput: float, r_step: float,
+    episode_return: float, task_win: float, full: float, mean_kills: float,
+    timeout: float, mission: float, event: float, geom: float, lock: float, support: float,
+) -> str:
+    """Pure formatter used by the v11 terminal contract and its tests."""
+    return (
+        f"[train] step={step}/{total} upd={update} fps={throughput:.1f} "
+        f"r_step={r_step:+.5f} ep_return={episode_return:+.2f} "
+        f"win={task_win:.3f} full={full:.3f} kills={mean_kills:.3f} timeout={timeout:.3f} "
+        f"reward{{mission={mission:+.5f} event={event:+.5f} geom={geom:+.5f} "
+        f"lock={lock:+.5f} support={support:+.5f}}}"
+    )
+
+
+def format_eval_log_v11(step: int, summary: dict[str, Any]) -> str:
+    return (
+        f"[eval] step={step} episodes={int(summary.get('episodes', 0))} "
+        f"task_win={summary.get('task_win_rate', 0.0):.3f} "
+        f"full={summary.get('full_elimination_rate', 0.0):.3f} "
+        f"any_kill={summary.get('any_kill_rate', 0.0):.3f} "
+        f"two_plus={summary.get('at_least_two_kill_rate', 0.0):.3f} "
+        f"mean_kills={summary.get('mean_red_kills', 0.0):.3f} "
+        f"timeout_win={summary.get('timeout_win_rate', 0.0):.3f} "
+        f"timeout_loss={summary.get('timeout_loss_rate', 0.0):.3f} "
+        f"draw={summary.get('timeout_draw_rate', 0.0):.3f} "
+        f"mean_return={summary.get('mean_return', 0.0):+.2f} "
+        f"lock_episode={summary.get('lock_episode_rate', 0.0):.3f} "
+        f"support_assist={summary.get('support_assisted_kill_rate', 0.0):.3f}"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--env-config", default="configs/heterogeneous_4v3_main_v9.yaml")
@@ -304,6 +336,7 @@ def main() -> None:
 
     trainer = HAPPO4v3Trainer(args.env_config, cfg)
     trainer.seed_manifest = deepcopy(manifest)
+    is_v11 = trainer.is_v11
     metrics_path = out / "training_metrics.csv"
     metric_fields = [
         "env_steps", "total_env_steps", "vector_steps", "update_count", "effective_rollout_steps",
@@ -324,7 +357,16 @@ def main() -> None:
         "recent_dense_clip_positive_saturation_rate", "recent_dense_clip_negative_saturation_rate",
         "recent_dense_clip_saturation_rate",
     ]
-    fields = [*metric_fields, *outcome_fields, *[f"mean_rollout_{key}" for key in RED_REWARD_COMPONENT_KEYS_4V3]]
+    if is_v11:
+        outcome_fields = [
+            "last_rollout_team_reward_per_step", "recent_episode_return_mean", "recent_episode_return_std",
+            "recent_task_win_rate", "recent_full_elimination_rate", "recent_timeout_win_rate",
+            "recent_timeout_loss_rate", "recent_timeout_draw_rate", "recent_mean_red_kills",
+            "recent_mean_blue_kills", "recent_lock_episode_rate", "recent_half_lock_episode_rate",
+            "recent_mean_max_lock_progress", "recent_target_switches", "recent_support_cue_rate",
+            "recent_support_cue_to_direct_rate", "recent_support_assisted_kill_rate",
+        ]
+    fields = [*metric_fields, *outcome_fields, *[f"mean_rollout_{key}" for key in trainer.reward_keys]]
     resumed = bool(args.resume)
     try:
         if resumed:
@@ -406,18 +448,65 @@ def main() -> None:
                     "recent_dense_clip_negative_saturation_rate": recent.get("mean_dense_clip_negative_saturation_rate", 0.0),
                     "recent_dense_clip_saturation_rate": recent.get("mean_dense_clip_saturation_rate", 0.0),
                 })
+                if is_v11:
+                    returns = [float(record.get("episode_return", 0.0)) for record in trainer.recent_episodes]
+                    reward_means = trainer.last_rollout_reward_means
+                    event_keys = (
+                        "blue_kill_event_reward", "red_combat_loss_event_penalty",
+                        "support_loss_event_penalty", "boundary_event_penalty",
+                        "support_assisted_kill_reward",
+                    )
+                    support_keys = (
+                        "support_unique_detection_reward", "support_cue_to_direct_reward",
+                        "support_cue_to_half_lock_reward", "support_assisted_kill_reward",
+                        "support_formation_progress_reward",
+                    )
+                    row.update({
+                        "last_rollout_team_reward_per_step": reward_means.get("mean_rollout_team_total_reward", 0.0),
+                        "recent_episode_return_mean": float(sum(returns) / max(1, len(returns))),
+                        "recent_episode_return_std": float(torch.tensor(returns).std(unbiased=False).item()) if returns else 0.0,
+                        "recent_task_win_rate": recent.get("task_win_rate", 0.0),
+                        "recent_full_elimination_rate": recent.get("full_elimination_rate", 0.0),
+                        "recent_timeout_win_rate": recent.get("timeout_win_rate", 0.0),
+                        "recent_timeout_loss_rate": recent.get("timeout_loss_rate", 0.0),
+                        "recent_timeout_draw_rate": recent.get("timeout_draw_rate", 0.0),
+                        "recent_mean_red_kills": recent.get("mean_red_kills", 0.0),
+                        "recent_mean_blue_kills": recent.get("mean_blue_kills", 0.0),
+                        "recent_lock_episode_rate": recent.get("lock_episode_rate", 0.0),
+                        "recent_half_lock_episode_rate": recent.get("half_lock_episode_rate", 0.0),
+                        "recent_mean_max_lock_progress": recent.get("mean_max_lock_progress", 0.0),
+                        "recent_target_switches": recent.get("mean_target_switch_count", 0.0),
+                        "recent_support_cue_rate": recent.get("support_cue_rate", 0.0),
+                        "recent_support_cue_to_direct_rate": recent.get("support_cue_to_direct_rate", 0.0),
+                        "recent_support_assisted_kill_rate": recent.get("support_assisted_kill_rate", 0.0),
+                    })
+                    row["_v11_log"] = format_train_log_v11(
+                        step=actual, total=total_target, update=trainer.update_count,
+                        throughput=row["throughput_env_steps_per_second"],
+                        r_step=row["last_rollout_team_reward_per_step"],
+                        episode_return=row["recent_episode_return_mean"],
+                        task_win=row["recent_task_win_rate"], full=row["recent_full_elimination_rate"],
+                        mean_kills=row["recent_mean_red_kills"], timeout=recent.get("timeout_rate", 0.0),
+                        mission=reward_means.get("mean_rollout_mission_outcome_reward", 0.0),
+                        event=sum(reward_means.get(f"mean_rollout_{key}", 0.0) for key in event_keys),
+                        geom=reward_means.get("mean_rollout_combat_geometry_progress_reward", 0.0),
+                        lock=reward_means.get("mean_rollout_combat_lock_progress_reward", 0.0) + reward_means.get("mean_rollout_combat_half_lock_event_reward", 0.0),
+                        support=sum(reward_means.get(f"mean_rollout_{key}", 0.0) for key in support_keys),
+                    )
                 row.update(trainer.last_rollout_reward_means)
                 writer.writerow({key: row.get(key, 0.0) for key in fields})
                 fh.flush()
                 trainer.save_checkpoint(out / "latest.pt", scheduled_env_steps=actual)
-                print(
-                    f"env_steps={actual}/{total_target} update={trainer.update_count} "
-                    f"throughput={training_throughput(actual, run_start_env_steps, elapsed):.1f}/s "
-                    f"recent_win={recent.get('red_win_rate', 0.0):.3f} "
-                    f"kills={recent.get('mean_red_attack_kills', 0.0):.3f} "
-                    f"support_assisted={recent.get('support_assisted_kill_rate', 0.0):.3f}",
-                    flush=True,
-                )
+                if is_v11:
+                    print(row["_v11_log"], flush=True)
+                else:
+                    print(
+                        f"env_steps={actual}/{total_target} update={trainer.update_count} "
+                        f"throughput={training_throughput(actual, run_start_env_steps, elapsed):.1f}/s "
+                        f"recent_win={recent.get('red_win_rate', 0.0):.3f} "
+                        f"kills={recent.get('mean_red_attack_kills', 0.0):.3f} "
+                        f"support_assisted={recent.get('support_assisted_kill_rate', 0.0):.3f}", flush=True,
+                    )
                 return recent
 
             while trainer.env_steps < total_target:
@@ -462,6 +551,8 @@ def main() -> None:
                         label=periodic_label, split="selection", checkpoint_path=periodic_checkpoint,
                         overwrite=not resumed,
                     )
+                    if is_v11:
+                        print(format_eval_log_v11(actual, summary), flush=True)
                     score, score_fields = compute_best_score_4v3(summary)
                     if trainer.best_score is None or score > trainer.best_score:
                         trainer.best_score = score
@@ -471,6 +562,8 @@ def main() -> None:
                         trainer.best_scheduled_env_steps = actual
                         trainer.best_actual_env_steps = actual
                         trainer.save_checkpoint(out / "best.pt", is_best=True, scheduled_env_steps=actual)
+                        if is_v11:
+                            print(f"[best] step={actual} previous={trainer.best_checkpoint_name} new=best.pt score_fields={score_fields}", flush=True)
                 # This is intentionally after evaluation/best metadata updates.
                 trainer.save_checkpoint(out / "latest.pt", scheduled_env_steps=actual)
                 if hit_eval and (not resumed or not periodic_report_existed):
@@ -498,6 +591,16 @@ def main() -> None:
             finally:
                 report_trainer.close()
         trainer.write_summary(out)
+        if is_v11:
+            final = trainer.evaluation_history[-1]["summary"] if trainer.evaluation_history else {}
+            print(
+                f"[done] final_env_steps={trainer.env_steps} updates={trainer.update_count} "
+                f"best_step={trainer.best_actual_env_steps} best_task_win={trainer.best_evaluation.get('task_win_rate', 0.0) if trainer.best_evaluation else 0.0:.3f} "
+                f"best_full={trainer.best_evaluation.get('full_elimination_rate', 0.0) if trainer.best_evaluation else 0.0:.3f} "
+                f"best_mean_kills={trainer.best_evaluation.get('mean_red_kills', 0.0) if trainer.best_evaluation else 0.0:.3f} "
+                f"final_task_win={final.get('task_win_rate', 0.0):.3f} final_full={final.get('full_elimination_rate', 0.0):.3f} "
+                f"final_mean_kills={final.get('mean_red_kills', 0.0):.3f} output={out}", flush=True,
+            )
     finally:
         trainer.close()
 

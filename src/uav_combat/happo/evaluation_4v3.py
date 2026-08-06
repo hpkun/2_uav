@@ -13,6 +13,7 @@ import numpy as np
 import torch
 
 from ..environment_4v3 import FunctionalHeterogeneous4v3AirCombatEnv
+from ..environment_4v3_v11 import FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv
 from ..mappo.trainer_3v3 import resolve_device
 from ..mappo.vector_env_4v3 import RED_TEAM_SIZE_4V3, make_combat_vector_env_4v3
 from .networks import IndependentHAPPOActors
@@ -197,8 +198,23 @@ def evaluate_rule_vs_rule_4v3(
     split: str = "rule",
     seed_manifest: dict[str, Any] | None = None,
     workers: int = 4,
+    red_policy: str = "rule",
 ) -> dict[str, Any]:
     seed_list = _resolve_seeds(episodes, seeds, seed)
+    config = json.loads(json.dumps(__import__("yaml").safe_load(Path(env_config).read_text(encoding="utf-8"))))
+    if config.get("combat", {}).get("reward_contract_version") == "v11_target_lock_support_cue":
+        if red_policy not in ("rule", "random"):
+            raise ValueError("v11 red_policy must be 'rule' or 'random'")
+        runner = _run_v11_baseline_episode
+        args = [(str(env_config), int(item_seed), red_policy) for item_seed in seed_list]
+        t0 = time.perf_counter()
+        if int(workers) <= 1 or len(args) <= 1:
+            records = [runner(*item) for item in args]
+        else:
+            with ProcessPoolExecutor(max_workers=min(int(workers), len(args))) as executor:
+                records = list(executor.map(_run_v11_baseline_episode, [item[0] for item in args], [item[1] for item in args], [item[2] for item in args]))
+        records.sort(key=lambda record: int(record["episode_seed"]))
+        return _summary_with_records(records, split=split, seeds=seed_list, elapsed=time.perf_counter() - t0, manifest=seed_manifest)
     t0 = time.perf_counter()
     if int(workers) <= 1 or len(seed_list) <= 1:
         records = [_run_rule_episode(str(env_config), episode_seed) for episode_seed in seed_list]
@@ -207,6 +223,26 @@ def evaluate_rule_vs_rule_4v3(
             records = list(executor.map(_run_rule_episode, [str(env_config)] * len(seed_list), seed_list))
     records.sort(key=lambda record: int(record["episode_seed"]))
     return _summary_with_records(records, split=split, seeds=seed_list, elapsed=time.perf_counter() - t0, manifest=seed_manifest)
+
+
+def _run_v11_baseline_episode(env_config: str, episode_seed: int, red_policy: str = "rule") -> dict[str, Any]:
+    env = FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv(env_config)
+    env.reset(int(episode_seed))
+    rng = np.random.default_rng(int(episode_seed) + 99173)
+    done = False
+    info: dict[str, Any] = {}
+    while not done:
+        if red_policy == "rule":
+            actions, _ = env.red_rule_actions()
+        elif red_policy == "random":
+            actions = {aid: rng.uniform(-1.0, 1.0, size=3).astype(np.float32) for aid in ("red_0", "red_1", "red_2", "red_3")}
+        else:
+            raise ValueError(f"unsupported v11 red policy: {red_policy!r}")
+        _, _, _, _, done, _, info = env.step(actions)
+    record = deepcopy(info["episode_summary"])
+    record["episode_seed"] = int(episode_seed)
+    record["red_policy"] = red_policy
+    return record
 
 
 def _run_rule_episode(env_config: str, episode_seed: int) -> dict[str, Any]:
