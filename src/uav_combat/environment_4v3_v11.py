@@ -34,6 +34,44 @@ DEATH_NONE_V11 = 0
 DEATH_BOUNDARY_V11 = 1
 DEATH_LOCK_V11 = 5
 
+COMBAT_EVENT_REWARD_KEYS_V11 = (
+    "blue_kill_event_reward",
+    "red_combat_loss_event_penalty",
+    "boundary_event_penalty",
+)
+SUPPORT_EVENT_REWARD_KEYS_V11 = (
+    "support_loss_event_penalty",
+    "support_unique_detection_reward",
+    "support_cue_to_direct_reward",
+    "support_cue_to_half_lock_reward",
+    "support_assisted_kill_reward",
+)
+DENSE_REWARD_KEYS_V11 = (
+    "combat_geometry_progress_reward",
+    "combat_lock_progress_reward",
+    "support_formation_progress_reward",
+)
+
+
+def reward_group_totals_v11(components: dict[str, float]) -> dict[str, float]:
+    """Return mutually exclusive v11 reward groups from one component mapping."""
+    return {
+        "mission": float(components.get("mission_outcome_reward", 0.0)),
+        "combat_evt": float(sum(components.get(key, 0.0) for key in COMBAT_EVENT_REWARD_KEYS_V11)),
+        "support_evt": float(sum(components.get(key, 0.0) for key in SUPPORT_EVENT_REWARD_KEYS_V11)),
+        "half_lock_evt": float(components.get("combat_half_lock_event_reward", 0.0)),
+        "dense": float(components.get("total_dense_reward", 0.0)),
+        "raw_geom": float(components.get("combat_geometry_progress_reward", 0.0)),
+        "raw_lock": float(components.get("combat_lock_progress_reward", 0.0)),
+        "raw_formation": float(components.get("support_formation_progress_reward", 0.0)),
+    }
+
+
+def aggregate_team_reward_v11(components: dict[str, float]) -> float:
+    """Aggregate each v11 reward component exactly once into team reward."""
+    groups = reward_group_totals_v11(components)
+    return float(groups["mission"] + groups["combat_evt"] + groups["support_evt"] + groups["half_lock_evt"] + groups["dense"])
+
 
 def distance_score_v11(distance: float, profile: dict[str, Any]) -> float:
     d = float(distance)
@@ -112,6 +150,7 @@ class FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv:
         self._last_formation_score = 0.0
         self._episode_reward_components = {key: 0.0 for key in REWARD_COMPONENT_KEYS_V11}
         self._last_reward_components = {key: 0.0 for key in REWARD_COMPONENT_KEYS_V11}
+        self._last_raw_dense_reward = 0.0
         self._episode_metrics: dict[str, float] = {}
         self._episode_return = 0.0
 
@@ -168,6 +207,7 @@ class FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv:
     def _update_support_cues(self, direct: dict[str, set[str]], force: bool = False) -> None:
         if not force and self.step_count % 20 != 0:
             return
+        self._episode_metrics["support_cue_update_count"] += 1.0
         new_cues = self._support_cue_ids(direct)
         for combat_id, target_id in new_cues.items():
             if target_id is not None:
@@ -175,7 +215,22 @@ class FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv:
                 self._cue_pairs.add(pair)
                 self._cue_last_step[pair] = self.step_count
         self._support_cues = new_cues
-        self._episode_metrics["support_cue_steps"] += 1.0
+
+    def _record_support_cue_activity(self) -> None:
+        support_alive = self._alive("red_0")
+        blue_alive = any(self._alive(bid) for bid in BLUE_IDS_V11)
+        if support_alive and blue_alive:
+            self._episode_metrics["support_eligible_steps"] += 1.0
+        if not support_alive:
+            return
+        active_pairs = [
+            (cid, target_id)
+            for cid, target_id in self._support_cues.items()
+            if target_id is not None and self._alive(cid) and self._alive(target_id)
+        ]
+        if active_pairs:
+            self._episode_metrics["support_active_cue_steps"] += 1.0
+            self._episode_metrics["support_active_cue_pair_steps"] += float(len(active_pairs))
 
     def _effective_targets(self, direct: dict[str, set[str]]) -> dict[str, set[str]]:
         effective = {key: set(value) for key, value in direct.items()}
@@ -202,7 +257,28 @@ class FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv:
             self.target_lost_steps[aircraft_id] = 0
             self.lock_progress[aircraft_id] = 0.0
 
-    def _refresh_targets(self, direct: dict[str, set[str]], effective: dict[str, set[str]]) -> None:
+    def _visible_target_ids(
+        self,
+        aircraft_id: str,
+        direct: dict[str, set[str]],
+        effective: dict[str, set[str]],
+    ) -> set[str]:
+        own = self._by_id(aircraft_id)
+        if own.team == "red":
+            return set(effective[aircraft_id])
+        direct_targets = set(direct[aircraft_id])
+        combat_targets = direct_targets.intersection(RED_COMBAT_IDS_V11)
+        if combat_targets:
+            return combat_targets
+        return direct_targets.intersection({"red_0"})
+
+    def _refresh_targets(
+        self,
+        direct: dict[str, set[str]],
+        effective: dict[str, set[str]],
+        *,
+        advance_counters: bool = False,
+    ) -> None:
         profile = self.profile
         min_hold = int(profile["target_min_hold_steps"])
         release_steps = int(profile["target_lost_release_steps"])
@@ -212,17 +288,18 @@ class FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv:
                 self._switch_target(aircraft_id, None)
                 continue
             own = self._by_id(aircraft_id)
-            visible = direct[aircraft_id] if own.team == "blue" else effective[aircraft_id]
+            visible = self._visible_target_ids(aircraft_id, direct, effective)
             current = self.targets.get(aircraft_id)
             if current is not None and not self._alive(current):
                 current = None
                 self._switch_target(aircraft_id, None)
             if current is not None:
-                if current not in visible:
+                if advance_counters and current not in visible:
                     self.target_lost_steps[aircraft_id] += 1
-                else:
+                elif current in visible:
                     self.target_lost_steps[aircraft_id] = 0
-                self.target_hold_steps[aircraft_id] += 1
+                if advance_counters:
+                    self.target_hold_steps[aircraft_id] += 1
             candidates = {cid for cid in visible if self._alive(cid)}
             nearest = self._nearest(aircraft_id, candidates)
             if current is None:
@@ -283,9 +360,6 @@ class FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv:
         ], dtype=np.float32)
 
     def red_rule_actions(self) -> tuple[dict[str, np.ndarray], dict[str, str | None]]:
-        direct = self._direct_visible_ids()
-        self._update_support_cues(direct, force=False)
-        self._refresh_targets(direct, self._effective_targets(direct))
         actions = {"red_0": self._support_action()}
         for cid in RED_COMBAT_IDS_V11:
             actions[cid] = self._action_towards(self._by_id(cid), self.targets.get(cid))
@@ -320,17 +394,28 @@ class FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv:
         self._episode_return = 0.0
         self._episode_reward_components = {key: 0.0 for key in REWARD_COMPONENT_KEYS_V11}
         self._last_reward_components = {key: 0.0 for key in REWARD_COMPONENT_KEYS_V11}
+        self._last_raw_dense_reward = 0.0
         self._episode_metrics = {
-            "support_cue_steps": 0.0, "support_unique_detection_events": 0.0,
+            "support_active_cue_steps": 0.0, "support_active_cue_pair_steps": 0.0,
+            "support_eligible_steps": 0.0, "support_cue_update_count": 0.0,
+            "support_unique_detection_events": 0.0,
             "support_cue_to_direct_events": 0.0, "support_cue_to_half_lock_events": 0.0,
-            "support_assisted_kills": 0.0, "lock_episode_steps": 0.0, "half_lock_episode_steps": 0.0,
+            "support_assisted_kills": 0.0,
+            "red_lock_ever": 0.0, "red_half_lock_ever": 0.0, "red_max_lock_progress": 0.0,
+            "red_lock_active_steps": 0.0, "red_half_lock_active_steps": 0.0,
+            "blue_lock_ever": 0.0, "blue_half_lock_ever": 0.0, "blue_max_lock_progress": 0.0,
+            "blue_lock_active_steps": 0.0, "blue_half_lock_active_steps": 0.0,
+            "lock_episode_steps": 0.0, "half_lock_episode_steps": 0.0,
             "max_lock_sum": 0.0, "max_lock_count": 0.0, "dense_positive_saturation_steps": 0.0,
             "dense_negative_saturation_steps": 0.0, "dense_steps": 0.0, "raw_dense_sum": 0.0,
-            "raw_dense_min": 0.0, "raw_dense_max": 0.0, "lock_ever": 0.0, "half_lock_ever": 0.0,
+            "raw_dense_min": 0.0, "raw_dense_max": 0.0,
+            "support_unique_detection_events_step": 0.0,
+            "support_cue_to_direct_events_step": 0.0,
+            "support_cue_to_half_lock_events_step": 0.0,
         }
         direct = self._direct_visible_ids()
         self._update_support_cues(direct, force=True)
-        self._refresh_targets(direct, self._effective_targets(direct))
+        self._refresh_targets(direct, self._effective_targets(direct), advance_counters=False)
         self._last_formation_score = self._formation_score()
         return self._observations()
 
@@ -352,6 +437,9 @@ class FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv:
         ]
         for other in self.aircraft:
             if other.aircraft_id == own.aircraft_id:
+                continue
+            if other.team != own.team:
+                values.extend([0.0] * 8)
                 continue
             rel = other.state.as_array()[:3] - state.as_array()[:3]
             rel_v = other.state.velocity_vector() - state.velocity_vector()
@@ -383,12 +471,12 @@ class FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv:
         else:
             source_direct = target_id in direct[own.aircraft_id]
             source_cue = own.team == "red" and target_id == self._support_cues.get(own.aircraft_id)
-            geometry = compute_pairwise_geometry(state, target.state)
+            geometry_distance = compute_pairwise_geometry(state, target.state).distance if source_direct or source_cue else 0.0
             values.extend([
                 float(source_cue), float(source_direct), float(source_cue and not source_direct),
                 self.lock_progress.get(own.aircraft_id, 0.0),
                 max(0.0, float(self.profile["target_min_hold_steps"]) - self.target_hold_steps.get(own.aircraft_id, 0)) / max(float(self.profile["target_min_hold_steps"]), 1.0),
-                float(self._alive("red_0")), geometry.distance / 6000.0,
+                float(self._alive("red_0")), geometry_distance / 6000.0,
             ])
         return _clip_obs(values)
 
@@ -428,6 +516,16 @@ class FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv:
                 continue
             target_id = self.targets.get(attacker_id)
             old = self.lock_progress.get(attacker_id, 0.0)
+            prefix = "red" if attacker_id in RED_COMBAT_IDS_V11 else "blue"
+            self._episode_metrics[f"{prefix}_max_lock_progress"] = max(
+                self._episode_metrics[f"{prefix}_max_lock_progress"], old
+            )
+            self._episode_metrics[f"{prefix}_lock_ever"] = max(
+                self._episode_metrics[f"{prefix}_lock_ever"], float(old > 0.0)
+            )
+            self._episode_metrics[f"{prefix}_half_lock_ever"] = max(
+                self._episode_metrics[f"{prefix}_half_lock_ever"], float(old >= 0.5)
+            )
             if target_id is None or not self._alive(target_id) or target_id not in direct[attacker_id]:
                 new = max(0.0, old - float(self.profile["lock_decay_per_step"]))
             else:
@@ -445,12 +543,27 @@ class FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv:
                     self._episode_metrics["support_cue_to_half_lock_events"] += 1.0
                 if new >= float(self.profile["lock_kill_threshold"]) and self._alive(target_id):
                     killers[target_id] = attacker_id
-        self._episode_metrics["max_lock_sum"] += max(self.lock_progress.values(), default=0.0)
-        self._episode_metrics["max_lock_count"] += 1.0
-        self._episode_metrics["lock_ever"] = max(self._episode_metrics["lock_ever"], float(any(value > 0.0 for value in self.lock_progress.values())))
-        self._episode_metrics["half_lock_ever"] = max(self._episode_metrics["half_lock_ever"], float(any(value >= 0.5 for value in self.lock_progress.values())))
-        self._episode_metrics["lock_episode_steps"] += float(any(value > 0.0 for value in self.lock_progress.values()))
-        self._episode_metrics["half_lock_episode_steps"] += float(any(value >= 0.5 for value in self.lock_progress.values()))
+        for prefix, aircraft_ids in (("red", RED_COMBAT_IDS_V11), ("blue", BLUE_IDS_V11)):
+            values = [self.lock_progress.get(aid, 0.0) for aid in aircraft_ids]
+            max_value = max(values, default=0.0)
+            active = any(value > 0.0 for value in values)
+            half_active = any(value >= 0.5 for value in values)
+            self._episode_metrics[f"{prefix}_max_lock_progress"] = max(
+                self._episode_metrics[f"{prefix}_max_lock_progress"], max_value
+            )
+            self._episode_metrics[f"{prefix}_lock_ever"] = max(
+                self._episode_metrics[f"{prefix}_lock_ever"], float(active)
+            )
+            self._episode_metrics[f"{prefix}_half_lock_ever"] = max(
+                self._episode_metrics[f"{prefix}_half_lock_ever"], float(half_active)
+            )
+            self._episode_metrics[f"{prefix}_lock_active_steps"] += float(active)
+            self._episode_metrics[f"{prefix}_half_lock_active_steps"] += float(half_active)
+        self._episode_metrics["lock_episode_steps"] = self._episode_metrics["red_lock_active_steps"]
+        self._episode_metrics["half_lock_episode_steps"] = self._episode_metrics["red_half_lock_active_steps"]
+        self._episode_metrics["max_lock_sum"] = self._episode_metrics["red_max_lock_progress"]
+        self._episode_metrics["max_lock_count"] = 1.0
+        self.max_lock_progress = self._episode_metrics["red_max_lock_progress"]
         return half_events, killers
 
     def _terminal_result(self) -> tuple[bool, str, str]:
@@ -459,7 +572,7 @@ class FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv:
         if blue_alive == 0 and red_alive > 0:
             return True, "red", "red_full_elimination"
         if red_alive == 0 and blue_alive == 0:
-            return True, "draw", "timeout_draw"
+            return True, "draw", "mutual_elimination_draw"
         if red_alive == 0:
             return True, "blue", "red_total_loss"
         if self.step_count >= int(self.config["simulation"]["max_steps"]):
@@ -536,23 +649,24 @@ class FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv:
         if done:
             mission = self.reward_contract["mission"]
             components["mission_outcome_reward"] = float(mission[reason])
-        event_total = sum(components[key] for key in (
-            "blue_kill_event_reward", "red_combat_loss_event_penalty", "support_loss_event_penalty",
-            "boundary_event_penalty", "support_unique_detection_reward", "support_cue_to_direct_reward",
-            "support_cue_to_half_lock_reward", "support_assisted_kill_reward",
-        ))
-        event_total += components["combat_half_lock_event_reward"]
-        components["team_total_reward"] = components["mission_outcome_reward"] + event_total + components["total_dense_reward"] + components["combat_geometry_progress_reward"] + components["combat_lock_progress_reward"] + components["support_formation_progress_reward"]
+        self._last_raw_dense_reward = float(raw_dense)
+        components["team_total_reward"] = aggregate_team_reward_v11(components)
+        if not np.isfinite(list(components.values())).all():
+            raise FloatingPointError("v11 reward components must be finite")
         return float(components["team_total_reward"]), components
 
     def step(self, red_actions: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, bool, bool, dict[str, Any]]:
         if not self._running:
             raise RuntimeError("environment must be reset before step")
         self.step_count += 1
+        for key in (
+            "support_unique_detection_events_step",
+            "support_cue_to_direct_events_step",
+            "support_cue_to_half_lock_events_step",
+        ):
+            self._episode_metrics[key] = 0.0
+        self._record_support_cue_activity()
         direct_pre = self._direct_visible_ids()
-        self._update_support_cues(direct_pre)
-        effective_pre = self._effective_targets(direct_pre)
-        self._refresh_targets(direct_pre, effective_pre)
         pre_targets = dict(self.targets)
         pre_locks = dict(self.lock_progress)
         pre_potentials = {
@@ -587,12 +701,8 @@ class FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv:
         self._record_support_events(direct_post, self._effective_targets(direct_post))
         self._episode_metrics["support_unique_detection_events_step"] = float(len(self._support_seen) - before_unique)
         self._episode_metrics["support_cue_to_direct_events_step"] = float(len(self._cue_to_direct_pairs) - before_direct)
-        # These counters are per-transition, while the episode counters above are cumulative.
         before_half = len(self._cue_to_half_pairs)
         half_events, killers = self._update_locks(direct_post)
-        for pair in half_events:
-            if pair in self._cue_pairs:
-                pass
         self._episode_metrics["support_cue_to_half_lock_events_step"] = float(max(0, len(self._cue_to_half_pairs) - before_half))
         for target_id, killer_id in killers.items():
             if self._alive(target_id):
@@ -608,7 +718,6 @@ class FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv:
         for aircraft_id, cause in deaths.items():
             if self._death_causes.get(aircraft_id, DEATH_NONE_V11) == DEATH_NONE_V11:
                 self._death_causes[aircraft_id] = cause
-        self._record_support_events(direct_post, self._effective_targets(direct_post))
         reward, components = self._compute_reward(pre_targets, pre_potentials, pre_locks, deaths, half_events, killers, direct_post)
         self._episode_return += reward
         self._last_reward_components = components
@@ -621,9 +730,14 @@ class FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv:
         else:
             direct_next = self._direct_visible_ids()
             self._update_support_cues(direct_next)
-            self._refresh_targets(direct_next, self._effective_targets(direct_next))
+            self._refresh_targets(direct_next, self._effective_targets(direct_next), advance_counters=True)
         obs, state, masks = self._observations()
-        info = {"reward_components": components, "raw_dense_reward": float(components["total_dense_reward"]), "episode_summary": self._episode_summary(outcome, reason) if done else None}
+        info = {
+            "reward_components": components,
+            "reward_groups": reward_group_totals_v11(components),
+            "raw_dense_reward": float(self._last_raw_dense_reward),
+            "episode_summary": self._episode_summary(outcome, reason) if done else None,
+        }
         return obs, state, masks, reward, done, False, info
 
     def _episode_summary(self, outcome: str | None, reason: str | None) -> dict[str, Any]:
@@ -641,17 +755,44 @@ class FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv:
             "red_full_elimination": bool(red_full), "red_total_loss": bool(reason == "red_total_loss"),
             "timeout_red_win": bool(reason == "timeout_red_win"), "timeout_red_loss": bool(reason == "timeout_red_loss"),
             "timeout_draw": bool(reason == "timeout_draw"),
+            "mutual_elimination_draw": bool(reason == "mutual_elimination_draw"),
             "red_attack_kills": int(self._attack_kills["red"]), "blue_attack_kills": int(self._attack_kills["blue"]),
             "red_any_attack_kill": bool(self._attack_kills["red"] > 0),
             "red_attack_kill_distribution": {str(k): float(self._attack_kills["red"] == k) for k in range(4)},
             "red_combat_survivors": int(red_alive), "blue_combat_survivors": int(blue_alive),
             "support_survived": bool(self._alive("red_0")), "death_causes": dict(self._death_causes),
             "first_kill_time": self._kill_steps["red"][0] if self._kill_steps["red"] else None,
-            "lock_episode_rate": float(self._episode_metrics["lock_ever"]),
-            "half_lock_episode_rate": float(self._episode_metrics["half_lock_ever"]),
-            "mean_max_lock_progress": float(self._episode_metrics["max_lock_sum"] / max(1.0, self._episode_metrics["max_lock_count"])),
+            "red_lock_ever": bool(self._episode_metrics["red_lock_ever"]),
+            "red_half_lock_ever": bool(self._episode_metrics["red_half_lock_ever"]),
+            "red_max_lock_progress": float(self._episode_metrics["red_max_lock_progress"]),
+            "red_lock_active_steps": float(self._episode_metrics["red_lock_active_steps"]),
+            "red_half_lock_active_steps": float(self._episode_metrics["red_half_lock_active_steps"]),
+            "red_lock_episode_rate": float(self._episode_metrics["red_lock_ever"]),
+            "red_half_lock_episode_rate": float(self._episode_metrics["red_half_lock_ever"]),
+            "mean_red_max_lock_progress": float(self._episode_metrics["red_max_lock_progress"]),
+            "red_lock_active_step_rate": float(self._episode_metrics["red_lock_active_steps"] / length),
+            "red_half_lock_active_step_rate": float(self._episode_metrics["red_half_lock_active_steps"] / length),
+            "blue_lock_ever": bool(self._episode_metrics["blue_lock_ever"]),
+            "blue_half_lock_ever": bool(self._episode_metrics["blue_half_lock_ever"]),
+            "blue_max_lock_progress": float(self._episode_metrics["blue_max_lock_progress"]),
+            "blue_lock_active_steps": float(self._episode_metrics["blue_lock_active_steps"]),
+            "blue_half_lock_active_steps": float(self._episode_metrics["blue_half_lock_active_steps"]),
+            "blue_lock_episode_rate": float(self._episode_metrics["blue_lock_ever"]),
+            "blue_half_lock_episode_rate": float(self._episode_metrics["blue_half_lock_ever"]),
+            "mean_blue_max_lock_progress": float(self._episode_metrics["blue_max_lock_progress"]),
+            "blue_lock_active_step_rate": float(self._episode_metrics["blue_lock_active_steps"] / length),
+            "blue_half_lock_active_step_rate": float(self._episode_metrics["blue_half_lock_active_steps"] / length),
+            # Compatibility aliases intentionally point to red metrics only.
+            "lock_episode_rate": float(self._episode_metrics["red_lock_ever"]),
+            "half_lock_episode_rate": float(self._episode_metrics["red_half_lock_ever"]),
+            "mean_max_lock_progress": float(self._episode_metrics["red_max_lock_progress"]),
             "target_switch_count": int(self.target_switch_count),
-            "support_cue_rate": float(self._episode_metrics["support_cue_steps"] / length),
+            "support_active_cue_steps": float(self._episode_metrics["support_active_cue_steps"]),
+            "support_active_cue_pair_steps": float(self._episode_metrics["support_active_cue_pair_steps"]),
+            "support_eligible_steps": float(self._episode_metrics["support_eligible_steps"]),
+            "support_cue_update_count": int(self._episode_metrics["support_cue_update_count"]),
+            "support_cue_rate": float(self._episode_metrics["support_active_cue_steps"] / max(1.0, self._episode_metrics["support_eligible_steps"])),
+            "support_cue_pair_step_rate": float(self._episode_metrics["support_active_cue_pair_steps"] / max(1.0, self._episode_metrics["support_eligible_steps"] * 3.0)),
             "support_cue_to_direct_rate": float(len(self._cue_to_direct_pairs) / max(1, len(self._cue_pairs))),
             "support_assisted_kills": int(self._episode_metrics["support_assisted_kills"]),
             "support_assisted_kill_rate": float(self._episode_metrics["support_assisted_kills"] / max(1, self._attack_kills["red"])),
@@ -678,6 +819,7 @@ class FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv:
             "cue_to_direct_pairs": [list(pair) for pair in self._cue_to_direct_pairs], "cue_to_half_pairs": [list(pair) for pair in self._cue_to_half_pairs],
             "support_cues": dict(self._support_cues), "last_formation_score": self._last_formation_score,
             "episode_reward_components": dict(self._episode_reward_components), "last_reward_components": dict(self._last_reward_components),
+            "last_raw_dense_reward": self._last_raw_dense_reward,
             "episode_metrics": dict(self._episode_metrics), "episode_return": self._episode_return,
         }
 
@@ -704,13 +846,26 @@ class FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv:
         self._last_formation_score = float(state["last_formation_score"])
         self._episode_reward_components = {str(k): float(v) for k, v in state["episode_reward_components"].items()}
         self._last_reward_components = {str(k): float(v) for k, v in state["last_reward_components"].items()}
-        self._episode_metrics = {str(k): float(v) for k, v in state["episode_metrics"].items()}; self._episode_return = float(state["episode_return"])
+        self._last_raw_dense_reward = float(state.get("last_raw_dense_reward", 0.0))
+        self._episode_metrics = {str(k): float(v) for k, v in state["episode_metrics"].items()}
+        for key in (
+            "support_active_cue_steps", "support_active_cue_pair_steps", "support_eligible_steps",
+            "support_cue_update_count", "support_unique_detection_events_step",
+            "support_cue_to_direct_events_step", "support_cue_to_half_lock_events_step",
+            "red_lock_ever", "red_half_lock_ever", "red_max_lock_progress",
+            "red_lock_active_steps", "red_half_lock_active_steps",
+            "blue_lock_ever", "blue_half_lock_ever", "blue_max_lock_progress",
+            "blue_lock_active_steps", "blue_half_lock_active_steps",
+        ):
+            self._episode_metrics.setdefault(key, 0.0)
+        self._episode_return = float(state["episode_return"])
 
 
 FunctionalHeterogeneous4v3AirCombatEnvV11 = FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv
 
 __all__ = [
     "BLUE_TEAM_SIZE_V11", "DEATH_BOUNDARY_V11", "DEATH_LOCK_V11", "GS_DIM_V11", "OBS_DIM_V11",
-    "RED_TEAM_SIZE_V11", "REWARD_COMPONENT_KEYS_V11", "FunctionalHeterogeneous4v3AirCombatEnvV11",
+    "RED_TEAM_SIZE_V11", "REWARD_COMPONENT_KEYS_V11", "aggregate_team_reward_v11", "reward_group_totals_v11",
+    "FunctionalHeterogeneous4v3AirCombatEnvV11",
     "FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv", "combat_potential_v11", "distance_score_v11", "lock_quality_v11",
 ]

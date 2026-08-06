@@ -44,6 +44,8 @@ def _hold(env: FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv):
     obs, state, masks = env._observations()
     return obs, state, masks, 0.0, False, False, {
         "reward_components": {key: 0.0 for key in REWARD_COMPONENT_KEYS_V11},
+        "reward_groups": {key: 0.0 for key in ("mission", "combat_evt", "support_evt", "half_lock_evt", "dense", "raw_geom", "raw_lock", "raw_formation")},
+        "raw_dense_reward": 0.0,
         "episode_summary": None,
     }
 

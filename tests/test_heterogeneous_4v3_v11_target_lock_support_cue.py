@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +14,9 @@ from uav_combat.environment_4v3_v11 import (
     RED_COMBAT_IDS_V11,
     REWARD_COMPONENT_KEYS_V11,
     FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv,
+    aggregate_team_reward_v11,
+    combat_potential_v11,
+    reward_group_totals_v11,
     distance_score_v11,
     lock_quality_v11,
 )
@@ -225,10 +229,7 @@ def test_v11_team_reward_contains_all_contract_categories():
     pre_locks = dict(env.lock_progress)
     pre_potentials = {cid: 0.0 for cid in RED_COMBAT_IDS_V11}
     _, components = env._compute_reward(pre_targets, pre_potentials, pre_locks, {}, set(), {}, direct)
-    expected = components["mission_outcome_reward"] + components["total_dense_reward"]
-    expected += sum(components[key] for key in REWARD_COMPONENT_KEYS_V11 if key.endswith("penalty") or key.endswith("event_reward"))
-    expected += components["support_assisted_kill_reward"]
-    expected += components["combat_geometry_progress_reward"] + components["combat_lock_progress_reward"] + components["support_formation_progress_reward"]
+    expected = aggregate_team_reward_v11(components)
     assert components["team_total_reward"] == pytest.approx(expected)
 
 
@@ -267,9 +268,9 @@ def test_v11_summary_contains_required_metrics():
 
 
 def test_terminal_train_log_has_step_and_reward_groups():
-    line = format_train_log_v11(step=8, total=8192, update=1, throughput=10.0, r_step=0.1, episode_return=-1.0, task_win=0.0, full=0.0, mean_kills=0.0, timeout=1.0, mission=-0.1, event=0.0, geom=0.01, lock=0.02, support=0.0)
+    line = format_train_log_v11(step=8, total=8192, update=1, throughput=10.0, r_step=0.1, episode_return=-1.0, task_win=0.0, full=0.0, mean_kills=0.0, timeout=1.0, mission=-0.1, combat_evt=0.0, support_evt=0.0, half_lock_evt=0.02, dense=0.01, raw_geom=0.01, raw_lock=0.0, raw_formation=0.0)
     assert "r_step=" in line and "ep_return=" in line
-    assert all(token in line for token in ("mission=", "event=", "geom=", "lock=", "support="))
+    assert all(token in line for token in ("mission=", "combat_evt=", "support_evt=", "half_lock_evt=", "dense=", "raw{"))
 
 
 def test_terminal_eval_log_has_v11_metrics():
@@ -278,8 +279,14 @@ def test_terminal_eval_log_has_v11_metrics():
 
 
 def test_v9_v10_config_bytes_are_untouched():
-    assert hashlib.sha256(V9_CONFIG.read_bytes()).hexdigest()
-    assert hashlib.sha256(V10_CONFIG.read_bytes()).hexdigest()
+    expected = {
+        "configs/heterogeneous_4v3_main_v9.yaml": "A32F261B0A14201F221A0615EBBD23711C6A40AE0F10B3E9F1A690910026B4E5",
+        "configs/happo_heterogeneous_4v3_main_v9.yaml": "1E67A5421BDE43956B6E7A182C9CF2029716EA1093791289D40F9BA4254C124C",
+        "configs/heterogeneous_4v3_main_v10_attack_funnel.yaml": "708C313C6D4A70775E697CDD275D8CB24D85CD31E9DEA5D9EEB3E008CF0BAFF1",
+        "configs/happo_heterogeneous_4v3_main_v10_attack_funnel.yaml": "58D860EC06F194BC861E1DE55C2B98E4417F9D605189EB79360509C1342B3BB6",
+    }
+    for path, sha in expected.items():
+        assert hashlib.sha256(Path(path).read_bytes()).hexdigest().upper() == sha
 
 
 @pytest.mark.parametrize("seed", [1, 2, 3, 4, 5])
@@ -291,3 +298,204 @@ def test_v11_short_steps_are_finite(seed):
         assert np.isfinite(result[0]).all() and np.isfinite(result[1]).all() and np.isfinite(result[3])
         if result[4]:
             break
+
+
+def test_dense_reward_is_added_once_without_clipping():
+    components = {key: 0.0 for key in REWARD_COMPONENT_KEYS_V11}
+    components.update({
+        "mission_outcome_reward": 0.10,
+        "blue_kill_event_reward": 0.20,
+        "support_loss_event_penalty": -0.03,
+        "combat_half_lock_event_reward": 0.04,
+        "combat_geometry_progress_reward": 0.01,
+        "combat_lock_progress_reward": 0.01,
+        "support_formation_progress_reward": 0.01,
+        "total_dense_reward": 0.03,
+    })
+    assert aggregate_team_reward_v11(components) == pytest.approx(0.34)
+    assert aggregate_team_reward_v11(components) != pytest.approx(0.37)
+
+
+def test_clipped_dense_and_raw_dense_are_separate():
+    env = make_env()
+    for cid in RED_COMBAT_IDS_V11:
+        target = env.targets[cid]
+        if target is not None:
+            env.lock_progress[cid] = 1.0
+            env.targets[cid] = target
+    env._last_formation_score = -1.0
+    pre_targets = dict(env.targets)
+    pre_locks = {cid: 0.0 for cid in RED_COMBAT_IDS_V11}
+    pre_potentials = {
+        cid: combat_potential_v11(env._by_id(cid).state, env._by_id(env.targets[cid]).state, env.profile) - 0.05
+        for cid in RED_COMBAT_IDS_V11 if env.targets[cid] is not None
+    }
+    _, components = env._compute_reward(pre_targets, pre_potentials, pre_locks, {}, set(), {}, env._direct_visible_ids())
+    assert env._last_raw_dense_reward > 0.05
+    assert components["total_dense_reward"] == pytest.approx(0.05)
+    assert env._last_raw_dense_reward != components["total_dense_reward"]
+    assert env._episode_metrics["dense_positive_saturation_steps"] == 1.0
+
+
+def test_reward_groups_reconstruct_team_reward_exactly():
+    env = make_env()
+    direct = env._direct_visible_ids()
+    _, components = env._compute_reward(dict(env.targets), {cid: 0.0 for cid in RED_COMBAT_IDS_V11}, dict(env.lock_progress), {}, set(), {}, direct)
+    groups = reward_group_totals_v11(components)
+    assert sum(groups[key] for key in ("mission", "combat_evt", "support_evt", "half_lock_evt", "dense")) == pytest.approx(components["team_total_reward"])
+    assert components["team_total_reward"] == pytest.approx(aggregate_team_reward_v11(components))
+    assert np.isfinite(list(components.values())).all()
+
+
+def test_hidden_enemy_is_zero_in_common_and_enemy_blocks_and_target_distance():
+    env = make_env()
+    env._support_cues = {cid: None for cid in RED_COMBAT_IDS_V11}
+    env.targets["red_1"] = "blue_0"
+    direct = visibility(env)
+    obs = env._obs_for(env._by_id("red_1"), direct, direct)
+    assert np.allclose(obs[12 + 3 * 8:12 + 6 * 8], 0.0)
+    assert np.allclose(obs[60:90], 0.0)
+    assert np.allclose(obs[90:93], 0.0)
+    assert obs[96] == 0.0
+    assert not np.allclose(obs[12:20], 0.0)
+
+
+def test_direct_and_shared_target_sources_are_masked_correctly():
+    env = _lock_setup()
+    env._support_cues = {cid: None for cid in RED_COMBAT_IDS_V11}
+    direct = visibility(env, direct={"blue_0"})
+    direct_obs = env._obs_for(env._by_id("red_1"), direct, direct)
+    assert direct_obs[90:93].tolist() == pytest.approx([0.0, 1.0, 0.0])
+    assert direct_obs[96] > 0.0
+    env._support_cues["red_1"] = "blue_0"
+    shared_direct = visibility(env)
+    shared_effective = env._effective_targets(shared_direct)
+    shared_obs = env._obs_for(env._by_id("red_1"), shared_direct, shared_effective)
+    assert shared_obs[90:93].tolist() == pytest.approx([1.0, 0.0, 1.0])
+    assert shared_obs[96] > 0.0
+    before = env.lock_progress["red_1"]
+    env._update_locks(shared_direct)
+    assert env.lock_progress["red_1"] <= before
+
+
+def test_red_rule_actions_have_no_side_effects():
+    env = make_env()
+    before = deepcopy(env.state_dict())
+    env.red_rule_actions()
+    middle = deepcopy(env.state_dict())
+    env.red_rule_actions()
+    after = deepcopy(env.state_dict())
+    assert before == middle == after
+
+
+def test_each_transition_updates_hold_and_lost_once():
+    env = make_env()
+    target = env.targets["red_1"]
+    assert target is not None
+    hold_before = env.target_hold_steps["red_1"]
+    actions = {aid: np.zeros(3, dtype=np.float32) for aid in ("red_0", "red_1", "red_2", "red_3")}
+    env.step(actions)
+    assert env.target_hold_steps["red_1"] == hold_before + 1
+
+    env = make_env(17)
+    env._support_cues = {cid: None for cid in RED_COMBAT_IDS_V11}
+    env.targets["red_1"] = "blue_0"
+    env.target_hold_steps["red_1"] = 0
+    env.target_lost_steps["red_1"] = 0
+    env._by_id("blue_0").state.x = 10000.0
+    env._by_id("blue_0").state.y = 10000.0
+    env.step(actions)
+    assert env.target_lost_steps["red_1"] == 1
+
+
+def test_each_transition_calls_cue_and_target_refresh_once(monkeypatch):
+    env = make_env()
+    calls = {"cue": 0, "target": 0}
+    original_cue = env._update_support_cues
+    original_target = env._refresh_targets
+
+    def cue(direct, force=False):
+        calls["cue"] += 1
+        return original_cue(direct, force=force)
+
+    def target(direct, effective, *, advance_counters=False):
+        calls["target"] += 1
+        return original_target(direct, effective, advance_counters=advance_counters)
+
+    monkeypatch.setattr(env, "_update_support_cues", cue)
+    monkeypatch.setattr(env, "_refresh_targets", target)
+    actions = {aid: np.zeros(3, dtype=np.float32) for aid in ("red_0", "red_1", "red_2", "red_3")}
+    env.step(actions)
+    assert calls == {"cue": 1, "target": 1}
+
+
+def test_blue_prefers_visible_combat_over_support():
+    env = make_env()
+    direct = {aircraft.aircraft_id: set() for aircraft in env.aircraft}
+    direct["blue_0"] = {"red_0", "red_1"}
+    env.targets["blue_0"] = None
+    env._refresh_targets(direct, direct)
+    assert env.targets["blue_0"] == "red_1"
+
+
+def test_blue_can_use_support_only_when_no_combat_is_visible():
+    env = make_env()
+    direct = {aircraft.aircraft_id: set() for aircraft in env.aircraft}
+    direct["blue_0"] = {"red_0"}
+    env.targets["blue_0"] = None
+    env._refresh_targets(direct, direct)
+    assert env.targets["blue_0"] == "red_0"
+
+
+def test_red_and_blue_lock_metrics_are_separate_and_max_is_historical():
+    env = _lock_setup()
+    env.targets["red_1"] = None
+    env.targets["blue_0"] = "red_1"
+    env._by_id("blue_0").state.psi = np.pi
+    env._by_id("red_1").state.psi = np.pi
+    direct = visibility(env)
+    direct["blue_0"] = {"red_1"}
+    env._update_locks(direct)
+    assert env._episode_metrics["red_lock_ever"] == 0.0
+    assert env._episode_metrics["blue_lock_ever"] == 1.0
+
+    env = _lock_setup()
+    env.lock_progress["red_1"] = 0.7
+    env._update_locks(visibility(env))
+    assert env._episode_metrics["red_max_lock_progress"] == pytest.approx(0.7)
+
+
+def test_support_activity_rate_uses_valid_cues_and_eligibility():
+    env = make_env()
+    env._support_cues = {cid: None for cid in RED_COMBAT_IDS_V11}
+    env._record_support_cue_activity()
+    assert env._episode_metrics["support_eligible_steps"] == 1.0
+    assert env._episode_metrics["support_active_cue_steps"] == 0.0
+    env._support_cues["red_1"] = "blue_0"
+    env._record_support_cue_activity()
+    assert env._episode_metrics["support_active_cue_steps"] == 1.0
+    assert env._episode_metrics["support_active_cue_pair_steps"] == 1.0
+    env._by_id("red_0").state.alive = False
+    env._record_support_cue_activity()
+    assert env._episode_metrics["support_active_cue_steps"] == 1.0
+
+
+def test_mutual_elimination_is_not_timeout_draw():
+    env = make_env()
+    env.step_count = 300
+    for aid in (*RED_COMBAT_IDS_V11, *BLUE_IDS_V11):
+        env._by_id(aid).state.alive = False
+    assert env._terminal_result()[2] == "mutual_elimination_draw"
+    record = env._episode_summary("draw", "mutual_elimination_draw")
+    assert record["mutual_elimination_draw"] is True
+    assert record["timeout_draw"] is False
+    _, components = env._compute_reward(dict(env.targets), {}, dict(env.lock_progress), {}, set(), {}, env._direct_visible_ids())
+    assert components["mission_outcome_reward"] == pytest.approx(-2.0)
+
+
+def test_timeout_draw_requires_max_steps():
+    env = make_env()
+    env.step_count = 899
+    assert env._terminal_result()[0] is False
+    env.step_count = 900
+    assert env._terminal_result()[2] == "timeout_draw"

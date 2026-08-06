@@ -108,6 +108,7 @@ rewards:
     timeout_red_win: 10.0
     timeout_red_loss: -10.0
     timeout_draw: -2.0
+    mutual_elimination_draw: -2.0
   events:
     blue_combat_killed: 6.0
     red_combat_killed: -4.0

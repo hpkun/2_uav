@@ -105,7 +105,10 @@ def validate_heterogeneous_4v3_v11_config(config: dict[str, Any]) -> None:
     if not isinstance(rewards, dict):
         raise KeyError("missing v11 rewards contract")
     sections = {
-        "mission": ("red_full_elimination", "red_total_loss", "timeout_red_win", "timeout_red_loss", "timeout_draw"),
+        "mission": (
+            "red_full_elimination", "red_total_loss", "timeout_red_win", "timeout_red_loss",
+            "timeout_draw", "mutual_elimination_draw",
+        ),
         "events": ("blue_combat_killed", "red_combat_killed", "red_support_killed", "red_boundary_loss"),
         "combat_progress": ("geometry_scale", "lock_scale", "half_lock_event"),
         "support_events": ("unique_detection", "cue_to_direct", "cue_to_half_lock", "assisted_kill"),

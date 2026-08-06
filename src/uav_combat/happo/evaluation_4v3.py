@@ -215,7 +215,8 @@ def evaluate_rule_vs_rule_4v3(
             with ProcessPoolExecutor(max_workers=min(int(workers), len(args))) as executor:
                 records = list(executor.map(_run_v11_baseline_episode, [item[0] for item in args], [item[1] for item in args], [item[2] for item in args]))
         records.sort(key=lambda record: int(record["episode_seed"]))
-        return _summary_with_records(records, split=split, seeds=seed_list, elapsed=time.perf_counter() - t0, manifest=seed_manifest)
+        result_split = red_policy if split == "rule" else split
+        return _summary_with_records(records, split=result_split, seeds=seed_list, elapsed=time.perf_counter() - t0, manifest=seed_manifest)
     t0 = time.perf_counter()
     if int(workers) <= 1 or len(seed_list) <= 1:
         records = [_run_rule_episode(str(env_config), episode_seed) for episode_seed in seed_list]

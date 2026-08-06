@@ -278,15 +278,19 @@ def training_throughput(env_steps: int, run_start_env_steps: int, elapsed_second
 def format_train_log_v11(
     *, step: int, total: int, update: int, throughput: float, r_step: float,
     episode_return: float, task_win: float, full: float, mean_kills: float,
-    timeout: float, mission: float, event: float, geom: float, lock: float, support: float,
+    timeout: float, mission: float, combat_evt: float, support_evt: float,
+    half_lock_evt: float, dense: float, raw_geom: float, raw_lock: float,
+    raw_formation: float,
 ) -> str:
     """Pure formatter used by the v11 terminal contract and its tests."""
     return (
         f"[train] step={step}/{total} upd={update} fps={throughput:.1f} "
         f"r_step={r_step:+.5f} ep_return={episode_return:+.2f} "
         f"win={task_win:.3f} full={full:.3f} kills={mean_kills:.3f} timeout={timeout:.3f} "
-        f"reward{{mission={mission:+.5f} event={event:+.5f} geom={geom:+.5f} "
-        f"lock={lock:+.5f} support={support:+.5f}}}"
+        f"reward{{mission={mission:+.5f} combat_evt={combat_evt:+.5f} "
+        f"support_evt={support_evt:+.5f} half_lock_evt={half_lock_evt:+.5f} "
+        f"dense={dense:+.5f}}} "
+        f"raw{{geom={raw_geom:+.5f} lock={raw_lock:+.5f} formation={raw_formation:+.5f}}}"
     )
 
 
@@ -302,7 +306,9 @@ def format_eval_log_v11(step: int, summary: dict[str, Any]) -> str:
         f"timeout_loss={summary.get('timeout_loss_rate', 0.0):.3f} "
         f"draw={summary.get('timeout_draw_rate', 0.0):.3f} "
         f"mean_return={summary.get('mean_return', 0.0):+.2f} "
-        f"lock_episode={summary.get('lock_episode_rate', 0.0):.3f} "
+        f"red_lock_episode={summary.get('red_lock_episode_rate', summary.get('lock_episode_rate', 0.0)):.3f} "
+        f"blue_lock_episode={summary.get('blue_lock_episode_rate', 0.0):.3f} "
+        f"support_cue={summary.get('support_cue_rate', 0.0):.3f} "
         f"support_assist={summary.get('support_assisted_kill_rate', 0.0):.3f}"
     )
 
@@ -362,8 +368,15 @@ def main() -> None:
             "last_rollout_team_reward_per_step", "recent_episode_return_mean", "recent_episode_return_std",
             "recent_task_win_rate", "recent_full_elimination_rate", "recent_timeout_win_rate",
             "recent_timeout_loss_rate", "recent_timeout_draw_rate", "recent_mean_red_kills",
-            "recent_mean_blue_kills", "recent_lock_episode_rate", "recent_half_lock_episode_rate",
-            "recent_mean_max_lock_progress", "recent_target_switches", "recent_support_cue_rate",
+            "recent_mean_blue_kills", "recent_mutual_elimination_rate",
+            "recent_red_lock_episode_rate", "recent_red_half_lock_episode_rate",
+            "recent_mean_red_max_lock_progress", "recent_red_lock_active_step_rate",
+            "recent_red_half_lock_active_step_rate", "recent_blue_lock_episode_rate",
+            "recent_blue_half_lock_episode_rate", "recent_mean_blue_max_lock_progress",
+            "recent_blue_lock_active_step_rate", "recent_blue_half_lock_active_step_rate",
+            "recent_target_switches", "recent_support_cue_rate", "recent_support_cue_pair_step_rate",
+            "recent_support_active_cue_steps", "recent_support_active_cue_pair_steps",
+            "recent_support_eligible_steps", "recent_support_cue_update_count",
             "recent_support_cue_to_direct_rate", "recent_support_assisted_kill_rate",
         ]
     fields = [*metric_fields, *outcome_fields, *[f"mean_rollout_{key}" for key in trainer.reward_keys]]
@@ -451,16 +464,15 @@ def main() -> None:
                 if is_v11:
                     returns = [float(record.get("episode_return", 0.0)) for record in trainer.recent_episodes]
                     reward_means = trainer.last_rollout_reward_means
-                    event_keys = (
+                    combat_evt = sum(reward_means.get(f"mean_rollout_{key}", 0.0) for key in (
                         "blue_kill_event_reward", "red_combat_loss_event_penalty",
-                        "support_loss_event_penalty", "boundary_event_penalty",
+                        "boundary_event_penalty",
+                    ))
+                    support_evt = sum(reward_means.get(f"mean_rollout_{key}", 0.0) for key in (
+                        "support_loss_event_penalty", "support_unique_detection_reward",
+                        "support_cue_to_direct_reward", "support_cue_to_half_lock_reward",
                         "support_assisted_kill_reward",
-                    )
-                    support_keys = (
-                        "support_unique_detection_reward", "support_cue_to_direct_reward",
-                        "support_cue_to_half_lock_reward", "support_assisted_kill_reward",
-                        "support_formation_progress_reward",
-                    )
+                    ))
                     row.update({
                         "last_rollout_team_reward_per_step": reward_means.get("mean_rollout_team_total_reward", 0.0),
                         "recent_episode_return_mean": float(sum(returns) / max(1, len(returns))),
@@ -472,11 +484,24 @@ def main() -> None:
                         "recent_timeout_draw_rate": recent.get("timeout_draw_rate", 0.0),
                         "recent_mean_red_kills": recent.get("mean_red_kills", 0.0),
                         "recent_mean_blue_kills": recent.get("mean_blue_kills", 0.0),
-                        "recent_lock_episode_rate": recent.get("lock_episode_rate", 0.0),
-                        "recent_half_lock_episode_rate": recent.get("half_lock_episode_rate", 0.0),
-                        "recent_mean_max_lock_progress": recent.get("mean_max_lock_progress", 0.0),
+                        "recent_mutual_elimination_rate": recent.get("mutual_elimination_draw_rate", 0.0),
+                        "recent_red_lock_episode_rate": recent.get("red_lock_episode_rate", 0.0),
+                        "recent_red_half_lock_episode_rate": recent.get("red_half_lock_episode_rate", 0.0),
+                        "recent_mean_red_max_lock_progress": recent.get("mean_red_max_lock_progress", 0.0),
+                        "recent_red_lock_active_step_rate": recent.get("red_lock_active_step_rate", 0.0),
+                        "recent_red_half_lock_active_step_rate": recent.get("red_half_lock_active_step_rate", 0.0),
+                        "recent_blue_lock_episode_rate": recent.get("blue_lock_episode_rate", 0.0),
+                        "recent_blue_half_lock_episode_rate": recent.get("blue_half_lock_episode_rate", 0.0),
+                        "recent_mean_blue_max_lock_progress": recent.get("mean_blue_max_lock_progress", 0.0),
+                        "recent_blue_lock_active_step_rate": recent.get("blue_lock_active_step_rate", 0.0),
+                        "recent_blue_half_lock_active_step_rate": recent.get("blue_half_lock_active_step_rate", 0.0),
                         "recent_target_switches": recent.get("mean_target_switch_count", 0.0),
                         "recent_support_cue_rate": recent.get("support_cue_rate", 0.0),
+                        "recent_support_cue_pair_step_rate": recent.get("support_cue_pair_step_rate", 0.0),
+                        "recent_support_active_cue_steps": recent.get("mean_support_active_cue_steps", 0.0),
+                        "recent_support_active_cue_pair_steps": recent.get("mean_support_active_cue_pair_steps", 0.0),
+                        "recent_support_eligible_steps": recent.get("mean_support_eligible_steps", 0.0),
+                        "recent_support_cue_update_count": recent.get("mean_support_cue_update_count", 0.0),
                         "recent_support_cue_to_direct_rate": recent.get("support_cue_to_direct_rate", 0.0),
                         "recent_support_assisted_kill_rate": recent.get("support_assisted_kill_rate", 0.0),
                     })
@@ -488,10 +513,13 @@ def main() -> None:
                         task_win=row["recent_task_win_rate"], full=row["recent_full_elimination_rate"],
                         mean_kills=row["recent_mean_red_kills"], timeout=recent.get("timeout_rate", 0.0),
                         mission=reward_means.get("mean_rollout_mission_outcome_reward", 0.0),
-                        event=sum(reward_means.get(f"mean_rollout_{key}", 0.0) for key in event_keys),
-                        geom=reward_means.get("mean_rollout_combat_geometry_progress_reward", 0.0),
-                        lock=reward_means.get("mean_rollout_combat_lock_progress_reward", 0.0) + reward_means.get("mean_rollout_combat_half_lock_event_reward", 0.0),
-                        support=sum(reward_means.get(f"mean_rollout_{key}", 0.0) for key in support_keys),
+                        combat_evt=combat_evt,
+                        support_evt=support_evt,
+                        half_lock_evt=reward_means.get("mean_rollout_combat_half_lock_event_reward", 0.0),
+                        dense=reward_means.get("mean_rollout_total_dense_reward", 0.0),
+                        raw_geom=reward_means.get("mean_rollout_combat_geometry_progress_reward", 0.0),
+                        raw_lock=reward_means.get("mean_rollout_combat_lock_progress_reward", 0.0),
+                        raw_formation=reward_means.get("mean_rollout_support_formation_progress_reward", 0.0),
                     )
                 row.update(trainer.last_rollout_reward_means)
                 writer.writerow({key: row.get(key, 0.0) for key in fields})
