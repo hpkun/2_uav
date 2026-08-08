@@ -8,6 +8,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+from scripts.diagnose_v12_mixed_policy_roles import (
+    AgentAccum,
+    MixedPolicyProbeEnv,
+    _select_trace_specs,
+    _required_numeric,
+    _normalise_episode_row,
+)
 
 from uav_combat.diagnostics.v12_mixed_policy_roles import (
     AGENT_TO_ROLE_V12,
@@ -106,6 +113,85 @@ def test_targeted_seed_selection_never_fills_missing_contrast():
     ]
     assert select_targeted_seeds(rows, category="support", limit=10) == [{"category": "A_support", "episode_seed": 1}]
     assert select_targeted_seeds(rows, category="combat", limit=10) == []
+
+
+def test_targeted_trace_branches_return_plain_dict_source_maps():
+    rows = []
+    combos = {
+        "M0_all_rule": {"task_win": True, "red_attack_kills": 3},
+        "M2_learned_support_rule_combats": {"task_win": False, "red_attack_kills": 0},
+        "M3_rule_support_learned_combats": {"task_win": False, "red_attack_kills": 0},
+        "M4_rule_support_learned_combat_1": {"task_win": False, "red_attack_kills": 0},
+        "M5_rule_support_learned_combat_2": {"task_win": False, "red_attack_kills": 0},
+        "M6_rule_support_learned_combat_3": {"task_win": False, "red_attack_kills": 0},
+        "M1_all_learned": {"task_win": False, "red_attack_kills": 1},
+    }
+    for checkpoint in ("best", "final"):
+        for combo, fields in combos.items():
+            if checkpoint == "final" and combo != "M1_all_learned":
+                continue
+            row_fields = dict(fields)
+            if checkpoint == "final" and combo == "M1_all_learned":
+                row_fields["red_attack_kills"] = 0
+            rows.append({"checkpoint": checkpoint, "combo": combo, "episode_seed": 7, **row_fields})
+    specs = _select_trace_specs(rows)
+    categories = {spec["category"] for spec in specs}
+    assert {"A_support", "B_combat", "C_combat_1", "C_combat_2", "C_combat_3", "D_best_final"} <= categories
+    for spec in specs:
+        assert type(spec["source_map"]) is dict
+        assert set(spec["source_map"]) == {"red_0", "red_1", "red_2", "red_3"}
+
+
+def test_survival_rate_is_explicit_and_required_for_drift():
+    assert _required_numeric({"survival_rate": 1.0}, "survival_rate") == 1.0
+    with pytest.raises(KeyError):
+        _required_numeric({}, "survival_rate")
+
+
+def test_historical_task_win_is_red_outcome_not_strict_elimination():
+    row = _normalise_episode_row({"environment_outcome": "red", "strict_full_elimination": False, "red_attack_kills": 1, "mean_return": 2.0})
+    assert row["task_win"] is True
+    assert row["strict_full_elimination"] is False
+    assert row["at_least_two_kill"] is False
+
+
+def test_dead_actor_does_not_accumulate_alive_behavior_rates():
+    env = _env(150044)
+    env._by_id("red_1").state.alive = False
+    accum = AgentAccum("red_1", "combat_1", "learned")
+    meta = accum.record_pre_step(env, env._direct_visible_ids(), 1)
+    accum.record_post_step(env, 1)
+    row = accum.finish(env, {})
+    assert meta["alive"] is False
+    assert row["alive_steps"] == 0
+    assert row["alive_decision_steps"] == 0
+    assert row["direct_target_rate"] == 0.0
+    assert row["survival_rate"] == 0.0
+
+
+def test_probe_environment_matches_original_for_same_rule_action_sequence():
+    original = _env(150045)
+    probe = MixedPolicyProbeEnv(ENV_CONFIG)
+    probe.reset(150045)
+    for _ in range(650):
+        original_actions, _ = original.red_rule_actions()
+        probe_actions, _ = probe.red_rule_actions()
+        for agent_id in original_actions:
+            np.testing.assert_array_equal(original_actions[agent_id], probe_actions[agent_id])
+        original_step = original.step(original_actions)
+        probe_step = probe.step(probe_actions)
+        assert original_step[4] == probe_step[4]
+        assert original_step[5] == probe_step[5]
+        assert original.state_dict() == probe.state_dict()
+        if original_step[4]:
+            break
+
+
+def test_trace_kill_field_name_is_not_legacy_target_as_killer():
+    source = Path("scripts/diagnose_v12_mixed_policy_roles.py").read_text(encoding="utf-8")
+    assert '"killer_id"' in source
+    assert '"killed_target_id"' in source
+    assert '"attributed_killer"' not in source
 
 
 def test_checkpoint_hash_is_unchanged_by_read_only_load():

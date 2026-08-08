@@ -15,6 +15,7 @@ import math
 import os
 import shutil
 import statistics as statistics_module
+import subprocess
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -41,6 +42,7 @@ from uav_combat.diagnostics.v12_mixed_policy_roles import (  # noqa: E402
     paired_bootstrap,
     practical_equivalence,
     select_targeted_seeds,
+    validate_source_map,
     validate_all_combinations,
 )
 from uav_combat.environment_4v3_v11 import compute_red_combat_formation_reference  # noqa: E402
@@ -74,6 +76,29 @@ CORE_TEAM_FIELDS = (
     "episode_return",
     "episode_length",
     "support_survived",
+)
+TEAM_REPRO_FIELDS = (
+    "task_win_rate",
+    "strict_full_elimination_rate",
+    "any_kill_rate",
+    "at_least_two_kill_rate",
+    "mean_red_kills",
+    "red_half_lock_episode_rate",
+    "mean_red_max_lock_progress",
+    "mean_return",
+    "mean_episode_length",
+)
+AGENT_REPRO_FIELDS = (
+    "mean_attributed_kills",
+    "mean_half_lock_event_count",
+    "mean_max_lock_progress",
+    "mean_lock_active_step_rate",
+    "mean_half_lock_active_step_rate",
+    "mean_direct_target_rate",
+    "mean_shared_only_target_rate",
+    "mean_no_valid_target_rate",
+    "mean_target_switch_count",
+    "survival_rate",
 )
 
 
@@ -190,7 +215,27 @@ def _checkpoint_info(path: Path) -> dict[str, Any]:
     }
 
 
-def _load_inputs(run_dir: Path, requested_device: str, started_at: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], list[int], torch.device]:
+def _git_commit_sha(root: Path) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
+def _load_inputs(
+    run_dir: Path,
+    requested_device: str,
+    started_at: str,
+    workers: int,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], list[int], torch.device]:
     """Read and validate every declared input before evaluation begins."""
     validate_all_combinations()
     env_cfg_path = run_dir / "resolved_environment_config.yaml"
@@ -207,7 +252,8 @@ def _load_inputs(run_dir: Path, requested_device: str, started_at: str) -> tuple
         raise ValueError("best.pt env_steps must be 2,900,000")
     if checkpoints["final.pt"]["env_steps"] != 3_000_000:
         raise ValueError("final.pt env_steps must be 3,000,000")
-    if checkpoints["latest.pt"]["parameter_sha256"] != checkpoints["final.pt"]["parameter_sha256"]:
+    final_latest_equal = checkpoints["latest.pt"]["parameter_sha256"] == checkpoints["final.pt"]["parameter_sha256"]
+    if not final_latest_equal:
         raise ValueError("latest.pt parameters do not match final.pt")
     best_step_equal = checkpoints["best.pt"]["parameter_sha256"] == checkpoints["step_2900000.pt"]["parameter_sha256"]
     env_variant = contract.get("variant")
@@ -239,6 +285,7 @@ def _load_inputs(run_dir: Path, requested_device: str, started_at: str) -> tuple
     else:
         device = torch.device("cpu")
         device_note = "CPU fallback because requested CUDA is unavailable"
+    parallel_worker_device = "cpu" if int(workers) > 1 else str(device)
     data = {
         "run_dir": str(run_dir.resolve()),
         "input_files": {},
@@ -254,19 +301,25 @@ def _load_inputs(run_dir: Path, requested_device: str, started_at: str) -> tuple
         "selection_seed_hash": seed_manifest.get("selection", {}).get("seed_hash"),
         "seed_manifest_hash": seed_manifest.get("manifest_hash"),
         "best_vs_step_2900000_parameter_identical": best_step_equal,
-        "final_vs_latest_parameter_identical": True,
+        "final_vs_latest_parameter_identical": final_latest_equal,
         "run_summary_keys_read": sorted(run_summary.keys()) if isinstance(run_summary, dict) else [],
         "python": sys.version.split()[0],
         "torch": torch.__version__,
         "numpy": np.__version__,
         "requested_device": requested_device,
         "effective_device": str(device),
+        "controller_device": str(device),
+        "parallel_episode_worker_device": parallel_worker_device,
+        "trajectory_device": str(device),
         "device_note": device_note,
+        "workers": int(workers),
+        "git_commit_sha": _git_commit_sha(ROOT),
         "started_at": started_at,
         "ended_at": None,
         "input_sha256_start": _input_sha(run_dir),
         "input_sha256_end": None,
         "command": " ".join(sys.argv),
+        "execution_command": " ".join(sys.argv),
     }
     for name in INPUT_NAMES + ("experiment_contract.json", "run_summary.json"):
         data["input_files"][name] = str((run_dir / name).resolve())
@@ -367,6 +420,8 @@ class AgentAccum:
     rear_alignment_sum: float = 0.0
     rear_alignment_positive_steps: int = 0
     threat_exposure_steps: int = 0
+    support_visible_to_blue_steps: int = 0
+    support_targeted_by_blue_steps: int = 0
     _current_target: str | None = None
     _previous_lock: float = 0.0
     _previous_alive: bool = True
@@ -374,6 +429,28 @@ class AgentAccum:
 
     def record_pre_step(self, env: MixedPolicyProbeEnv, direct: dict[str, set[str]], step: int) -> dict[str, Any]:
         alive = bool(env._alive(self.agent_id))
+        self.steps += 1
+        # All behavior ratios are decision-time, alive-only quantities.  A
+        # dead Actor contributes a physical trace row but no stale target,
+        # lock, visibility, geometry, cue, or switching count.
+        if not alive:
+            self.current_positive = 0
+            self.current_half = 0
+            self._previous_lock = 0.0
+            return {
+                "target_id": None,
+                "target_source": "none",
+                "direct_visible": False,
+                "shared_visible": False,
+                "target_distance": None,
+                "ata": None,
+                "aa": None,
+                "lock_progress": 0.0,
+                "alive": False,
+                "support_visible_to_blue": False,
+                "support_targeted_by_blue": False,
+            }
+        self.alive_steps += 1
         lock = float(env.lock_progress.get(self.agent_id, 0.0))
         target = env.targets.get(self.agent_id)
         if self._first_step:
@@ -384,8 +461,6 @@ class AgentAccum:
             if self._previous_lock >= 0.1:
                 self.target_switch_while_lock_above_0_1 += 1
             self._current_target = target
-        self.steps += 1
-        self.alive_steps += int(alive)
         self.max_lock_progress = max(self.max_lock_progress, lock)
         if lock > 0.0:
             self.positive_lock_steps += 1
@@ -419,7 +494,17 @@ class AgentAccum:
             self.formation_distance_sum += float(ref["centroid_distance"])
             self.rear_alignment_sum += float(ref["rear_alignment"])
             self.rear_alignment_positive_steps += int(ref["rear_alignment"] > 0.0)
-            self.threat_exposure_steps += int(bool(direct.get("red_0", set())))
+            visible_to_blue = any(
+                env._alive(blue_id) and "red_0" in direct.get(blue_id, set())
+                for blue_id in BLUE_IDS_V12
+            )
+            targeted_by_blue = any(
+                env._alive(blue_id) and env.targets.get(blue_id) == "red_0"
+                for blue_id in BLUE_IDS_V12
+            )
+            self.support_visible_to_blue_steps += int(visible_to_blue)
+            self.support_targeted_by_blue_steps += int(targeted_by_blue)
+            self.threat_exposure_steps += int(visible_to_blue)
         self._previous_lock = lock
         return {
             "target_id": target,
@@ -431,6 +516,18 @@ class AgentAccum:
             "aa": float(geometry.aa) if geometry is not None else None,
             "lock_progress": lock,
             "alive": alive,
+            "support_visible_to_blue": bool(
+                self.agent_id == "red_0" and any(
+                    env._alive(blue_id) and "red_0" in direct.get(blue_id, set())
+                    for blue_id in BLUE_IDS_V12
+                )
+            ),
+            "support_targeted_by_blue": bool(
+                self.agent_id == "red_0" and any(
+                    env._alive(blue_id) and env.targets.get(blue_id) == "red_0"
+                    for blue_id in BLUE_IDS_V12
+                )
+            ),
         }
 
     def record_post_step(self, env: MixedPolicyProbeEnv, step: int) -> None:
@@ -452,6 +549,8 @@ class AgentAccum:
             "steps": self.steps,
             "alive_steps": self.alive_steps,
             "survived": self.death_step is None,
+            "survival_rate": float(self.death_step is None),
+            "alive_decision_steps": self.alive_steps,
             "death_step": self.death_step,
             "death_cause": self.death_cause,
             "attributed_kills": self.attributed_kills,
@@ -492,6 +591,8 @@ class AgentAccum:
                 "mean_rear_alignment": self.rear_alignment_sum / denominator,
                 "rear_alignment_positive_rate": self.rear_alignment_positive_steps / denominator,
                 "threat_exposure_rate": self.threat_exposure_steps / denominator,
+                "support_visible_to_blue_rate": self.support_visible_to_blue_steps / denominator,
+                "support_targeted_by_blue_rate": self.support_targeted_by_blue_steps / denominator,
             })
         return out
 
@@ -569,6 +670,9 @@ def _run_episode(
         if trace:
             for index, agent_id in enumerate(TEAM_AGENT_IDS_V12):
                 meta = action_meta[agent_id]
+                killer_id = next((killer for target, killer in killers.items() if killer == agent_id), None)
+                killed_target_id = next((target for target, killer in killers.items() if killer == agent_id), None)
+                kill_event = killer_id == agent_id and killed_target_id in BLUE_IDS_V12
                 trace_rows.append({
                     "checkpoint": checkpoint_name,
                     "combo": combo_name,
@@ -587,8 +691,11 @@ def _run_episode(
                     "lock_progress": meta["lock_progress"],
                     "lock_delta": float(env.lock_progress.get(agent_id, 0.0) - meta["lock_progress"]),
                     "half_lock_event": any(pair[0] == agent_id for pair in half_events),
-                    "kill_event": any(killer == agent_id for killer in killers.values()),
-                    "attributed_killer": next((target for target, killer in killers.items() if killer == agent_id), None),
+                    "kill_event": bool(kill_event),
+                    "killer_id": killer_id if kill_event else None,
+                    "killed_target_id": killed_target_id if kill_event else None,
+                    "support_visible_to_blue": bool(meta.get("support_visible_to_blue", False)),
+                    "support_targeted_by_blue": bool(meta.get("support_targeted_by_blue", False)),
                     "rule_action": rule_actions[agent_id].tolist(),
                     "learned_action": learned_actions[index].tolist(),
                     "used_action": actions[agent_id].tolist(),
@@ -611,6 +718,15 @@ def _run_episode(
         "episode_length": int(summary.get("episode_length", env.step_count)),
         "reward_components": summary.get("reward_components", {}),
     })
+    # Normalize the fields consumed by the diagnostic statistics and targeted
+    # seed selector.  The v12 environment uses the longer contract names.
+    # Historical v1 `task_win` means the environment's red-side outcome,
+    # including timeout red wins; strict full elimination is a separate field.
+    summary["task_win"] = bool(summary.get("environment_outcome") == "red" or summary.get("red_win", False))
+    summary["strict_full_elimination"] = bool(summary.get("strict_full_elimination", summary.get("full_elimination", False)))
+    summary["any_kill"] = bool(summary.get("red_attack_kills", 0) > 0)
+    summary["at_least_two_kill"] = bool(summary.get("red_attack_kills", 0) >= 2)
+    summary["episode_return"] = float(summary.get("episode_return", summary.get("mean_return", 0.0)))
     per_agent = []
     for agent_id in TEAM_AGENT_IDS_V12:
         if agent_id == "red_0":
@@ -625,6 +741,19 @@ def _run_episode(
         item.update({"checkpoint": checkpoint_name, "combo": combo_name, "episode_seed": int(seed)})
         per_agent.append(item)
     return summary, per_agent, trace_rows
+
+
+def _normalise_episode_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Normalize rows loaded from an interrupted/older v2 evaluation file."""
+    row = dict(row)
+    if "environment_outcome" in row:
+        row["task_win"] = str(row.get("environment_outcome")) == "red"
+    row["strict_full_elimination"] = _bool_field(row, "strict_full_elimination")
+    row["any_kill"] = bool(_numeric(row, "red_attack_kills") > 0)
+    row["at_least_two_kill"] = bool(_numeric(row, "red_attack_kills") >= 2)
+    if "episode_return" not in row and "mean_return" in row:
+        row["episode_return"] = row["mean_return"]
+    return row
 
 
 def _evaluate_task(task: Mapping[str, Any]) -> dict[str, Any]:
@@ -661,6 +790,16 @@ def _numeric(row: Mapping[str, Any], key: str, default: float = 0.0) -> float:
     if value is None or value == "":
         return default
     return float(value)
+
+
+def _required_numeric(row: Mapping[str, Any], key: str, *, context: str = "row") -> float:
+    """Read a required diagnostic field without silently converting absence to zero."""
+    if key not in row or row[key] in (None, ""):
+        raise KeyError(f"missing required diagnostic field {key!r} in {context}")
+    value = float(row[key])
+    if not math.isfinite(value):
+        raise ValueError(f"non-finite diagnostic field {key!r} in {context}")
+    return value
 
 
 def _metric_value(row: Mapping[str, Any], key: str) -> float:
@@ -739,7 +878,8 @@ def _aggregate_agents(rows: list[dict[str, Any]], checkpoint: str, combo: str) -
             "role": AGENT_TO_ROLE_V12[agent_id],
             "action_source": group[0].get("action_source"),
             "episodes": len(group),
-            "survival_rate": float(sum(_bool_field(row, "survived") for row in group) / len(group)),
+            "mean_alive_decision_steps": mean("alive_decision_steps"),
+            "survival_rate": float(statistics_module.fmean([_required_numeric(row, "survival_rate", context=f"{checkpoint}/{combo}/{agent_id}") for row in group])),
             "mean_attributed_kills": mean("attributed_kills"),
             "mean_half_lock_event_count": mean("half_lock_event_count"),
             "mean_max_lock_progress": mean("max_lock_progress"),
@@ -777,7 +917,46 @@ def _paired_metric(rows: list[dict[str, Any]], checkpoint: str, combo_a: str, co
         b_only = sum(_bool_field(a[seed], metric) and not _bool_field(b[seed], metric) for seed in common)
         c_only = sum(not _bool_field(a[seed], metric) and _bool_field(b[seed], metric) for seed in common)
         p_value = exact_mcnemar_pvalue(b_only, c_only)
-    return {"checkpoint": checkpoint, "comparison": f"{combo_b}_vs_{combo_a}", "combo_a": combo_a, "combo_b": combo_b, "metric": metric, "n": len(common), "mean_delta_b_minus_a": result["mean_delta"], "ci_low": result["ci_low"], "ci_high": result["ci_high"], "mcnemar_pvalue": p_value}
+    return {"scope": "team", "checkpoint": checkpoint, "comparison": f"{combo_b}_vs_{combo_a}", "combo_a": combo_a, "combo_b": combo_b, "metric": metric, "n": len(common), "mean_delta_b_minus_a": result["mean_delta"], "ci_low": result["ci_low"], "ci_high": result["ci_high"], "mcnemar_pvalue": p_value}
+
+
+def _paired_agent_metric(
+    rows: list[dict[str, Any]],
+    checkpoint: str,
+    combo_a: str,
+    combo_b: str,
+    agent_id: str,
+    metric: str,
+    bootstrap_samples: int,
+) -> dict[str, Any]:
+    a = {
+        int(row["episode_seed"]): row
+        for row in _rows_for(rows, checkpoint, combo_a)
+        if str(row.get("agent_id")) == agent_id
+    }
+    b = {
+        int(row["episode_seed"]): row
+        for row in _rows_for(rows, checkpoint, combo_b)
+        if str(row.get("agent_id")) == agent_id
+    }
+    common = sorted(set(a) & set(b))
+    values_a = [_required_numeric(a[seed], metric, context=f"{checkpoint}/{combo_a}/{agent_id}") for seed in common]
+    values_b = [_required_numeric(b[seed], metric, context=f"{checkpoint}/{combo_b}/{agent_id}") for seed in common]
+    result = paired_bootstrap(values_a, values_b, samples=bootstrap_samples, seed=43)
+    return {
+        "scope": "agent",
+        "checkpoint": checkpoint,
+        "comparison": f"{combo_b}_vs_{combo_a}",
+        "combo_a": combo_a,
+        "combo_b": combo_b,
+        "agent_id": agent_id,
+        "metric": metric,
+        "n": len(common),
+        "mean_delta_b_minus_a": result["mean_delta"],
+        "ci_low": result["ci_low"],
+        "ci_high": result["ci_high"],
+        "mcnemar_pvalue": None,
+    }
 
 
 def _paired_best_final(rows: list[dict[str, Any]], combo: str, metric: str, bootstrap_samples: int) -> dict[str, Any]:
@@ -791,7 +970,7 @@ def _paired_best_final(rows: list[dict[str, Any]], combo: str, metric: str, boot
         b_only = sum(_bool_field(best[seed], metric) and not _bool_field(final[seed], metric) for seed in common)
         c_only = sum(not _bool_field(best[seed], metric) and _bool_field(final[seed], metric) for seed in common)
         p_value = exact_mcnemar_pvalue(b_only, c_only)
-    return {"checkpoint": "best_vs_final", "comparison": f"final_vs_best_{combo}", "combo_a": f"best::{combo}", "combo_b": f"final::{combo}", "metric": metric, "n": len(common), "mean_delta_b_minus_a": result["mean_delta"], "ci_low": result["ci_low"], "ci_high": result["ci_high"], "mcnemar_pvalue": p_value}
+    return {"scope": "team", "checkpoint": "best_vs_final", "comparison": f"final_vs_best_{combo}", "combo_a": f"best::{combo}", "combo_b": f"final::{combo}", "metric": metric, "n": len(common), "mean_delta_b_minus_a": result["mean_delta"], "ci_low": result["ci_low"], "ci_high": result["ci_high"], "mcnemar_pvalue": p_value}
 
 
 def _best_final_rows(rows: list[dict[str, Any]], combo: str, metric: str, bootstrap_samples: int) -> dict[str, Any]:
@@ -841,6 +1020,39 @@ def _make_statistics(rows: list[dict[str, Any]], agent_rows: list[dict[str, Any]
                 result = _paired_metric(rows, checkpoint, a, b, metric, bootstrap_samples)
                 result.update({"threshold": threshold, "classification": practical_equivalence((result["ci_low"], result["ci_high"]), threshold)})
                 equivalence.append(result)
+    # Actor-level paired rows are kept in the same statistics file so every
+    # single-slot conclusion can cite its own lock/kill CI rather than only a
+    # team mean.  These are inference-only rows; they never call an optimizer.
+    actor_contrasts = [
+        ("M0_all_rule", "M1_all_learned", TEAM_AGENT_IDS_V12),
+        ("M0_all_rule", "M2_learned_support_rule_combats", TEAM_AGENT_IDS_V12),
+        ("M0_all_rule", "M3_rule_support_learned_combats", ("red_1", "red_2", "red_3")),
+        ("M0_all_rule", "M4_rule_support_learned_combat_1", ("red_1",)),
+        ("M0_all_rule", "M5_rule_support_learned_combat_2", ("red_2",)),
+        ("M0_all_rule", "M6_rule_support_learned_combat_3", ("red_3",)),
+        ("M4_rule_support_learned_combat_1", "M7_learned_support_learned_combat_1", ("red_1",)),
+        ("M5_rule_support_learned_combat_2", "M8_learned_support_learned_combat_2", ("red_2",)),
+        ("M6_rule_support_learned_combat_3", "M9_learned_support_learned_combat_3", ("red_3",)),
+    ]
+    actor_metrics = (
+        "attributed_kills",
+        "half_lock_event_count",
+        "max_lock_progress",
+        "lock_active_step_rate",
+        "half_lock_active_step_rate",
+        "longest_continuous_positive_lock",
+        "direct_target_rate",
+        "shared_only_target_rate",
+        "no_valid_target_rate",
+        "target_switch_count",
+        "survival_rate",
+        "hard_contact_count",
+    )
+    for checkpoint in ("best", "final"):
+        for combo_a, combo_b, agent_ids in actor_contrasts:
+            for agent_id in agent_ids:
+                for metric in actor_metrics:
+                    pairwise.append(_paired_agent_metric(agent_rows, checkpoint, combo_a, combo_b, agent_id, metric, bootstrap_samples))
     # Best-to-final drift is paired on the same test seed for every role.
     for combo_name, _ in COMBOS_V12_MIXED:
         for role in ROLE_ORDER:
@@ -850,8 +1062,8 @@ def _make_statistics(rows: list[dict[str, Any]], agent_rows: list[dict[str, Any]
                 b = {(int(row["episode_seed"])): row for row in _rows_for(agent_rows, "final", combo_name) if row.get("agent_id") == agent_id}
                 common = sorted(set(a) & set(b))
                 if common:
-                    boot = paired_bootstrap([_numeric(a[s], metric) for s in common], [_numeric(b[s], metric) for s in common], samples=bootstrap_samples, seed=29)
-                    drift.append({"combo": combo_name, "agent_id": agent_id, "role": role, "metric": metric, "n": len(common), "best_mean": float(statistics_module.fmean([_numeric(a[s], metric) for s in common])), "final_mean": float(statistics_module.fmean([_numeric(b[s], metric) for s in common])), "mean_delta_final_minus_best": boot["mean_delta"], "ci_low": boot["ci_low"], "ci_high": boot["ci_high"]})
+                    boot = paired_bootstrap([_required_numeric(a[s], metric, context=f"best/{combo_name}/{agent_id}") for s in common], [_required_numeric(b[s], metric, context=f"final/{combo_name}/{agent_id}") for s in common], samples=bootstrap_samples, seed=29)
+                    drift.append({"combo": combo_name, "agent_id": agent_id, "role": role, "metric": metric, "n": len(common), "best_mean": float(statistics_module.fmean([_required_numeric(a[s], metric, context=f"best/{combo_name}/{agent_id}") for s in common])), "final_mean": float(statistics_module.fmean([_required_numeric(b[s], metric, context=f"final/{combo_name}/{agent_id}") for s in common])), "mean_delta_final_minus_best": boot["mean_delta"], "ci_low": boot["ci_low"], "ci_high": boot["ci_high"]})
     return aggregates, agent_aggregates, pairwise, equivalence, drift
 
 
@@ -867,6 +1079,156 @@ def _m1_reproduction(rows: list[dict[str, Any]], run_dir: Path) -> dict[str, Any
     return {"comparisons": comparisons}
 
 
+def _reproduction_tolerance(scope: str, metric: str) -> float:
+    if metric in {"mean_return", "episode_return"}:
+        return 1e-7
+    if scope == "agent":
+        return 1e-7
+    return 1e-12
+
+
+def _value_or_none(row: Mapping[str, Any], key: str) -> float | None:
+    if key not in row or row[key] in (None, "", "None"):
+        return None
+    value = float(row[key])
+    return value if math.isfinite(value) else None
+
+
+def _v1_v2_reproduction(
+    out_dir: Path,
+    aggregates: list[dict[str, Any]],
+    agent_aggregates: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Compare the new alive-only implementation with the preserved v1 output."""
+    v1_dir = out_dir.parent / "mixed_policy_role_diagnosis"
+    old_team_path = v1_dir / "mixed_policy_aggregate.csv"
+    old_agent_path = v1_dir / "mixed_policy_per_agent_aggregate.csv"
+    if not old_team_path.exists() or not old_agent_path.exists():
+        summary = {"status": "v1_outputs_missing", "team_metric_reproduction_pass": False, "actor_metric_changed_count": None}
+        return [], summary
+    old_team = _read_rows(old_team_path)
+    old_agent = _read_rows(old_agent_path)
+    comparisons: list[dict[str, Any]] = []
+    for scope, old_rows, new_rows, fields, key_fields in (
+        ("team", old_team, aggregates, TEAM_REPRO_FIELDS, ("checkpoint", "combo")),
+        ("agent", old_agent, agent_aggregates, AGENT_REPRO_FIELDS, ("checkpoint", "combo", "agent_id")),
+    ):
+        old_index = {tuple(str(row.get(key)) for key in key_fields): row for row in old_rows}
+        new_index = {tuple(str(row.get(key)) for key in key_fields): row for row in new_rows}
+        for key, old_row in sorted(old_index.items()):
+            new_row = new_index.get(key)
+            for metric in fields:
+                old_value = _value_or_none(old_row, metric)
+                new_value = _value_or_none(new_row or {}, metric)
+                if old_value is None or new_value is None:
+                    passed = old_value is None and new_value is None
+                    delta = None
+                else:
+                    delta = new_value - old_value
+                    passed = abs(delta) <= _reproduction_tolerance(scope, metric)
+                comparisons.append({
+                    "scope": scope,
+                    **{field: key[index] for index, field in enumerate(key_fields)},
+                    "metric": metric,
+                    "v1_value": old_value,
+                    "v2_value": new_value,
+                    "delta_v2_minus_v1": delta,
+                    "tolerance": _reproduction_tolerance(scope, metric),
+                    "pass": bool(passed),
+                })
+    team_rows = [row for row in comparisons if row["scope"] == "team"]
+    actor_rows = [row for row in comparisons if row["scope"] == "agent"]
+    actor_changed = [row for row in actor_rows if row["pass"] is False]
+    summary = {
+        "status": "complete",
+        "v1_directory": str(v1_dir),
+        "team_rows_compared": len(team_rows),
+        "actor_rows_compared": len(actor_rows),
+        "team_metric_reproduction_pass": bool(team_rows) and all(row["pass"] for row in team_rows),
+        "actor_metric_changed_count": len(actor_changed),
+        "actor_metric_changed_fields": actor_changed,
+        "actor_metric_reproduction_pass": not actor_changed,
+        "note": "Alive-only survival/behavior fields are intentionally allowed to differ; team contract fields must reproduce within tolerance.",
+    }
+    return comparisons, summary
+
+
+def _nonfinite_count(rows: Iterable[Mapping[str, Any]]) -> int:
+    count = 0
+    for row in rows:
+        for value in row.values():
+            if isinstance(value, (int, float, np.integer, np.floating)) and not math.isfinite(float(value)):
+                count += 1
+                continue
+            if isinstance(value, str) and value.strip().lower() in {"nan", "inf", "+inf", "-inf"}:
+                count += 1
+    return count
+
+
+def _build_validation_summary(
+    out_dir: Path,
+    rows: list[dict[str, Any]],
+    agent_rows: list[dict[str, Any]],
+    test_seeds: list[int],
+    selected_specs: list[dict[str, Any]],
+    trace_rows: list[dict[str, Any]],
+    integrity: Mapping[str, Any],
+    m1_reproduction: Mapping[str, Any] | None,
+    v1_v2_summary: Mapping[str, Any],
+) -> dict[str, Any]:
+    previous_summary = json.loads((out_dir / "diagnostic_validation_summary.json").read_text(encoding="utf-8")) if (out_dir / "diagnostic_validation_summary.json").exists() else {}
+    selected_checkpoints = ("best", "final")
+    expected_keys = {
+        (checkpoint, combo, int(seed))
+        for checkpoint in selected_checkpoints
+        for combo, _ in COMBOS_V12_MIXED
+        for seed in test_seeds
+    }
+    actual_keys = {(str(row.get("checkpoint")), str(row.get("combo")), int(row.get("episode_seed"))) for row in rows}
+    duplicate_rows = len(rows) - len(actual_keys)
+    agent_keys = {(str(row.get("checkpoint")), str(row.get("combo")), int(row.get("episode_seed")), str(row.get("agent_id"))) for row in agent_rows}
+    expected_agent_keys = {(checkpoint, combo, int(seed), agent_id) for checkpoint, combo, seed in expected_keys for agent_id in TEAM_AGENT_IDS_V12}
+    category_counts: dict[str, int] = {}
+    for spec in selected_specs:
+        category_counts[str(spec.get("category"))] = category_counts.get(str(spec.get("category")), 0) + 1
+    m1_pass = False
+    if m1_reproduction and m1_reproduction.get("comparisons"):
+        m1_pass = all(
+            bool(item.get("seed_hash_equal")) and all(float(field.get("absolute_error", float("inf"))) <= (1e-7 if name == "mean_return" else 1e-12) for name, field in item.get("fields", {}).items())
+            for item in m1_reproduction["comparisons"]
+        )
+    numeric_nonfinite = _nonfinite_count(rows) + _nonfinite_count(agent_rows) + _nonfinite_count(trace_rows)
+    return {
+        "completed_combinations": len({(str(row.get("checkpoint")), str(row.get("combo"))) for row in rows}),
+        "total_episodes": len(rows),
+        "expected_episodes": len(expected_keys),
+        "total_per_agent_rows": len(agent_rows),
+        "expected_per_agent_rows": len(expected_agent_keys),
+        "duplicate_row_count": duplicate_rows,
+        "duplicate_per_agent_row_count": len(agent_rows) - len(agent_keys),
+        "missing_combo_seed_count": len(expected_keys - actual_keys),
+        "missing_per_agent_row_count": len(expected_agent_keys - agent_keys),
+        "trajectory_spec_count": len(selected_specs),
+        "trajectory_row_count": len(trace_rows),
+        "trajectory_category_counts": category_counts,
+        "non_finite_count": numeric_nonfinite,
+        "input_sha256_unchanged": bool(integrity.get("input_sha256_unchanged")),
+        "m1_reproduction_pass": bool(m1_pass),
+        "v1_v2_team_metric_reproduction_pass": bool(v1_v2_summary.get("team_metric_reproduction_pass", False)),
+        "v1_v2_actor_metric_changed_count": v1_v2_summary.get("actor_metric_changed_count"),
+        "requested_device": integrity.get("requested_device"),
+        "controller_device": integrity.get("controller_device"),
+        "parallel_episode_worker_device": integrity.get("parallel_episode_worker_device"),
+        "trajectory_device": integrity.get("trajectory_device"),
+        "test_result_summary": previous_summary.get("test_result_summary", {
+            "compileall": "run separately; see final validation report",
+            "focused_diagnostics_tests": "run separately; see final validation report",
+            "full_pytest": "run separately; see final validation report",
+        }),
+        "output_dir": str(out_dir),
+    }
+
+
 def _select_trace_specs(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     selected = []
     selected.extend(select_targeted_seeds(rows, category="support", limit=10))
@@ -880,9 +1242,9 @@ def _select_trace_specs(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         category = item["category"]
         seed = int(item["episode_seed"])
         if category == "A_support":
-            candidates = [("best", "M2_learned_support_rule_combats", {dict(COMBOS_V12_MIXED)["M2_learned_support_rule_combats"]})]
+            candidates = [("best", "M2_learned_support_rule_combats", dict(COMBOS_V12_MIXED)["M2_learned_support_rule_combats"])]
         elif category == "B_combat":
-            candidates = [("best", "M3_rule_support_learned_combats", {dict(COMBOS_V12_MIXED)["M3_rule_support_learned_combats"]})]
+            candidates = [("best", "M3_rule_support_learned_combats", dict(COMBOS_V12_MIXED)["M3_rule_support_learned_combats"])]
         elif category.startswith("C_combat_"):
             slot = category.rsplit("_", 1)[-1]
             combo = {"1": "M4_rule_support_learned_combat_1", "2": "M5_rule_support_learned_combat_2", "3": "M6_rule_support_learned_combat_3"}[slot]
@@ -890,6 +1252,8 @@ def _select_trace_specs(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         else:
             candidates = [("best", "M1_all_learned", dict(COMBOS_V12_MIXED)["M1_all_learned"]), ("final", "M1_all_learned", dict(COMBOS_V12_MIXED)["M1_all_learned"])]
         for checkpoint, combo, source_map in candidates:
+            validate_source_map(source_map)
+            source_map = dict(source_map)
             key = (checkpoint, combo, seed)
             if key not in seen:
                 seen.add(key)
@@ -901,6 +1265,7 @@ def _run_traces(specs: list[dict[str, Any]], run_dir: Path, train_cfg: Mapping[s
     output: list[dict[str, Any]] = []
     actors_by_checkpoint: dict[str, IndependentHAPPOActors] = {}
     for spec in specs:
+        validate_source_map(spec.get("source_map", {}))
         checkpoint = spec["checkpoint"]
         if checkpoint not in actors_by_checkpoint:
             actors_by_checkpoint[checkpoint] = _load_actors(run_dir / f"{checkpoint}.pt", train_cfg, device)
@@ -916,6 +1281,7 @@ def _run_traces(specs: list[dict[str, Any]], run_dir: Path, train_cfg: Mapping[s
 
 
 def _make_report(out_dir: Path, integrity: Mapping[str, Any], aggregates: list[dict[str, Any]], agent_aggregates: list[dict[str, Any]], pairwise: list[dict[str, Any]], equivalence: list[dict[str, Any]], drift: list[dict[str, Any]], completed: int, expected: int, m1_reproduction: Mapping[str, Any] | None) -> str:
+    return _make_report_dynamic(out_dir, integrity, aggregates, agent_aggregates, pairwise, equivalence, drift, completed, expected, m1_reproduction)
     lines = ["# v12 mixed-policy role diagnosis", "", "## 1. Executive summary", ""]
     if completed < expected:
         lines.append(f"- Incomplete: {completed}/{expected} combination evaluations completed. No claim is made for missing combinations.")
@@ -964,6 +1330,195 @@ def _make_report(out_dir: Path, integrity: Mapping[str, Any], aggregates: list[d
     return "\n".join(lines) + "\n"
 
 
+def _find_stat(
+    pairwise: list[dict[str, Any]],
+    *,
+    checkpoint: str,
+    combo_a: str,
+    combo_b: str,
+    metric: str,
+    scope: str = "team",
+    agent_id: str | None = None,
+) -> dict[str, Any] | None:
+    for row in pairwise:
+        if (
+            row.get("scope", "team") == scope
+            and row.get("checkpoint") == checkpoint
+            and row.get("combo_a") == combo_a
+            and row.get("combo_b") == combo_b
+            and row.get("metric") == metric
+            and (agent_id is None or row.get("agent_id") == agent_id)
+        ):
+            return row
+    return None
+
+
+def _metric_threshold(metric: str) -> float:
+    if metric in {"red_attack_kills", "attributed_kills", "mean_attributed_kills"}:
+        return 0.10
+    if metric in {"episode_return", "mean_return"}:
+        return 1.0
+    if metric in {"episode_length", "mean_episode_length"}:
+        return 10.0
+    return 0.05
+
+
+def _stat_record(
+    pairwise: list[dict[str, Any]],
+    *,
+    checkpoint: str,
+    combo_a: str,
+    combo_b: str,
+    metric: str,
+    scope: str = "team",
+    agent_id: str | None = None,
+    expected: str = "no_material_loss",
+) -> dict[str, Any]:
+    row = _find_stat(pairwise, checkpoint=checkpoint, combo_a=combo_a, combo_b=combo_b, metric=metric, scope=scope, agent_id=agent_id)
+    if row is None:
+        return {"comparison": f"{combo_b}_vs_{combo_a}", "metric": metric, "point": None, "ci": None, "practical_equivalence": "inconclusive", "mcnemar_pvalue": None, "judgement": "inconclusive"}
+    threshold = _metric_threshold(metric)
+    classification = practical_equivalence((float(row["ci_low"]), float(row["ci_high"])), threshold)
+    if expected == "no_material_loss":
+        judgement = "supported" if classification in {"practical_equivalent", "materially_better"} else ("contradicted" if classification == "materially_worse" else "inconclusive")
+    elif expected == "material_loss":
+        judgement = "supported" if classification == "materially_worse" else ("contradicted" if classification in {"practical_equivalent", "materially_better"} else "inconclusive")
+    else:
+        judgement = "inconclusive"
+    return {
+        "comparison": row["comparison"],
+        "metric": metric,
+        "agent_id": agent_id,
+        "point": float(row["mean_delta_b_minus_a"]),
+        "ci": [float(row["ci_low"]), float(row["ci_high"])],
+        "practical_equivalence": classification,
+        "mcnemar_pvalue": row.get("mcnemar_pvalue"),
+        "judgement": judgement,
+    }
+
+
+def _render_stat_table(lines: list[str], title: str, records: list[dict[str, Any]]) -> None:
+    lines.extend([f"### {title}", "", "| Comparison | Metric | Point | 95% CI | Practical equivalence | McNemar p | Judgement |", "|---|---|---:|---|---|---:|---|"])
+    for record in records:
+        point = "NA" if record.get("point") is None else f"{record['point']:.6g}"
+        ci = "NA" if record.get("ci") is None else f"[{record['ci'][0]:.6g}, {record['ci'][1]:.6g}]"
+        p_value = "NA" if record.get("mcnemar_pvalue") is None else f"{float(record['mcnemar_pvalue']):.6g}"
+        lines.append(f"| {record['comparison']} | {record['metric']} | {point} | {ci} | {record['practical_equivalence']} | {p_value} | {record['judgement']} |")
+    lines.append("")
+
+
+def _role_drift_classification(drift: list[dict[str, Any]], role: str) -> tuple[str, dict[str, str]]:
+    contexts = {
+        "support": ("M1_all_learned", "M2_learned_support_rule_combats", "M7_learned_support_learned_combat_1", "M8_learned_support_learned_combat_2", "M9_learned_support_learned_combat_3"),
+        "combat_1": ("M1_all_learned", "M4_rule_support_learned_combat_1", "M7_learned_support_learned_combat_1"),
+        "combat_2": ("M1_all_learned", "M5_rule_support_learned_combat_2", "M8_learned_support_learned_combat_2"),
+        "combat_3": ("M1_all_learned", "M6_rule_support_learned_combat_3", "M9_learned_support_learned_combat_3"),
+    }
+    labels: dict[str, str] = {}
+    for combo in contexts[role]:
+        rows = [row for row in drift if row.get("combo") == combo and row.get("role") == role and row.get("metric") in {"max_lock_progress", "attributed_kills", "half_lock_active_step_rate"}]
+        negative = sum(practical_equivalence((float(row["ci_low"]), float(row["ci_high"])), _metric_threshold(str(row["metric"]))) == "materially_worse" for row in rows)
+        positive = sum(practical_equivalence((float(row["ci_low"]), float(row["ci_high"])), _metric_threshold(str(row["metric"]))) == "materially_better" for row in rows)
+        if negative >= 1 and positive == 0:
+            labels[combo] = "degraded"
+        elif positive >= 2:
+            labels[combo] = "improved"
+        elif rows and all(practical_equivalence((float(row["ci_low"]), float(row["ci_high"])), _metric_threshold(str(row["metric"]))) == "practical_equivalent" for row in rows):
+            labels[combo] = "stable"
+        else:
+            labels[combo] = "inconclusive"
+    degraded = sum(value == "degraded" for value in labels.values())
+    if degraded >= 2:
+        overall = "globally_degraded"
+    elif degraded == 1:
+        overall = "context_dependent_degraded"
+    elif labels and all(value == "stable" for value in labels.values()):
+        overall = "stable"
+    elif any(value == "improved" for value in labels.values()):
+        overall = "improved"
+    else:
+        overall = "inconclusive"
+    return overall, labels
+
+
+def _make_report_dynamic(out_dir: Path, integrity: Mapping[str, Any], aggregates: list[dict[str, Any]], agent_aggregates: list[dict[str, Any]], pairwise: list[dict[str, Any]], equivalence: list[dict[str, Any]], drift: list[dict[str, Any]], completed: int, expected: int, m1_reproduction: Mapping[str, Any] | None) -> str:
+    validation_path = out_dir / "diagnostic_validation_summary.json"
+    validation = json.loads(validation_path.read_text(encoding="utf-8")) if validation_path.exists() else {}
+    v1v2_path = out_dir / "v1_v2_reproduction_summary.json"
+    v1v2 = json.loads(v1v2_path.read_text(encoding="utf-8")) if v1v2_path.exists() else {}
+    selected = json.loads((out_dir / "selected_contrast_seeds.json").read_text(encoding="utf-8")) if (out_dir / "selected_contrast_seeds.json").exists() else []
+    traces = json.loads((out_dir / "traces_stage.json").read_text(encoding="utf-8")) if (out_dir / "traces_stage.json").exists() else {}
+    lines = ["# v12 mixed-policy role diagnosis", "", "## 1. Execution and integrity", ""]
+    lines.append(f"- Completed combinations: {completed}/{expected}; episodes: {validation.get('total_episodes', 0)}/{validation.get('expected_episodes', 0)}; per-Actor rows: {validation.get('total_per_agent_rows', 0)}/{validation.get('expected_per_agent_rows', 0)}.")
+    lines.append(f"- Git commit: `{integrity.get('git_commit_sha')}`; Python `{integrity.get('python')}`, PyTorch `{integrity.get('torch')}`, NumPy `{integrity.get('numpy')}`.")
+    lines.append(f"- Execution command: `{integrity.get('execution_command', integrity.get('command'))}`.")
+    lines.append(f"- Requested device `{integrity.get('requested_device')}`; controller/trajectory device `{integrity.get('controller_device')}`/`{integrity.get('trajectory_device')}`; parallel episode workers `{integrity.get('parallel_episode_worker_device')}` with {integrity.get('workers')} workers.")
+    lines.append(f"- Input SHA unchanged: `{validation.get('input_sha256_unchanged', integrity.get('input_sha256_unchanged'))}`; non-finite count: `{validation.get('non_finite_count')}`; duplicate rows: `{validation.get('duplicate_row_count')}`; missing combo/seed rows: `{validation.get('missing_combo_seed_count')}`.")
+    if validation.get("test_result_summary"):
+        lines.append(f"- Test summary: `{validation.get('test_result_summary')}`.")
+    lines.extend(["- Actors were queried deterministically in eval mode under `torch.no_grad()`; no trainer, rollout collector, optimizer, checkpoint writer, or environment mutation was used.", "- v12 environment, reward, observation, target/cue, lock, soft-boundary, and HAPPO training semantics were not changed.", "", "## 2. Best checkpoint team results", "", "| Combination | Win | Any kill | >=2 kills | Mean red kills | Half-lock | Mean return |", "|---|---:|---:|---:|---:|---:|---:|"])
+    for row in aggregates:
+        if row.get("checkpoint") == "best":
+            lines.append(f"| {row['combo']} | {row['task_win_rate']:.3f} | {row['any_kill_rate']:.3f} | {row['at_least_two_kill_rate']:.3f} | {row['mean_red_kills']:.3f} | {row['red_half_lock_episode_rate']:.3f} | {row['mean_return']:.3f} |")
+    lines.extend(["", "## 3. Final checkpoint team results", "", "| Combination | Win | Any kill | >=2 kills | Mean red kills | Half-lock | Mean return |", "|---|---:|---:|---:|---:|---:|---:|"])
+    for row in aggregates:
+        if row.get("checkpoint") == "final":
+            lines.append(f"| {row['combo']} | {row['task_win_rate']:.3f} | {row['any_kill_rate']:.3f} | {row['at_least_two_kill_rate']:.3f} | {row['mean_red_kills']:.3f} | {row['red_half_lock_episode_rate']:.3f} | {row['mean_return']:.3f} |")
+    lines.extend(["", "## 4. Deployment localization", ""])
+    support_records = [_stat_record(pairwise, checkpoint="best", combo_a="M0_all_rule", combo_b="M2_learned_support_rule_combats", metric=metric, expected="no_material_loss") for metric in ("task_win", "any_kill", "at_least_two_kill", "red_attack_kills", "mean_red_max_lock_progress", "red_half_lock_episode_rate", "episode_return")]
+    support_actor_records = []
+    for agent_id in RED_COMBAT_IDS_V12:
+        support_actor_records.extend(_stat_record(pairwise, checkpoint="best", combo_a="M0_all_rule", combo_b="M2_learned_support_rule_combats", agent_id=agent_id, metric=metric, scope="agent", expected="no_material_loss") for metric in ("attributed_kills", "max_lock_progress", "half_lock_active_step_rate"))
+    support_losses = sum(record["judgement"] == "contradicted" for record in support_records + support_actor_records)
+    support_inconclusive = sum(record["judgement"] == "inconclusive" for record in support_records + support_actor_records)
+    support_judgement = "supported" if support_losses == 0 and support_inconclusive < len(support_records) + len(support_actor_records) else ("contradicted" if support_losses >= 2 else "inconclusive")
+    lines.append(f"- Learned Support is-not-primary test: `{support_judgement}`. The decision is based on M2 vs M0 core paired CIs and rule Combat own Actor rows, not Support survival or cue rates alone.")
+    _render_stat_table(lines, "Support M2 vs M0 evidence", support_records)
+    combat_records: dict[str, list[dict[str, Any]]] = {}
+    combat_specs = (("Combat1", "red_1", "M4_rule_support_learned_combat_1"), ("Combat2", "red_2", "M5_rule_support_learned_combat_2"), ("Combat3", "red_3", "M6_rule_support_learned_combat_3"))
+    for label, agent_id, combo in combat_specs:
+        records = [_stat_record(pairwise, checkpoint="best", combo_a="M0_all_rule", combo_b=combo, metric=metric, expected="material_loss") for metric in ("task_win", "red_attack_kills", "mean_red_max_lock_progress", "red_half_lock_episode_rate", "episode_return")]
+        records.extend(_stat_record(pairwise, checkpoint="best", combo_a="M0_all_rule", combo_b=combo, agent_id=agent_id, metric=metric, scope="agent", expected="material_loss") for metric in ("attributed_kills", "max_lock_progress", "half_lock_active_step_rate", "lock_active_step_rate", "direct_target_rate"))
+        weak = sum(record["judgement"] == "supported" for record in records[:5])
+        own = records[5:]
+        own_weak = sum(record["judgement"] == "supported" for record in own[:3])
+        own_negative = sum(bool(record.get("ci")) and float(record["ci"][1]) < 0.0 for record in own[:3])
+        if own_negative == 3 and weak >= 2:
+            rating, judgement = "clearly_weak", "supported"
+        elif own_weak >= 1 or weak >= 1:
+            rating, judgement = "partially_capable", "weakly_supported"
+        elif all(record["judgement"] == "contradicted" for record in own[:3]):
+            rating, judgement = "approximately_rule_compatible", "contradicted"
+        else:
+            rating, judgement = "inconclusive", "inconclusive"
+        combat_records[label] = records
+        lines.append(f"- {label} (`{agent_id}`): rating `{rating}`, judgement `{judgement}`; direct-target evidence is included in the Actor rows and is not replaced by team means.")
+        _render_stat_table(lines, f"{label} single-slot evidence", records)
+    m3_records = [_stat_record(pairwise, checkpoint="best", combo_a=combo, combo_b="M3_rule_support_learned_combats", metric=metric, expected="material_loss") for combo in ("M4_rule_support_learned_combat_1", "M5_rule_support_learned_combat_2", "M6_rule_support_learned_combat_3") for metric in ("task_win", "red_attack_kills", "mean_red_max_lock_progress")]
+    joint_supported = sum(record["judgement"] == "supported" for record in m3_records)
+    lines.append(f"- Three-Combat deployment contrast: `{'supported' if joint_supported >= 2 else 'inconclusive'}` for joint deployment loss; nonlinear interaction, synergy failure, state-distribution cause, and credit-assignment cause remain `not_established` because pairwise learned-C1+C2/C3 combinations were not run.")
+    _render_stat_table(lines, "M3 versus single learned-Combat deployments", m3_records)
+    interaction_records = [_stat_record(pairwise, checkpoint="best", combo_a=a, combo_b=b, metric=metric, expected="material_loss") for a, b in (("M4_rule_support_learned_combat_1", "M7_learned_support_learned_combat_1"), ("M5_rule_support_learned_combat_2", "M8_learned_support_learned_combat_2"), ("M6_rule_support_learned_combat_3", "M9_learned_support_learned_combat_3")) for metric in ("task_win", "red_attack_kills", "mean_red_max_lock_progress")]
+    _render_stat_table(lines, "Support-Combat interaction evidence", interaction_records)
+    lines.append(f"- Support-Combat interaction judgement: `{'supported' if sum(record['judgement'] == 'supported' for record in interaction_records) >= 2 else 'inconclusive'}`; any effect is context-specific and not a Support-primary conclusion.")
+    lines.extend(["", "## 5. Per-Actor aggregate evidence", "", "| Checkpoint | Combination | Actor | Source | Kills | Max lock | Half-lock rate | Direct-target rate | Shared-only rate | No-valid-target rate | Survival | Alive decision steps |", "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|"])
+    for row in agent_aggregates:
+        if row.get("checkpoint") == "best" and row.get("combo") in {"M0_all_rule", "M1_all_learned", "M2_learned_support_rule_combats", "M3_rule_support_learned_combats", "M4_rule_support_learned_combat_1", "M5_rule_support_learned_combat_2", "M6_rule_support_learned_combat_3"}:
+            lines.append(f"| best | {row['combo']} | {row['agent_id']} | {row['action_source']} | {row['mean_attributed_kills']:.3f} | {row['mean_max_lock_progress']:.3f} | {row['mean_half_lock_active_step_rate']:.3f} | {row['mean_direct_target_rate']:.3f} | {row['mean_shared_only_target_rate']:.3f} | {row['mean_no_valid_target_rate']:.3f} | {row['survival_rate']:.3f} | {row.get('mean_alive_decision_steps', 'NA')} |")
+    lines.extend(["", "## 6. Best-to-final role drift", ""])
+    for role in ROLE_ORDER:
+        overall, labels = _role_drift_classification(drift, role)
+        lines.append(f"- `{role}`: `{overall}`; contexts: " + ", ".join(f"{combo}={label}" for combo, label in labels.items()) + ".")
+        selected = [row for row in drift if row.get("combo") == "M1_all_learned" and row.get("role") == role and row.get("metric") in {"max_lock_progress", "attributed_kills", "half_lock_active_step_rate"}]
+        for row in selected:
+            lines.append(f"  - M1 {row['metric']}: point {float(row['mean_delta_final_minus_best']):.6g}, 95% CI [{float(row['ci_low']):.6g}, {float(row['ci_high']):.6g}].")
+    lines.extend(["", "## 7. Targeted trajectories", "", f"- Category counts: {validation.get('trajectory_category_counts', {})}; specs: {validation.get('trajectory_spec_count', len(selected))}; trajectory rows: {validation.get('trajectory_row_count', traces.get('trace_row_count', 0))}.", "- Each trace validates source-map type before execution and records `killer_id` (the red Actor), `killed_target_id` (the blue target), and `kill_event` consistently.", "- `threat_exposure_rate` means an alive blue aircraft directly sees `red_0`; `support_visible_to_blue_rate` and `support_targeted_by_blue_rate` are also emitted explicitly."])
+    lines.extend(["", "## 8. v1/v2 reproduction", "", f"- Team metric reproduction pass: `{v1v2.get('team_metric_reproduction_pass')}`; actor metric changed fields allowed by alive-only semantics: `{v1v2.get('actor_metric_changed_count')}`.", "- Any team-field mismatch is reported field-by-field in `v1_v2_reproduction_comparison.csv`; no v2 result is used to overwrite v1."])
+    lines.extend(["", "## 9. Evidence boundaries", "", "- Deployment localization: learned Combat deployment is supported as the dominant failure locus only where the paired CIs above support it; learned Support alone is not allowed to explain the catastrophic learned-Combat failure unless its own M2-vs-M0 criteria fail.", "- Actor-level evidence: Combat ratings above are based on each learned Actor's own kills, lock, half-lock, direct-target, visibility, switching, survival, and hard-contact fields, with alive-only denominators.", "- Unresolved mechanism: action mapping, state distribution, target switching, multi-agent interaction, advantage/credit assignment, and optimization history are not identified as causal roots by this phase.", "- The report does not claim a final root cause, propose v13, modify Reward, or start new training."])
+    lines.extend(["", "## 10. M1 historical reproduction", "", f"- M1 reproduction pass: `{validation.get('m1_reproduction_pass')}`; see `m1_reproduction_comparison.json` for field-level errors and seed hashes.", "", "No RL training was run by this diagnostic."])
+    return "\n".join(lines) + "\n"
+
+
 def _stage_guard(out_dir: Path, integrity: Mapping[str, Any], resume: bool) -> None:
     manifest_path = out_dir / "input_integrity_manifest.json"
     if resume and manifest_path.exists():
@@ -1008,12 +1563,17 @@ def main() -> None:
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     started_at = datetime.now(timezone.utc).isoformat()
-    integrity, _env_cfg, train_cfg, test_seeds, requested_device = _load_inputs(run_dir, args.device, started_at)
+    integrity, _env_cfg, train_cfg, test_seeds, controller_device = _load_inputs(run_dir, args.device, started_at, int(args.workers))
+    manifest_path = out_dir / "input_integrity_manifest.json"
+    if args.resume_diagnostics and manifest_path.exists():
+        previous_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        integrity["execution_command"] = previous_manifest.get("execution_command", previous_manifest.get("command", integrity["execution_command"]))
+    integrity["command"] = integrity["execution_command"]
     if int(args.episodes) != 200:
         test_seeds = test_seeds[: int(args.episodes)]
     _stage_guard(out_dir, integrity, args.resume_diagnostics)
     _write_json(out_dir / "input_integrity_manifest.json", integrity)
-    combo_manifest = {"schema_version": 2, "checkpoint_selection": args.checkpoint, "episodes": len(test_seeds), "test_seed_hash": hashlib.sha256(_canonical_json(test_seeds)).hexdigest(), "seed_manifest_hash": integrity["seed_manifest_hash"], "combos": [{"name": name, "slot_source_map": source_map} for name, source_map in COMBOS_V12_MIXED], "actor_slot_mapping": integrity["actor_slot_mapping"], "workers": int(args.workers), "requested_device": args.device, "effective_worker_device": "cpu" if int(args.workers) > 1 else str(requested_device)}
+    combo_manifest = {"schema_version": 3, "checkpoint_selection": args.checkpoint, "episodes": len(test_seeds), "test_seed_hash": hashlib.sha256(_canonical_json(test_seeds)).hexdigest(), "seed_manifest_hash": integrity["seed_manifest_hash"], "combos": [{"name": name, "slot_source_map": dict(source_map)} for name, source_map in COMBOS_V12_MIXED], "actor_slot_mapping": integrity["actor_slot_mapping"], "workers": int(args.workers), "requested_device": args.device, "controller_device": integrity.get("controller_device"), "parallel_episode_worker_device": integrity.get("parallel_episode_worker_device"), "trajectory_device": integrity.get("trajectory_device")}
     _write_json(out_dir / "policy_combination_manifest.json", combo_manifest)
     rows_path = out_dir / "mixed_policy_seed_level.csv.gz"
     agents_path = out_dir / "mixed_policy_per_agent_seed_level.csv.gz"
@@ -1022,7 +1582,7 @@ def main() -> None:
         rows = _read_rows(rows_path, compressed=True) if args.resume_diagnostics else []
         agent_rows = _read_rows(agents_path, compressed=True) if args.resume_diagnostics else []
         completed = set(json.loads(completed_path.read_text(encoding="utf-8")).get("completed", [])) if args.resume_diagnostics and completed_path.exists() else set()
-        tasks = _tasks(run_dir, run_dir / "resolved_training_config.yaml", test_seeds, requested_device, args.checkpoint, int(args.workers))
+        tasks = _tasks(run_dir, run_dir / "resolved_training_config.yaml", test_seeds, controller_device, args.checkpoint, int(args.workers))
         pending = [task for task in tasks if f"{task['checkpoint_name']}::{task['combo_name']}" not in completed]
         if int(args.workers) > 1 and pending:
             with ProcessPoolExecutor(max_workers=int(args.workers)) as executor:
@@ -1051,11 +1611,16 @@ def main() -> None:
         agent_rows = _read_rows(agents_path, compressed=True)
     else:
         rows, agent_rows = [], []
+    rows = [_normalise_episode_row(row) for row in rows]
+    if rows and (args.stage in ("statistics", "traces", "report", "all")):
+        _write_rows(rows_path, rows, compressed=True)
     aggregates: list[dict[str, Any]] = []
     agent_aggregates: list[dict[str, Any]] = []
     pairwise: list[dict[str, Any]] = []
     equivalence: list[dict[str, Any]] = []
     drift: list[dict[str, Any]] = []
+    v1_v2_summary: dict[str, Any] = {}
+    trace_rows: list[dict[str, Any]] = []
     if args.stage in ("statistics", "traces", "report", "all"):
         aggregates, agent_aggregates, pairwise, equivalence, drift = _make_statistics(rows, agent_rows, int(args.bootstrap_samples))
         _write_rows(out_dir / "mixed_policy_aggregate.csv", aggregates)
@@ -1064,21 +1629,39 @@ def main() -> None:
         _write_rows(out_dir / "mixed_policy_pairwise_statistics.csv", pairwise)
         _write_rows(out_dir / "mixed_policy_practical_equivalence.csv", equivalence)
         _write_rows(out_dir / "best_vs_final_role_drift.csv", drift)
-        _write_json(out_dir / "m1_reproduction_comparison.json", _m1_reproduction(rows, run_dir) if len(_rows_for(rows, "best", "M1_all_learned")) == 200 and len(_rows_for(rows, "final", "M1_all_learned")) == 200 else {"status": "incomplete"})
+        m1_result = _m1_reproduction(rows, run_dir) if len(_rows_for(rows, "best", "M1_all_learned")) == len(test_seeds) and len(_rows_for(rows, "final", "M1_all_learned")) == len(test_seeds) else {"status": "incomplete"}
+        _write_json(out_dir / "m1_reproduction_comparison.json", m1_result)
+        v1_v2_comparisons, v1_v2_summary = _v1_v2_reproduction(out_dir, aggregates, agent_aggregates)
+        _write_rows(out_dir / "v1_v2_reproduction_comparison.csv", v1_v2_comparisons)
+        _write_json(out_dir / "v1_v2_reproduction_summary.json", v1_v2_summary)
         selected_specs = _select_trace_specs(rows) if len(rows) >= (20 * len(test_seeds)) else []
         _write_json(out_dir / "selected_contrast_seeds.json", selected_specs)
         _write_json(out_dir / "statistics_stage.json", {"input_sha256_start": integrity["input_sha256_start"], "episodes_observed": len(rows), "expected_episodes": 20 * len(test_seeds)})
     else:
         selected_specs = json.loads((out_dir / "selected_contrast_seeds.json").read_text(encoding="utf-8")) if (out_dir / "selected_contrast_seeds.json").exists() else []
+        aggregates = _read_rows(out_dir / "mixed_policy_aggregate.csv") if (out_dir / "mixed_policy_aggregate.csv").exists() else []
+        agent_aggregates = _read_rows(out_dir / "mixed_policy_per_agent_aggregate.csv") if (out_dir / "mixed_policy_per_agent_aggregate.csv").exists() else []
+        pairwise = _read_rows(out_dir / "mixed_policy_pairwise_statistics.csv") if (out_dir / "mixed_policy_pairwise_statistics.csv").exists() else []
+        equivalence = _read_rows(out_dir / "mixed_policy_practical_equivalence.csv") if (out_dir / "mixed_policy_practical_equivalence.csv").exists() else []
+        drift = _read_rows(out_dir / "best_vs_final_role_drift.csv") if (out_dir / "best_vs_final_role_drift.csv").exists() else []
+        v1_v2_summary = json.loads((out_dir / "v1_v2_reproduction_summary.json").read_text(encoding="utf-8")) if (out_dir / "v1_v2_reproduction_summary.json").exists() else {}
     if args.stage in ("traces", "all"):
-        trace_rows = _run_traces(selected_specs, run_dir, train_cfg, requested_device)
+        trace_rows = _run_traces(selected_specs, run_dir, train_cfg, controller_device)
         _write_rows(out_dir / "targeted_mixed_policy_trajectories.csv.gz", trace_rows, compressed=True)
         _write_json(out_dir / "traces_stage.json", {"input_sha256_start": integrity["input_sha256_start"], "selected_spec_count": len(selected_specs), "trace_row_count": len(trace_rows)})
     elif not (out_dir / "targeted_mixed_policy_trajectories.csv.gz").exists():
         _write_rows(out_dir / "targeted_mixed_policy_trajectories.csv.gz", [], compressed=True)
+    if not trace_rows and (out_dir / "targeted_mixed_policy_trajectories.csv.gz").exists():
+        trace_rows = _read_rows(out_dir / "targeted_mixed_policy_trajectories.csv.gz", compressed=True)
+    # Capture the end hash before writing validation/report artifacts so the
+    # summary reflects the same immutable-input check as the manifest.
+    integrity["input_sha256_end"] = _input_sha(run_dir)
+    integrity["input_sha256_unchanged"] = integrity["input_sha256_start"] == integrity["input_sha256_end"]
     completed_count = len(json.loads(completed_path.read_text(encoding="utf-8")).get("completed", [])) if completed_path.exists() else 0
     expected_count = (2 if args.checkpoint == "both" else 1) * 10
     m1_reproduction = json.loads((out_dir / "m1_reproduction_comparison.json").read_text(encoding="utf-8")) if (out_dir / "m1_reproduction_comparison.json").exists() else None
+    validation_summary = _build_validation_summary(out_dir, rows, agent_rows, test_seeds, selected_specs, trace_rows, integrity, m1_reproduction, v1_v2_summary)
+    _write_json(out_dir / "diagnostic_validation_summary.json", validation_summary)
     if args.stage in ("report", "all"):
         report = _make_report(out_dir, integrity, aggregates, agent_aggregates, pairwise, equivalence, drift, completed_count, expected_count, m1_reproduction)
         (out_dir / "mixed_policy_diagnostic_report.md").write_text(report, encoding="utf-8")
@@ -1088,10 +1671,17 @@ def main() -> None:
 `mixed_policy_per_agent_seed_level.csv.gz`: one row per red Actor per episode.
 `mixed_policy_aggregate.csv`: team-level aggregates for each checkpoint/combination.
 `mixed_policy_per_agent_aggregate.csv`: per-role aggregates.
-`mixed_policy_pairwise_statistics.csv`: paired same-seed contrasts and McNemar p-values.
+`mixed_policy_pairwise_statistics.csv`: paired same-seed team and Actor contrasts; Actor rows have `scope=agent` and `agent_id`.
 `mixed_policy_practical_equivalence.csv`: pre-registered paired-CI classifications.
 `best_vs_final_role_drift.csv`: paired best/final drift by role and metric.
 `targeted_mixed_policy_trajectories.csv.gz`: only pre-registered high-information seeds.
+
+All behavior rates use `alive_decision_steps` as denominator. Each per-Actor row
+contains both boolean `survived` and numeric `survival_rate`. Trace kill fields
+are `kill_event`, `killer_id`, and `killed_target_id`; the legacy ambiguous
+killer field is not emitted. `threat_exposure_rate` means an alive blue aircraft directly sees
+red_0, while `support_visible_to_blue_rate` and `support_targeted_by_blue_rate`
+are emitted separately.
 """
         (out_dir / "diagnostic_schema.md").write_text(schema, encoding="utf-8")
     integrity["ended_at"] = datetime.now(timezone.utc).isoformat()

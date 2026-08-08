@@ -36,7 +36,9 @@ COMBOS_V12_MIXED: tuple[tuple[str, dict[str, str]], ...] = (
 
 def validate_source_map(source_map: Mapping[str, str]) -> None:
     """Validate one fixed four-slot source map without touching runtime state."""
-    if tuple(source_map.keys()) != TEAM_AGENT_IDS_V12 and set(source_map) != set(TEAM_AGENT_IDS_V12):
+    if not isinstance(source_map, dict):
+        raise TypeError("source map must be a plain dict")
+    if set(source_map) != set(TEAM_AGENT_IDS_V12):
         raise ValueError("source map must contain red_0..red_3 exactly")
     if any(value not in {"rule", "learned"} for value in source_map.values()):
         raise ValueError("source map values must be 'rule' or 'learned'")
