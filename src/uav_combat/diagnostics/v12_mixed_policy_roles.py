@@ -116,32 +116,42 @@ def select_targeted_seeds(
     This helper intentionally never fills missing categories with convenient
     seeds.  An empty result means the contrast was not present in the data.
     """
+    def truthy(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {"1", "true", "yes"}
+
     by_key = {(str(row["checkpoint"]), str(row["combo"]), int(row["episode_seed"])): row for row in rows}
     seeds = sorted({int(row["episode_seed"]) for row in rows})
     selected: list[dict[str, Any]] = []
     for seed in seeds:
+        # D_best_final is a distinct best/final contrast.  It is deliberately
+        # not conditioned on the M0 rule reference: requiring an M0 win here
+        # would silently discard informative learned-policy drift seeds.
+        if category == "best_final":
+            best = by_key.get(("best", "M1_all_learned", seed))
+            final = by_key.get(("final", "M1_all_learned", seed))
+            if best is not None and final is not None and int(float(best.get("red_attack_kills", 0))) > 0 and int(float(final.get("red_attack_kills", 0))) == 0:
+                selected.append({"category": "D_best_final", "episode_seed": seed})
+            continue
+
         rule = by_key.get(("best", "M0_all_rule", seed))
-        if rule is None or not bool(rule.get("task_win", False)):
+        if rule is None or not truthy(rule.get("task_win", False)):
             continue
         if category == "support":
             contrast = by_key.get(("best", "M2_learned_support_rule_combats", seed))
-            if contrast is not None and not bool(contrast.get("task_win", False)):
+            if contrast is not None and not truthy(contrast.get("task_win", False)):
                 selected.append({"category": "A_support", "episode_seed": seed})
         elif category == "combat":
             contrast = by_key.get(("best", "M3_rule_support_learned_combats", seed))
-            if contrast is not None and not bool(contrast.get("task_win", False)):
+            if contrast is not None and not truthy(contrast.get("task_win", False)):
                 selected.append({"category": "B_combat", "episode_seed": seed})
         elif category.startswith("combat_"):
             slot = category.rsplit("_", 1)[-1]
             combo = {"1": "M4_rule_support_learned_combat_1", "2": "M5_rule_support_learned_combat_2", "3": "M6_rule_support_learned_combat_3"}[slot]
             contrast = by_key.get(("best", combo, seed))
-            if contrast is not None and (not bool(contrast.get("task_win", False)) or int(contrast.get("red_attack_kills", 0)) < int(rule.get("red_attack_kills", 0))):
+            if contrast is not None and (not truthy(contrast.get("task_win", False)) or int(float(contrast.get("red_attack_kills", 0))) < int(float(rule.get("red_attack_kills", 0)))):
                 selected.append({"category": f"C_combat_{slot}", "episode_seed": seed})
-        elif category == "best_final":
-            best = by_key.get(("best", "M1_all_learned", seed))
-            final = by_key.get(("final", "M1_all_learned", seed))
-            if best is not None and final is not None and int(best.get("red_attack_kills", 0)) > 0 and int(final.get("red_attack_kills", 0)) == 0:
-                selected.append({"category": "D_best_final", "episode_seed": seed})
         else:
             raise ValueError(f"unknown targeted category: {category}")
     return selected[: int(limit)]

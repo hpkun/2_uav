@@ -11,7 +11,11 @@ import torch
 from scripts.diagnose_v12_mixed_policy_roles import (
     AgentAccum,
     MixedPolicyProbeEnv,
+    _deduplicate_trajectory_runs,
+    _paired_trajectory_summaries,
+    _select_contrast_groups,
     _select_trace_specs,
+    _support_combat_did,
     _required_numeric,
     _normalise_episode_row,
 )
@@ -273,3 +277,77 @@ def test_support_is_not_inferred_from_group_mean_in_helper():
     source = inspect.getsource(select_targeted_seeds)
     assert "M2_learned_support_rule_combats" in source
     assert "M3_rule_support_learned_combats" in source
+
+
+def test_best_final_selection_does_not_require_m0_task_win():
+    rows = [
+        {"checkpoint": "best", "combo": "M0_all_rule", "episode_seed": 91, "task_win": False, "red_attack_kills": 0},
+        {"checkpoint": "best", "combo": "M1_all_learned", "episode_seed": 91, "task_win": False, "red_attack_kills": 1},
+        {"checkpoint": "final", "combo": "M1_all_learned", "episode_seed": 91, "task_win": False, "red_attack_kills": 0},
+    ]
+    assert select_targeted_seeds(rows, category="best_final", limit=10) == [{"category": "D_best_final", "episode_seed": 91}]
+
+
+def test_registered_pairs_are_complete_and_deduplicated():
+    rows = []
+    for seed in (1, 2):
+        rows.extend([
+            {"checkpoint": "best", "combo": "M0_all_rule", "episode_seed": seed, "task_win": True, "red_attack_kills": 3},
+            {"checkpoint": "best", "combo": "M2_learned_support_rule_combats", "episode_seed": seed, "task_win": False, "red_attack_kills": 0},
+        ])
+    groups = _select_contrast_groups(rows)
+    assert {group["category"] for group in groups} == {"A_support"}
+    assert all(len(group["members"]) == 2 for group in groups)
+    runs = _deduplicate_trajectory_runs(groups)
+    assert len(runs) == 4
+    assert all(run["contrast_group_ids"] and run["pair_members"] for run in runs)
+
+
+def test_agent_lock_sequence_is_closed_at_death():
+    env = _env(150046)
+    accum = AgentAccum("red_1", "combat_1", "rule")
+    for step in range(1, 8):
+        env.lock_progress["red_1"] = 0.7
+        accum.record_pre_step(env, env._direct_visible_ids(), step)
+    env._by_id("red_1").state.alive = False
+    accum.record_post_step(env, 8)
+    row = accum.finish(env, {})
+    assert row["longest_continuous_positive_lock"] == 7
+    assert row["longest_continuous_half_lock"] == 7
+
+
+def test_lock_sequence_is_closed_at_episode_end_and_not_extended_after_death():
+    env = _env(150047)
+    accum = AgentAccum("red_1", "combat_1", "rule")
+    for step in range(1, 5):
+        env.lock_progress["red_1"] = 0.6
+        accum.record_pre_step(env, env._direct_visible_ids(), step)
+    row = accum.finish(env, {})
+    assert row["longest_continuous_positive_lock"] == 4
+    assert row["longest_continuous_half_lock"] == 4
+    env._by_id("red_1").state.alive = False
+    accum.record_pre_step(env, env._direct_visible_ids(), 5)
+    accum.record_post_step(env, 5)
+    assert accum.finish(env, {})["longest_continuous_half_lock"] == 4
+
+
+def test_did_uses_four_group_formula_and_no_mcnemar():
+    rows = []
+    for checkpoint in ("best", "final"):
+        for seed in (1, 2, 3):
+            values = {
+                "M0_all_rule": 1.0,
+                "M2_learned_support_rule_combats": 0.5,
+                "M4_rule_support_learned_combat_1": 0.2,
+                "M7_learned_support_learned_combat_1": 0.0,
+                "M5_rule_support_learned_combat_2": 0.2,
+                "M8_learned_support_learned_combat_2": 0.0,
+                "M6_rule_support_learned_combat_3": 0.2,
+                "M9_learned_support_learned_combat_3": 0.0,
+            }
+            for combo, value in values.items():
+                rows.append({"checkpoint": checkpoint, "combo": combo, "episode_seed": seed, "task_win": value > 0.5, "any_kill": value > 0.5, "at_least_two_kill": value > 0.5, "red_attack_kills": value, "mean_red_max_lock_progress": value, "red_half_lock_episode_rate": value, "episode_return": value, "episode_length": value})
+    did, summary = _support_combat_did(rows, 100)
+    assert len(did) == 48
+    assert all(row["mcnemar_pvalue"] is None for row in did)
+    assert summary["binary_metrics_do_not_use_mcnemar"] is True

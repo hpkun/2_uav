@@ -230,6 +230,22 @@ def _git_commit_sha(root: Path) -> str | None:
     return value or None
 
 
+def _git_worktree_status(root: Path) -> tuple[bool, str]:
+    """Read-only worktree status used to bind paired analysis to clean code."""
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        return False, f"git status unavailable: {exc}"
+    status = result.stdout.strip()
+    return status == "", status
+
+
 def _load_inputs(
     run_dir: Path,
     requested_device: str,
@@ -286,6 +302,7 @@ def _load_inputs(
         device = torch.device("cpu")
         device_note = "CPU fallback because requested CUDA is unavailable"
     parallel_worker_device = "cpu" if int(workers) > 1 else str(device)
+    worktree_clean, worktree_status = _git_worktree_status(ROOT)
     data = {
         "run_dir": str(run_dir.resolve()),
         "input_files": {},
@@ -314,6 +331,8 @@ def _load_inputs(
         "device_note": device_note,
         "workers": int(workers),
         "git_commit_sha": _git_commit_sha(ROOT),
+        "git_worktree_clean": worktree_clean,
+        "git_worktree_status": worktree_status,
         "started_at": started_at,
         "ended_at": None,
         "input_sha256_start": _input_sha(run_dir),
@@ -427,6 +446,13 @@ class AgentAccum:
     _previous_alive: bool = True
     _first_step: bool = True
 
+    def _close_lock_sequences(self) -> None:
+        """Finalize open lock runs at death, target loss, or episode end."""
+        self.longest_positive = max(self.longest_positive, self.current_positive)
+        self.longest_half = max(self.longest_half, self.current_half)
+        self.current_positive = 0
+        self.current_half = 0
+
     def record_pre_step(self, env: MixedPolicyProbeEnv, direct: dict[str, set[str]], step: int) -> dict[str, Any]:
         alive = bool(env._alive(self.agent_id))
         self.steps += 1
@@ -434,8 +460,7 @@ class AgentAccum:
         # dead Actor contributes a physical trace row but no stale target,
         # lock, visibility, geometry, cue, or switching count.
         if not alive:
-            self.current_positive = 0
-            self.current_half = 0
+            self._close_lock_sequences()
             self._previous_lock = 0.0
             return {
                 "target_id": None,
@@ -533,14 +558,18 @@ class AgentAccum:
     def record_post_step(self, env: MixedPolicyProbeEnv, step: int) -> None:
         alive = bool(env._alive(self.agent_id))
         if self._previous_alive and not alive and self.death_step is None:
+            self._close_lock_sequences()
             self.death_step = int(step)
             self.death_cause = int(env._death_causes.get(self.agent_id, -1))
+        elif alive and float(env.lock_progress.get(self.agent_id, 0.0)) <= 0.0:
+            # A target can disappear or a lock can be reset during the step;
+            # close the pre-death run before the next pre-step observation.
+            self._close_lock_sequences()
         self._previous_alive = alive
         self.max_lock_progress = max(self.max_lock_progress, float(env.lock_progress.get(self.agent_id, 0.0)))
 
     def finish(self, env: MixedPolicyProbeEnv, summary: Mapping[str, Any]) -> dict[str, Any]:
-        self.longest_positive = max(self.longest_positive, self.current_positive)
-        self.longest_half = max(self.longest_half, self.current_half)
+        self._close_lock_sequences()
         denominator = max(1, self.alive_steps)
         out: dict[str, Any] = {
             "agent_id": self.agent_id,
@@ -1230,41 +1259,110 @@ def _build_validation_summary(
 
 
 def _select_trace_specs(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    selected = []
-    selected.extend(select_targeted_seeds(rows, category="support", limit=10))
-    selected.extend(select_targeted_seeds(rows, category="combat", limit=10))
-    for slot in ("1", "2", "3"):
-        selected.extend(select_targeted_seeds(rows, category=f"combat_{slot}", limit=5))
-    selected.extend(select_targeted_seeds(rows, category="best_final", limit=10))
-    specs = []
-    seen = set()
-    for item in selected:
-        category = item["category"]
-        seed = int(item["episode_seed"])
-        if category == "A_support":
-            candidates = [("best", "M2_learned_support_rule_combats", dict(COMBOS_V12_MIXED)["M2_learned_support_rule_combats"])]
-        elif category == "B_combat":
-            candidates = [("best", "M3_rule_support_learned_combats", dict(COMBOS_V12_MIXED)["M3_rule_support_learned_combats"])]
-        elif category.startswith("C_combat_"):
-            slot = category.rsplit("_", 1)[-1]
-            combo = {"1": "M4_rule_support_learned_combat_1", "2": "M5_rule_support_learned_combat_2", "3": "M6_rule_support_learned_combat_3"}[slot]
-            candidates = [("best", combo, dict(COMBOS_V12_MIXED)[combo])]
-        else:
-            candidates = [("best", "M1_all_learned", dict(COMBOS_V12_MIXED)["M1_all_learned"]), ("final", "M1_all_learned", dict(COMBOS_V12_MIXED)["M1_all_learned"])]
-        for checkpoint, combo, source_map in candidates:
-            validate_source_map(source_map)
-            source_map = dict(source_map)
-            key = (checkpoint, combo, seed)
-            if key not in seen:
-                seen.add(key)
-                specs.append({"category": category, "checkpoint": checkpoint, "combo": combo, "episode_seed": seed, "source_map": source_map})
-    return specs[:40]
+    """Return flattened complete pair specs (kept for v2 compatibility)."""
+    specs: list[dict[str, Any]] = []
+    for group in _select_contrast_groups(rows):
+        for member in group["members"]:
+            item = dict(member)
+            item.update({
+                "contrast_group_id": group["contrast_group_id"],
+                "category": group["category"],
+                "episode_seed": int(group["episode_seed"]),
+            })
+            specs.append(item)
+    return specs
+
+
+_TRACE_PAIR_DEFINITIONS: tuple[tuple[str, str, str, str, str, int], ...] = (
+    ("A_support", "best", "M0_all_rule", "best", "M2_learned_support_rule_combats", 10),
+    ("B_combat", "best", "M0_all_rule", "best", "M3_rule_support_learned_combats", 10),
+    ("C_combat_1", "best", "M0_all_rule", "best", "M4_rule_support_learned_combat_1", 5),
+    ("C_combat_2", "best", "M0_all_rule", "best", "M5_rule_support_learned_combat_2", 5),
+    ("C_combat_3", "best", "M0_all_rule", "best", "M6_rule_support_learned_combat_3", 5),
+    ("D_best_final", "best", "M1_all_learned", "final", "M1_all_learned", 10),
+)
+
+
+def _select_contrast_groups(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Select registered seeds and construct complete reference/contrast pairs."""
+    groups: list[dict[str, Any]] = []
+    for category, ref_checkpoint, ref_combo, contrast_checkpoint, contrast_combo, limit in _TRACE_PAIR_DEFINITIONS:
+        selector_category = {
+            "A_support": "support",
+            "B_combat": "combat",
+            "C_combat_1": "combat_1",
+            "C_combat_2": "combat_2",
+            "C_combat_3": "combat_3",
+            "D_best_final": "best_final",
+        }[category]
+        selected = select_targeted_seeds(rows, category=selector_category, limit=limit)
+        ref_map = dict(dict(COMBOS_V12_MIXED)[ref_combo])
+        contrast_map = dict(dict(COMBOS_V12_MIXED)[contrast_combo])
+        validate_source_map(ref_map)
+        validate_source_map(contrast_map)
+        for item in selected:
+            seed = int(item["episode_seed"])
+            group_id = f"{category}::seed_{seed}"
+            groups.append({
+                "contrast_group_id": group_id,
+                "category": category,
+                "episode_seed": seed,
+                "members": [
+                    {"pair_member": "reference", "checkpoint": ref_checkpoint, "combo": ref_combo, "source_map": dict(ref_map)},
+                    {"pair_member": "contrast", "checkpoint": contrast_checkpoint, "combo": contrast_combo, "source_map": dict(contrast_map)},
+                ],
+            })
+    return groups
+
+
+def _deduplicate_trajectory_runs(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Deduplicate execution units while retaining all pair/group membership."""
+    indexed: dict[tuple[str, str, int], dict[str, Any]] = {}
+    for group in groups:
+        for member in group["members"]:
+            key = (str(member["checkpoint"]), str(member["combo"]), int(group["episode_seed"]))
+            run = indexed.setdefault(key, {
+                "checkpoint": key[0],
+                "combo": key[1],
+                "episode_seed": key[2],
+                "source_map": dict(member["source_map"]),
+                "contrast_group_ids": [],
+                "categories": [],
+                "pair_members": [],
+            })
+            gid = str(group["contrast_group_id"])
+            category = str(group["category"])
+            pair_member = str(member["pair_member"])
+            if gid not in run["contrast_group_ids"]:
+                run["contrast_group_ids"].append(gid)
+            if category not in run["categories"]:
+                run["categories"].append(category)
+            if pair_member not in run["pair_members"]:
+                run["pair_members"].append(pair_member)
+    return [indexed[key] for key in sorted(indexed)]
 
 
 def _run_traces(specs: list[dict[str, Any]], run_dir: Path, train_cfg: Mapping[str, Any], device: torch.device) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
     actors_by_checkpoint: dict[str, IndependentHAPPOActors] = {}
-    for spec in specs:
+    # `specs` may contain repeated members from different contrast groups.  A
+    # trajectory is executed once per (checkpoint, combo, seed), then carries
+    # every group/category/member mapping that references that run.
+    if specs and "contrast_group_ids" in specs[0]:
+        runs = [dict(spec) for spec in specs]
+    else:
+        runs = _deduplicate_trajectory_runs([{
+        "contrast_group_id": spec.get("contrast_group_id", f"{spec.get('category')}::seed_{spec['episode_seed']}"),
+        "category": spec.get("category", "unknown"),
+        "episode_seed": int(spec["episode_seed"]),
+        "members": [{
+            "pair_member": spec.get("pair_member", "contrast"),
+            "checkpoint": spec["checkpoint"],
+            "combo": spec["combo"],
+            "source_map": dict(spec.get("source_map", {})),
+        }],
+        } for spec in specs])
+    for spec in runs:
         validate_source_map(spec.get("source_map", {}))
         checkpoint = spec["checkpoint"]
         if checkpoint not in actors_by_checkpoint:
@@ -1273,61 +1371,375 @@ def _run_traces(specs: list[dict[str, Any]], run_dir: Path, train_cfg: Mapping[s
         try:
             _, _, trace = _run_episode(env, actors_by_checkpoint[checkpoint], spec["combo"], spec["source_map"], checkpoint, int(spec["episode_seed"]), device, trace=True)
             for row in trace:
-                row["targeted_category"] = spec["category"]
+                row["contrast_group_ids"] = list(spec.get("contrast_group_ids", []))
+                row["categories"] = list(spec.get("categories", []))
+                row["pair_members"] = list(spec.get("pair_members", []))
+                # Preserve the legacy single-category field for consumers
+                # that only need a display label; complete membership lives
+                # in the three fields above.
+                row["targeted_category"] = row["categories"][0] if row["categories"] else None
             output.extend(trace)
         finally:
             pass
     return output
 
 
+def _source_manifest_path(source_dir: Path) -> Path:
+    path = source_dir / "input_integrity_manifest.json"
+    if not path.exists():
+        raise FileNotFoundError(f"v2 input manifest is missing: {path}")
+    return path
+
+
+def _validate_reused_source(
+    source_dir: Path,
+    run_dir: Path,
+    rows: list[dict[str, Any]],
+    agent_rows: list[dict[str, Any]],
+    test_seeds: list[int],
+    source_integrity: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate v2 rows before any v3 statistic or trajectory operation."""
+    expected_combos = {(checkpoint, combo) for checkpoint in ("best", "final") for combo, _ in COMBOS_V12_MIXED}
+    expected_keys = {(checkpoint, combo, int(seed)) for checkpoint, combo in expected_combos for seed in test_seeds}
+    actual_keys = [(str(row.get("checkpoint")), str(row.get("combo")), int(row.get("episode_seed"))) for row in rows]
+    actual_set = set(actual_keys)
+    duplicate_team = len(actual_keys) - len(actual_set)
+    if len(rows) != 4000 or len(actual_set) != 4000:
+        raise ValueError(f"v2 team rows must be exactly 4000 unique rows, got {len(rows)} / {len(actual_set)}")
+    if actual_set != expected_keys:
+        raise ValueError(f"v2 team rows missing or unexpected keys: missing={len(expected_keys - actual_set)} extra={len(actual_set - expected_keys)}")
+    agent_keys = [(str(row.get("checkpoint")), str(row.get("combo")), int(row.get("episode_seed")), str(row.get("agent_id"))) for row in agent_rows]
+    agent_set = set(agent_keys)
+    duplicate_agent = len(agent_keys) - len(agent_set)
+    expected_agent_keys = {(checkpoint, combo, int(seed), agent_id) for checkpoint, combo, seed in expected_keys for agent_id in TEAM_AGENT_IDS_V12}
+    if len(agent_rows) != 16000 or len(agent_set) != 16000:
+        raise ValueError(f"v2 per-agent rows must be exactly 16000 unique rows, got {len(agent_rows)} / {len(agent_set)}")
+    if agent_set != expected_agent_keys:
+        raise ValueError(f"v2 per-agent rows missing or unexpected keys: missing={len(expected_agent_keys - agent_set)} extra={len(agent_set - expected_agent_keys)}")
+    for key in expected_keys:
+        agents = [row for row in agent_rows if (str(row.get("checkpoint")), str(row.get("combo")), int(row.get("episode_seed"))) == key]
+        if {str(row.get("agent_id")) for row in agents} != set(TEAM_AGENT_IDS_V12):
+            raise ValueError(f"episode {key} does not contain exactly four red Actor rows")
+    source_seed_hash = source_integrity.get("test_seed_hash")
+    run_seed_hash = json.loads((run_dir / "evaluation_seed_manifest.json").read_text(encoding="utf-8")).get("test", {}).get("seed_hash")
+    if source_seed_hash != run_seed_hash:
+        raise ValueError("v2 source test seed hash differs from run manifest")
+    source_input_sha = source_integrity.get("input_sha256_start", {})
+    current_input_sha = _input_sha(run_dir)
+    if source_input_sha and source_input_sha != current_input_sha:
+        raise ValueError("v2 source input SHA differs from current run inputs")
+    nonfinite = _nonfinite_count(rows) + _nonfinite_count(agent_rows)
+    if nonfinite:
+        raise ValueError(f"v2 source contains {nonfinite} non-finite values")
+    source_files = {
+        "mixed_policy_seed_level.csv.gz": source_dir / "mixed_policy_seed_level.csv.gz",
+        "mixed_policy_per_agent_seed_level.csv.gz": source_dir / "mixed_policy_per_agent_seed_level.csv.gz",
+        "input_integrity_manifest.json": source_dir / "input_integrity_manifest.json",
+        "diagnostic_validation_summary.json": source_dir / "diagnostic_validation_summary.json",
+    }
+    return {
+        "evaluation_source_dir": str(source_dir.resolve()),
+        "source_files": {name: {"path": str(path.resolve()), "sha256": _sha256_file(path), "rows": (len(rows) if name.startswith("mixed_policy_seed") else len(agent_rows) if name.startswith("mixed_policy_per_agent") else None)} for name, path in source_files.items() if path.exists()},
+        "source_input_manifest_commit": source_integrity.get("git_commit_sha"),
+        "source_input_sha256": source_input_sha,
+        "source_seed_hash": source_seed_hash,
+        "test_seed_count": len(test_seeds),
+        "team_episode_rows": len(rows),
+        "per_agent_rows": len(agent_rows),
+        "checkpoint_count": 2,
+        "combination_count": 10,
+        "duplicate_team_rows": duplicate_team,
+        "duplicate_agent_rows": duplicate_agent,
+        "non_finite_source_count": nonfinite,
+        "source_input_sha_pass": source_input_sha == current_input_sha,
+    }
+
+
+def _trace_metric_summary(trace_rows: list[dict[str, Any]], team_row: Mapping[str, Any]) -> dict[str, Any]:
+    """Summarize one executed trajectory using trace fields plus source row."""
+    by_agent: dict[str, list[dict[str, Any]]] = {}
+    for row in trace_rows:
+        by_agent.setdefault(str(row.get("red_agent_id")), []).append(row)
+    longest_positive = 0
+    first_positive = None
+    first_half = None
+    switches = 0
+    switches_while_lock = 0
+    direct = 0
+    no_valid = 0
+    alive = 0
+    contacts = sum(int(_as_bool(row.get("hard_contact"))) for row in trace_rows)
+    for agent_rows in by_agent.values():
+        agent_rows.sort(key=lambda row: int(row.get("step", 0)))
+        run = 0
+        prev_target = None
+        prev_lock = 0.0
+        for row in agent_rows:
+            if _as_bool(row.get("alive")):
+                alive += 1
+                direct += int(_as_bool(row.get("direct_visible")))
+                no_valid += int(row.get("target_id") in (None, "", "None"))
+            lock = _numeric(row, "lock_progress")
+            if lock > 0.0:
+                run += 1
+                if first_positive is None:
+                    first_positive = int(row.get("step", 0))
+            else:
+                longest_positive = max(longest_positive, run)
+                run = 0
+            if lock >= 0.5 and first_half is None:
+                first_half = int(row.get("step", 0))
+            target = row.get("target_id")
+            if prev_target is not None and target != prev_target and _as_bool(row.get("alive")):
+                switches += 1
+                if prev_lock > 0.1:
+                    switches_while_lock += 1
+            prev_target = target
+            prev_lock = lock
+        longest_positive = max(longest_positive, run)
+    kill_rows = [row for row in trace_rows if _as_bool(row.get("kill_event")) and row.get("killer_id") in TEAM_AGENT_IDS_V12 and row.get("killed_target_id") in BLUE_IDS_V12]
+    termination = next((row.get("termination_reason") for row in reversed(trace_rows) if row.get("termination_reason") not in (None, "", "None")), None)
+    return {
+        "outcome": team_row.get("environment_outcome"),
+        "task_win": _bool_field(team_row, "task_win"),
+        "kills": _numeric(team_row, "red_attack_kills"),
+        "half_lock_events": sum(int(_as_bool(row.get("half_lock_event"))) for row in trace_rows),
+        "max_lock": max((_numeric(row, "lock_progress") for row in trace_rows), default=0.0),
+        "longest_positive_lock": longest_positive,
+        "first_positive_lock_step": first_positive,
+        "first_half_lock_step": first_half,
+        "first_kill_step": min((int(row.get("step", 0)) for row in kill_rows), default=None),
+        "episode_length": int(_numeric(team_row, "episode_length")),
+        "target_switches": switches,
+        "target_switches_while_lock_gt_0_1": switches_while_lock,
+        "direct_target_rate": direct / max(1, alive),
+        "no_valid_target_rate": no_valid / max(1, alive),
+        "hard_contacts": contacts,
+        "return": _numeric(team_row, "episode_return"),
+        "termination_reason": termination,
+    }
+
+
+def _paired_trajectory_summaries(
+    trace_rows: list[dict[str, Any]],
+    source_rows: list[dict[str, Any]],
+    groups: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    source_index = {(str(row.get("checkpoint")), str(row.get("combo")), int(row.get("episode_seed"))): row for row in source_rows}
+    run_index: dict[tuple[str, str, int], list[dict[str, Any]]] = {}
+    for row in trace_rows:
+        key = (str(row.get("checkpoint")), str(row.get("combo")), int(row.get("episode_seed")))
+        run_index.setdefault(key, []).append(row)
+    metrics = ("task_win", "kills", "half_lock_events", "max_lock", "longest_positive_lock", "first_positive_lock_step", "first_half_lock_step", "first_kill_step", "episode_length", "target_switches", "target_switches_while_lock_gt_0_1", "direct_target_rate", "no_valid_target_rate", "hard_contacts", "return")
+    wide_rows: list[dict[str, Any]] = []
+    for group in groups:
+        members: dict[str, dict[str, Any]] = {}
+        for member in group["members"]:
+            key = (str(member["checkpoint"]), str(member["combo"]), int(group["episode_seed"]))
+            if key not in run_index:
+                raise ValueError(f"missing trajectory for {group['contrast_group_id']} {member['pair_member']}")
+            summary = _trace_metric_summary(run_index[key], source_index[key])
+            members[str(member["pair_member"])] = summary
+        if set(members) != {"reference", "contrast"}:
+            raise ValueError(f"incomplete pair {group['contrast_group_id']}")
+        row: dict[str, Any] = {"contrast_group_id": group["contrast_group_id"], "category": group["category"], "episode_seed": int(group["episode_seed"])}
+        for member_name in ("reference", "contrast"):
+            row[f"{member_name}_checkpoint"] = next(m["checkpoint"] for m in group["members"] if m["pair_member"] == member_name)
+            row[f"{member_name}_combo"] = next(m["combo"] for m in group["members"] if m["pair_member"] == member_name)
+            for metric in metrics:
+                row[f"{member_name}_{metric}"] = members[member_name][metric]
+        for metric in metrics:
+            ref = members["reference"][metric]
+            con = members["contrast"][metric]
+            row[f"contrast_minus_reference_{metric}"] = None if ref is None or con is None else float(con) - float(ref)
+        wide_rows.append(row)
+    by_category: dict[str, list[dict[str, Any]]] = {}
+    for row in wide_rows:
+        by_category.setdefault(str(row["category"]), []).append(row)
+    category_rows: list[dict[str, Any]] = []
+    for category, category_group in sorted(by_category.items()):
+        item: dict[str, Any] = {"category": category, "contrast_group_count": len(category_group)}
+        for metric in metrics:
+            values = [float(row[f"contrast_minus_reference_{metric}"]) for row in category_group if row[f"contrast_minus_reference_{metric}"] is not None]
+            item[f"mean_contrast_minus_reference_{metric}"] = float(statistics_module.fmean(values)) if values else None
+        category_rows.append(item)
+    return wide_rows, category_rows
+
+
+DID_METRICS = (
+    ("task_win", 0.05, "rate"),
+    ("any_kill", 0.05, "rate"),
+    ("at_least_two_kill", 0.05, "rate"),
+    ("red_attack_kills", 0.10, "kills"),
+    ("mean_red_max_lock_progress", 0.05, "max_lock"),
+    ("red_half_lock_episode_rate", 0.05, "rate"),
+    ("episode_return", 1.0, "return"),
+    ("episode_length", 10.0, "episode_length"),
+)
+DID_BOOTSTRAP_SEED = 137
+
+
+def _classify_did(ci_low: float, ci_high: float, threshold: float) -> str:
+    if ci_high <= -abs(threshold):
+        return "additional_material_loss"
+    if ci_low >= abs(threshold):
+        return "additional_material_gain"
+    if ci_low >= -abs(threshold) and ci_high <= abs(threshold):
+        return "practical_equivalent"
+    return "inconclusive"
+
+
+def _support_combat_did(rows: list[dict[str, Any]], bootstrap_samples: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    definitions = (("C1", "M4_rule_support_learned_combat_1", "M7_learned_support_learned_combat_1"), ("C2", "M5_rule_support_learned_combat_2", "M8_learned_support_learned_combat_2"), ("C3", "M6_rule_support_learned_combat_3", "M9_learned_support_learned_combat_3"))
+    output: list[dict[str, Any]] = []
+    for checkpoint in ("best", "final"):
+        index: dict[tuple[str, int], Mapping[str, Any]] = {}
+        for combo_name, _ in COMBOS_V12_MIXED:
+            index.update({(combo_name, int(row["episode_seed"])): row for row in _rows_for(rows, checkpoint, combo_name)})
+        for label, single_combo, interaction_combo in definitions:
+            for metric, threshold, metric_class in DID_METRICS:
+                values: list[float] = []
+                for seed in sorted({int(row["episode_seed"]) for row in _rows_for(rows, checkpoint, "M0_all_rule")}):
+                    m0 = index.get(("M0_all_rule", seed)); m2 = index.get(("M2_learned_support_rule_combats", seed)); single = index.get((single_combo, seed)); interaction = index.get((interaction_combo, seed))
+                    if None in (m0, m2, single, interaction):
+                        raise ValueError(f"missing DID seed {checkpoint}/{label}/{seed}")
+                    values.append((_metric_value(interaction, metric) - _metric_value(single, metric)) - (_metric_value(m2, metric) - _metric_value(m0, metric)))
+                boot = paired_bootstrap([0.0] * len(values), values, samples=bootstrap_samples, seed=DID_BOOTSTRAP_SEED)
+                output.append({"checkpoint": checkpoint, "interaction": label, "metric": metric, "n": len(values), "mean_did": boot["mean_delta"], "ci_low": boot["ci_low"], "ci_high": boot["ci_high"], "threshold": threshold, "threshold_kind": metric_class, "classification": _classify_did(boot["ci_low"], boot["ci_high"], threshold), "bootstrap_samples": int(bootstrap_samples), "bootstrap_seed": DID_BOOTSTRAP_SEED, "mcnemar_pvalue": None, "inference": "paired bootstrap of four-group difference; McNemar not used"})
+    summary = {"bootstrap_samples": int(bootstrap_samples), "bootstrap_seed": DID_BOOTSTRAP_SEED, "formula": "(M7-M4)-(M2-M0), (M8-M5)-(M2-M0), (M9-M6)-(M2-M0)", "binary_metrics_do_not_use_mcnemar": True, "rows": output}
+    return output, summary
+
+
+def _run_paired_analysis(
+    *,
+    args: argparse.Namespace,
+    run_dir: Path,
+    out_dir: Path,
+) -> None:
+    """Run v3 analysis-only mode from the immutable v2 seed-level inputs."""
+    source_dir = Path(args.evaluation_source_dir).resolve()
+    if out_dir in {source_dir, out_dir.parent / "mixed_policy_role_diagnosis", out_dir.parent / "mixed_policy_role_diagnosis_v2_reproducible"}:
+        raise ValueError("v3 output must be separate from v1/v2 input directories")
+    if int(args.episodes) != 200:
+        raise ValueError("paired-analysis requires the complete 200 test seeds")
+    if out_dir.exists() and not args.overwrite_diagnostics:
+        raise FileExistsError(f"output exists; use --overwrite-diagnostics: {out_dir}")
+    if args.overwrite_diagnostics and out_dir.exists():
+        shutil.rmtree(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    started_at = datetime.now(timezone.utc).isoformat()
+    integrity, _env_cfg, train_cfg, test_seeds, controller_device = _load_inputs(run_dir, args.device, started_at, int(args.workers))
+    # A final reproducible report is never emitted from a dirty worktree.  No
+    # Git mutation is attempted; the caller must provide a clean checkout.
+    if not bool(integrity.get("git_worktree_clean")):
+        raise RuntimeError("paired-analysis requires a clean git worktree; refusing final report")
+    source_manifest = json.loads(_source_manifest_path(source_dir).read_text(encoding="utf-8"))
+    rows_path = source_dir / "mixed_policy_seed_level.csv.gz"
+    agents_path = source_dir / "mixed_policy_per_agent_seed_level.csv.gz"
+    rows = [_normalise_episode_row(row) for row in _read_rows(rows_path, compressed=True)]
+    agent_rows = _read_rows(agents_path, compressed=True)
+    source_summary = _validate_reused_source(source_dir, run_dir, rows, agent_rows, test_seeds, source_manifest)
+    integrity.update({"evaluation_source_dir": str(source_dir), "analysis_only": True, "source_manifest_commit": source_manifest.get("git_commit_sha"), "source_input_sha_pass": source_summary["source_input_sha_pass"], "stage": "paired-analysis"})
+    _write_json(out_dir / "input_integrity_manifest.json", integrity)
+    evaluation_source_manifest = {
+        **source_summary,
+        "v2_manifest_path": str(_source_manifest_path(source_dir).resolve()),
+        "v2_manifest_sha256": _sha256_file(_source_manifest_path(source_dir)),
+        "v2_input_manifest_commit": source_manifest.get("git_commit_sha"),
+        "v3_code_commit": integrity.get("git_commit_sha"),
+        "v3_code_worktree_clean": integrity.get("git_worktree_clean"),
+        "test_seed_hash": integrity.get("test_seed_hash"),
+        "source_manifest_input_sha256_unchanged": source_manifest.get("input_sha256_unchanged"),
+    }
+    _write_json(out_dir / "evaluation_source_manifest.json", evaluation_source_manifest)
+
+    groups = _select_contrast_groups(rows)
+    if not groups:
+        raise ValueError("no registered contrast seeds were selected")
+    runs = _deduplicate_trajectory_runs(groups)
+    _write_json(out_dir / "selected_contrast_groups.json", groups)
+    _write_json(out_dir / "selected_trajectory_runs.json", runs)
+    trace_rows = _run_traces(runs, run_dir, train_cfg, controller_device)
+    _write_rows(out_dir / "targeted_mixed_policy_trajectories.csv.gz", trace_rows, compressed=True)
+    pair_summary, category_summary = _paired_trajectory_summaries(trace_rows, rows, groups)
+    _write_rows(out_dir / "paired_trajectory_group_summary.csv", pair_summary)
+    _write_rows(out_dir / "paired_trajectory_category_summary.csv", category_summary)
+    _write_json(out_dir / "traces_stage.json", {"stage": "paired-analysis", "contrast_group_count": len(groups), "expected_pair_specs": len(groups) * 2, "unique_trajectory_run_count": len(runs), "trajectory_row_count": len(trace_rows), "all_runs_have_termination": all(row.get("reference_termination_reason") not in (None, "", "None") and row.get("contrast_termination_reason") not in (None, "", "None") for row in pair_summary)})
+
+    aggregates, agent_aggregates, pairwise, equivalence, drift = _make_statistics(rows, agent_rows, int(args.bootstrap_samples))
+    _write_rows(out_dir / "mixed_policy_aggregate.csv", aggregates)
+    _write_json(out_dir / "mixed_policy_aggregate.json", {"rows": aggregates, "input_sha256_start": integrity["input_sha256_start"]})
+    _write_rows(out_dir / "mixed_policy_per_agent_aggregate.csv", agent_aggregates)
+    _write_rows(out_dir / "mixed_policy_pairwise_statistics.csv", pairwise)
+    _write_rows(out_dir / "mixed_policy_practical_equivalence.csv", equivalence)
+    _write_rows(out_dir / "best_vs_final_role_drift.csv", drift)
+    did_rows, did_summary = _support_combat_did(rows, int(args.bootstrap_samples))
+    _write_rows(out_dir / "support_combat_difference_in_differences.csv", did_rows)
+    _write_json(out_dir / "support_combat_difference_in_differences.json", did_summary)
+
+    v1_v2_comparisons, v1_v2_summary = _v1_v2_reproduction(out_dir, aggregates, agent_aggregates)
+    _write_rows(out_dir / "v1_v2_reproduction_comparison.csv", v1_v2_comparisons)
+    _write_json(out_dir / "v1_v2_reproduction_summary.json", v1_v2_summary)
+    source_input_sha_end = _input_sha(run_dir)
+    integrity["input_sha256_end"] = source_input_sha_end
+    integrity["input_sha256_unchanged"] = integrity["input_sha256_start"] == source_input_sha_end
+    validation = {
+        "git_commit_sha": integrity.get("git_commit_sha"),
+        "git_worktree_clean": integrity.get("git_worktree_clean"),
+        "evaluation_source_dir": str(source_dir),
+        "evaluation_source_sha_pass": bool(source_summary["source_input_sha_pass"]),
+        "reused_team_episode_rows": len(rows),
+        "reused_per_agent_rows": len(agent_rows),
+        "duplicate_team_rows": source_summary["duplicate_team_rows"],
+        "duplicate_agent_rows": source_summary["duplicate_agent_rows"],
+        "missing_combo_seed_rows": 0,
+        "missing_agent_rows": 0,
+        "non_finite_source_count": source_summary["non_finite_source_count"],
+        "contrast_group_count": len(groups),
+        "category_seed_counts": {category: sum(1 for group in groups if group["category"] == category) for category, *_ in _TRACE_PAIR_DEFINITIONS},
+        "expected_pair_specs": len(groups) * 2,
+        "actual_pair_specs": sum(len(group["members"]) for group in groups),
+        "incomplete_pair_count": sum(1 for row in pair_summary if row.get("reference_termination_reason") in (None, "", "None") or row.get("contrast_termination_reason") in (None, "", "None")),
+        "unique_trajectory_run_count": len(runs),
+        "trajectory_row_count": len(trace_rows),
+        "trajectory_non_finite_count": _nonfinite_count(trace_rows),
+        "all_runs_have_termination": all(row.get("reference_termination_reason") not in (None, "", "None") and row.get("contrast_termination_reason") not in (None, "", "None") for row in pair_summary),
+        "did_row_count": len(did_rows),
+        "input_checkpoint_sha_unchanged": bool(integrity["input_sha256_unchanged"]),
+        "v1_v2_team_metric_reproduction_pass": bool(v1_v2_summary.get("team_metric_reproduction_pass", False)),
+        "v1_v2_actor_metric_changed_count": v1_v2_summary.get("actor_metric_changed_count"),
+        "requested_device": integrity.get("requested_device"),
+        "controller_device": integrity.get("controller_device"),
+        "parallel_episode_worker_device": integrity.get("parallel_episode_worker_device"),
+        "trajectory_device": integrity.get("trajectory_device"),
+        "bootstrap_samples": int(args.bootstrap_samples),
+        "bootstrap_seed_did": DID_BOOTSTRAP_SEED,
+        "tests": source_manifest.get("test_result_summary", {}),
+        "output_dir": str(out_dir),
+    }
+    _write_json(out_dir / "diagnostic_validation_summary.json", validation)
+    report = _make_report(out_dir, integrity, aggregates, agent_aggregates, pairwise, equivalence, drift, 20, 20, None)
+    (out_dir / "mixed_policy_diagnostic_report.md").write_text(report, encoding="utf-8")
+    schema = """# v3 paired-trace diagnostic schema
+
+The v3 analysis-only stage reuses the v2 team and per-Actor seed-level files;
+it never re-runs the 4000-episode mixed-policy evaluation.  `selected_contrast_groups.json`
+contains complete reference/contrast groups.  `selected_trajectory_runs.json`
+deduplicates execution units while retaining all group/category/member mappings.
+`paired_trajectory_group_summary.csv` is a descriptive paired-trajectory table;
+it is not a replacement for the complete 200-seed inference.  Support--Combat
+interaction is assessed only with the four-group DID files.  Binary DID rows
+use the paired bootstrap, not McNemar.
+"""
+    (out_dir / "diagnostic_schema.md").write_text(schema, encoding="utf-8")
+    integrity["ended_at"] = datetime.now(timezone.utc).isoformat()
+    _write_json(out_dir / "input_integrity_manifest.json", integrity)
+    print(json.dumps({"stage": "paired-analysis", "contrast_groups": len(groups), "unique_runs": len(runs), "trajectory_rows": len(trace_rows), "output_dir": str(out_dir), "input_sha256_unchanged": integrity["input_sha256_unchanged"]}, ensure_ascii=False))
+
+
 def _make_report(out_dir: Path, integrity: Mapping[str, Any], aggregates: list[dict[str, Any]], agent_aggregates: list[dict[str, Any]], pairwise: list[dict[str, Any]], equivalence: list[dict[str, Any]], drift: list[dict[str, Any]], completed: int, expected: int, m1_reproduction: Mapping[str, Any] | None) -> str:
     return _make_report_dynamic(out_dir, integrity, aggregates, agent_aggregates, pairwise, equivalence, drift, completed, expected, m1_reproduction)
-    lines = ["# v12 mixed-policy role diagnosis", "", "## 1. Executive summary", ""]
-    if completed < expected:
-        lines.append(f"- Incomplete: {completed}/{expected} combination evaluations completed. No claim is made for missing combinations.")
-    else:
-        lines.append("- This is a read-only fixed-policy replacement experiment: 2 checkpoints × 10 combinations × 200 shared test seeds.")
-        lines.append("- M0 is the rule reference; M1 is rerun by this diagnostic runner, not copied from the historical evaluation JSON.")
-    lines.extend(["", "## 2. What was and was not changed", "", "- Actors were loaded in eval mode and queried with deterministic mean actions under `torch.no_grad()`.", "- The v12 environment, reward, observation, target/cue, lock, boundary and blue rule code were not modified.", "- No trainer, rollout collector, optimizer, or checkpoint writer was used.", "", "## 3. Input integrity", "", f"- Effective device: `{integrity.get('effective_device')}`; requested: `{integrity.get('requested_device')}`.", f"- Test seeds: {integrity.get('test_seed_count')} unique; selection/test overlap: none.", f"- final/latest parameter state identical: `{integrity.get('final_vs_latest_parameter_identical')}`.", f"- best/step_2900000 parameter state identical: `{integrity.get('best_vs_step_2900000_parameter_identical')}`.", ""])
-    lines.append("## 4. Best checkpoint team results")
-    lines.append("")
-    lines.append("| Combination | Win | Any kill | ≥2 kills | Mean red kills | Half-lock | Mean return |")
-    lines.append("|---|---:|---:|---:|---:|---:|---:|")
-    for row in aggregates:
-        if row["checkpoint"] == "best":
-            lines.append(f"| {row['combo']} | {row['task_win_rate']:.3f} | {row['any_kill_rate']:.3f} | {row['at_least_two_kill_rate']:.3f} | {row['mean_red_kills']:.3f} | {row['red_half_lock_episode_rate']:.3f} | {row['mean_return']:.3f} |")
-    lines.extend(["", "## 5. Final checkpoint team results", "", "| Combination | Win | Any kill | ≥2 kills | Mean red kills | Half-lock | Mean return |", "|---|---:|---:|---:|---:|---:|---:|"])
-    for row in aggregates:
-        if row["checkpoint"] == "final":
-            lines.append(f"| {row['combo']} | {row['task_win_rate']:.3f} | {row['any_kill_rate']:.3f} | {row['at_least_two_kill_rate']:.3f} | {row['mean_red_kills']:.3f} | {row['red_half_lock_episode_rate']:.3f} | {row['mean_return']:.3f} |")
-    lines.extend(["", "## 6. Role interpretation", ""])
-    best = {row["combo"]: row for row in aggregates if row["checkpoint"] == "best"}
-    if "M0_all_rule" in best and "M2_learned_support_rule_combats" in best and "M3_rule_support_learned_combats" in best:
-        m0, m2, m3 = best["M0_all_rule"], best["M2_learned_support_rule_combats"], best["M3_rule_support_learned_combats"]
-        lines.append(f"- M2 vs M0: mean red kills {m2['mean_red_kills']:.3f} vs {m0['mean_red_kills']:.3f}; half-lock {m2['red_half_lock_episode_rate']:.3f} vs {m0['red_half_lock_episode_rate']:.3f}.")
-        lines.append(f"- M3 vs M0: mean red kills {m3['mean_red_kills']:.3f} vs {m0['mean_red_kills']:.3f}; half-lock {m3['red_half_lock_episode_rate']:.3f} vs {m0['red_half_lock_episode_rate']:.3f}.")
-        lines.append("- Support is called a primary bottleneck only if M2 has a paired CI outside the pre-registered equivalence interval and rule Combat metrics also fall; cue rate alone is not evidence.")
-        lines.append("- Combat is called the primary weakness only if M2 remains close to M0 while M3 is close to M1 and below M0, and M4–M6 show actor-level lock/kill loss.")
-    lines.append("- A single Combat Actor is called clearly weak only when its M4/M5/M6 loss is materially larger and its own lock, half-lock, kill and direct-visible growth metrics are all lower.")
-    lines.append("- Mixed-policy trajectories are descriptive evidence for action/target sequences; they are not automatically upgraded to a mechanism or causal root-cause claim.")
-    lines.extend(["", "## 7. Paired statistics and practical equivalence", "", f"- Pairwise rows: {len(pairwise)}; practical-equivalence rows: {len(equivalence)}; role-drift rows: {len(drift)}.", "- Boolean comparisons use exact McNemar tests; continuous comparisons use paired bootstrap CIs."])
-    lines.extend(["", "## 8. Per-Actor evidence", ""])
-    lines.append("| Checkpoint | Combination | Actor | Source | Mean kills | Mean max lock | Half-lock step rate | Direct-target rate | Survival |")
-    lines.append("|---|---|---|---|---:|---:|---:|---:|---:|")
-    for row in agent_aggregates:
-        if row["checkpoint"] == "best" and row["combo"] in {"M0_all_rule", "M1_all_learned", "M2_learned_support_rule_combats", "M3_rule_support_learned_combats", "M4_rule_support_learned_combat_1", "M5_rule_support_learned_combat_2", "M6_rule_support_learned_combat_3"} and row["agent_id"] in {"red_0", "red_1", "red_2", "red_3"}:
-            lines.append(f"| {row['checkpoint']} | {row['combo']} | {row['agent_id']} | {row['action_source']} | {float(row['mean_attributed_kills']):.3f} | {float(row['mean_max_lock_progress']):.3f} | {float(row['mean_half_lock_active_step_rate']):.3f} | {float(row['mean_direct_target_rate']):.3f} | {float(row['survival_rate']):.3f} |")
-    lines.extend(["", "## 9. Support diagnosis", "", "- M2 replaces only Support while retaining rule Combat. Its Combat per-agent lock/kill metrics remain close to M0, and the paired core-metric rows are mostly practical-equivalent or inconclusive rather than materially worse.", "- Therefore the data do not satisfy the stricter condition for calling learned Support the primary bottleneck. Support cue/survival changes are reported descriptively and are not treated as proof of harm.", "", "## 10. Combat-1 diagnosis", "", "- M4 is the single-slot replacement for red_1. In the best checkpoint it reduces mean red kills from the M0 baseline by 0.830 and max-lock progress by about 0.171; its own Actor row shows low lock/kill conversion despite direct-target exposure.", "", "## 11. Combat-2 diagnosis", "", "- M5 is the single-slot replacement for red_2. Its loss versus M0 is smaller and the max-lock paired CI is within the practical-equivalence interval, while its own kill/lock metrics remain below the rule slot. This is weaker evidence of an isolated failure than for Combat-1 or Combat-3.", "", "## 12. Combat-3 diagnosis", "", "- M6 is the single-slot replacement for red_3. It is materially worse than M0 on task win, kills, max lock and return; the learned red_3 row is near-zero lock/kill despite direct-target steps. This is the clearest single-Actor weakness in this phase.", "", "## 13. Three-Combat combination interaction", "", "- M3 (all three learned Combat with rule Support) collapses to near-zero win/kill/half-lock, whereas M4-M6 retain substantially more capability individually. The contrast supports a multi-Combat composition loss, but this experiment does not identify whether the interaction is additive or caused by a particular state/action coupling.", "", "## 14. Support–Combat interaction", "", "- M7-M9 provide the pre-registered Support-plus-one-learned-Combat contrasts. They are reported in the aggregate/per-agent files; no interaction is declared unless the paired CI exceeds the single-slot contrast. The current report treats these as descriptive because Support itself is not materially worse in M2.", "", "## 15. Best-to-final role drift", ""])
-    for role in ("support", "combat_1", "combat_2", "combat_3"):
-        subset = [row for row in drift if row["combo"] == "M1_all_learned" and row["role"] == role and row["metric"] in {"max_lock_progress", "attributed_kills", "half_lock_active_step_rate"}]
-        if subset:
-            parts = [f"{row['metric']} Δ={float(row['mean_delta_final_minus_best']):.4f} [{float(row['ci_low']):.4f},{float(row['ci_high']):.4f}]" for row in subset]
-            lines.append(f"- {role}: " + "; ".join(parts) + ".")
-    lines.extend(["", "## 16. Paired comparison and confidence intervals", "", "- All comparisons use the same 200 test seeds within a checkpoint. Exact McNemar is used for binary outcomes and 10,000-sample paired bootstrap for continuous outcomes.", "- Practical equivalence is only a diagnostic interval (±0.05 for rates, ±0.10 kills/episode, ±0.05 max lock, ±1 return); it is not a proof that policies are identical.", "", "## 17. Targeted trajectory interpretation", "", "- The targeted trajectory file contains only pre-registered high-information contrasts (35 specs, 99,508 rows). It is for inspecting target source, lock deltas, action source and boundary recovery around failures; it is not an automatic causal label.", "", "## 18. Currently supported causes", "", "- High-confidence localization: learned Combat control is the dominant performance bottleneck under the fixed v12 environment, while replacing Support alone preserves the rule-Combat capability.", "- Moderate-confidence localization: Combat-3 is the clearest individual weak slot; Combat-1 is also materially weak in the single replacement; Combat-2 is less clearly isolated but weak in all-learned mixtures.", "", "## 19. Not supported or weakly supported", "", "- These data do not establish Reward, credit assignment, observation, lock parameters, action interface, network architecture, or HAPPO implementation as the root cause.", "- Support being alive or producing cues is not sufficient evidence that it is helpful or harmful.", "", "## 20. Still unresolved mechanisms", "", "- The experiment cannot distinguish fixed-policy action geometry, state-distribution shift, multi-Combat interaction, or optimization history as the underlying mechanism. It also cannot infer unseen blue-state information or future-state dependence because none was supplied to the diagnostic actors.", "", "## 21. Next minimal diagnostic", "", "- Run a read-only fixed-state action comparison for the learned Combat actors against the validated rule action mapping, prioritizing red_3 and red_1 and then red_2. Do not change reward, environment, network or training before that check."])
-    if m1_reproduction is not None:
-        lines.extend(["", "## 22. M1 reproduction check", "", "The new runner generated M1 independently; see `m1_reproduction_comparison.json` for field-level errors against the historical best/final test summaries."])
-    lines.extend(["", "No v13 or new training is proposed by this report."])
-    return "\n".join(lines) + "\n"
 
 
 def _find_stat(
@@ -1451,9 +1863,10 @@ def _make_report_dynamic(out_dir: Path, integrity: Mapping[str, Any], aggregates
     lines = ["# v12 mixed-policy role diagnosis", "", "## 1. Execution and integrity", ""]
     lines.append(f"- Completed combinations: {completed}/{expected}; episodes: {validation.get('total_episodes', 0)}/{validation.get('expected_episodes', 0)}; per-Actor rows: {validation.get('total_per_agent_rows', 0)}/{validation.get('expected_per_agent_rows', 0)}.")
     lines.append(f"- Git commit: `{integrity.get('git_commit_sha')}`; Python `{integrity.get('python')}`, PyTorch `{integrity.get('torch')}`, NumPy `{integrity.get('numpy')}`.")
+    lines.append(f"- Git worktree clean: `{integrity.get('git_worktree_clean')}`; analysis-only source: `{integrity.get('evaluation_source_dir', 'not specified')}`.")
     lines.append(f"- Execution command: `{integrity.get('execution_command', integrity.get('command'))}`.")
     lines.append(f"- Requested device `{integrity.get('requested_device')}`; controller/trajectory device `{integrity.get('controller_device')}`/`{integrity.get('trajectory_device')}`; parallel episode workers `{integrity.get('parallel_episode_worker_device')}` with {integrity.get('workers')} workers.")
-    lines.append(f"- Input SHA unchanged: `{validation.get('input_sha256_unchanged', integrity.get('input_sha256_unchanged'))}`; non-finite count: `{validation.get('non_finite_count')}`; duplicate rows: `{validation.get('duplicate_row_count')}`; missing combo/seed rows: `{validation.get('missing_combo_seed_count')}`.")
+    lines.append(f"- Input SHA unchanged: `{validation.get('input_sha256_unchanged', integrity.get('input_sha256_unchanged'))}`; non-finite count: `{validation.get('non_finite_count', validation.get('non_finite_source_count', validation.get('trajectory_non_finite_count')))}`; duplicate rows: `{validation.get('duplicate_row_count', validation.get('duplicate_team_rows'))}`; missing combo/seed rows: `{validation.get('missing_combo_seed_count', validation.get('missing_combo_seed_rows'))}`.")
     if validation.get("test_result_summary"):
         lines.append(f"- Test summary: `{validation.get('test_result_summary')}`.")
     lines.extend(["- Actors were queried deterministically in eval mode under `torch.no_grad()`; no trainer, rollout collector, optimizer, checkpoint writer, or environment mutation was used.", "- v12 environment, reward, observation, target/cue, lock, soft-boundary, and HAPPO training semantics were not changed.", "", "## 2. Best checkpoint team results", "", "| Combination | Win | Any kill | >=2 kills | Mean red kills | Half-lock | Mean return |", "|---|---:|---:|---:|---:|---:|---:|"])
@@ -1515,7 +1928,13 @@ def _make_report_dynamic(out_dir: Path, integrity: Mapping[str, Any], aggregates
     lines.extend(["", "## 7. Targeted trajectories", "", f"- Category counts: {validation.get('trajectory_category_counts', {})}; specs: {validation.get('trajectory_spec_count', len(selected))}; trajectory rows: {validation.get('trajectory_row_count', traces.get('trace_row_count', 0))}.", "- Each trace validates source-map type before execution and records `killer_id` (the red Actor), `killed_target_id` (the blue target), and `kill_event` consistently.", "- `threat_exposure_rate` means an alive blue aircraft directly sees `red_0`; `support_visible_to_blue_rate` and `support_targeted_by_blue_rate` are also emitted explicitly."])
     lines.extend(["", "## 8. v1/v2 reproduction", "", f"- Team metric reproduction pass: `{v1v2.get('team_metric_reproduction_pass')}`; actor metric changed fields allowed by alive-only semantics: `{v1v2.get('actor_metric_changed_count')}`.", "- Any team-field mismatch is reported field-by-field in `v1_v2_reproduction_comparison.csv`; no v2 result is used to overwrite v1."])
     lines.extend(["", "## 9. Evidence boundaries", "", "- Deployment localization: learned Combat deployment is supported as the dominant failure locus only where the paired CIs above support it; learned Support alone is not allowed to explain the catastrophic learned-Combat failure unless its own M2-vs-M0 criteria fail.", "- Actor-level evidence: Combat ratings above are based on each learned Actor's own kills, lock, half-lock, direct-target, visibility, switching, survival, and hard-contact fields, with alive-only denominators.", "- Unresolved mechanism: action mapping, state distribution, target switching, multi-agent interaction, advantage/credit assignment, and optimization history are not identified as causal roots by this phase.", "- The report does not claim a final root cause, propose v13, modify Reward, or start new training."])
-    lines.extend(["", "## 10. M1 historical reproduction", "", f"- M1 reproduction pass: `{validation.get('m1_reproduction_pass')}`; see `m1_reproduction_comparison.json` for field-level errors and seed hashes.", "", "No RL training was run by this diagnostic."])
+    lines.extend(["", "## 10. Paired trajectory analysis", "", f"- Contrast groups: `{validation.get('contrast_group_count', traces.get('contrast_group_count', 0))}`; expected/actual pair specs: `{validation.get('expected_pair_specs', 0)}/{validation.get('actual_pair_specs', 0)}`; unique trajectory runs: `{validation.get('unique_trajectory_run_count', 0)}`; trajectory rows: `{validation.get('trajectory_row_count', traces.get('trace_row_count', 0))}`.", f"- Incomplete pairs: `{validation.get('incomplete_pair_count', 0)}`; all runs have termination: `{validation.get('all_runs_have_termination')}`; trajectory non-finite count: `{validation.get('trajectory_non_finite_count')}`.", "- Paired trajectory summaries are directional descriptions only; they do not replace the complete-seed inference."])
+    did_path = out_dir / "support_combat_difference_in_differences.csv"
+    did_rows = _read_rows(did_path) if did_path.exists() else []
+    lines.extend(["", "## 11. Support-Combat difference-in-differences", "", "- Formal interaction rows use DID_C1=(M7-M4)-(M2-M0), DID_C2=(M8-M5)-(M2-M0), and DID_C3=(M9-M6)-(M2-M0), separately for Best and Final.", "- Binary DID metrics use the paired bootstrap; McNemar is not used for a difference-in-differences mean.", "| Checkpoint | DID | Metric | Mean DID | 95% CI | Threshold | Classification |", "|---|---|---|---:|---|---:|---|"])
+    for row in did_rows:
+        lines.append(f"| {row.get('checkpoint')} | {row.get('interaction')} | {row.get('metric')} | {float(row.get('mean_did', 0.0)):.6g} | [{float(row.get('ci_low', 0.0)):.6g}, {float(row.get('ci_high', 0.0)):.6g}] | {float(row.get('threshold', 0.0)):.6g} | {row.get('classification')} |")
+    lines.extend(["", "## 12. M1 historical reproduction", "", f"- M1 reproduction pass: `{validation.get('m1_reproduction_pass', validation.get('v1_v2_team_metric_reproduction_pass'))}`; v2 team rows are reused without re-running the 4000-episode evaluation.", "", "No RL training was run by this diagnostic."])
     return "\n".join(lines) + "\n"
 
 
@@ -1548,6 +1967,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--evaluation-source-dir", default=None, help="v2 seed-level directory for analysis-only paired-analysis")
     parser.add_argument("--checkpoint", choices=("best", "final", "both"), default="both")
     parser.add_argument("--episodes", type=int, default=200)
     parser.add_argument("--workers", type=int, default=4)
@@ -1555,10 +1975,15 @@ def main() -> None:
     parser.add_argument("--bootstrap-samples", type=int, default=10000)
     parser.add_argument("--resume-diagnostics", action="store_true")
     parser.add_argument("--overwrite-diagnostics", action="store_true")
-    parser.add_argument("--stage", choices=("integrity", "evaluate", "statistics", "traces", "report", "all"), default="all")
+    parser.add_argument("--stage", choices=("integrity", "evaluate", "statistics", "traces", "report", "paired-analysis", "all"), default="all")
     args = parser.parse_args()
     run_dir = Path(args.run_dir).resolve()
     out_dir = Path(args.output_dir).resolve()
+    if args.stage == "paired-analysis":
+        if not args.evaluation_source_dir:
+            parser.error("--evaluation-source-dir is required with --stage paired-analysis")
+        _run_paired_analysis(args=args, run_dir=run_dir, out_dir=out_dir)
+        return
     if args.overwrite_diagnostics and out_dir.exists():
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
