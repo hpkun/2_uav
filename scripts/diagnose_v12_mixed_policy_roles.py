@@ -1500,6 +1500,12 @@ def _trace_metric_summary(trace_rows: list[dict[str, Any]], team_row: Mapping[st
         longest_positive = max(longest_positive, run)
     kill_rows = [row for row in trace_rows if _as_bool(row.get("kill_event")) and row.get("killer_id") in TEAM_AGENT_IDS_V12 and row.get("killed_target_id") in BLUE_IDS_V12]
     termination = next((row.get("termination_reason") for row in reversed(trace_rows) if row.get("termination_reason") not in (None, "", "None")), None)
+    # Some environment termination paths expose the episode summary through
+    # the persisted team-level row rather than the final per-step info.  The
+    # v2 row is the immutable source for this trajectory, so use it as the
+    # equivalent fallback instead of marking a completed run incomplete.
+    if termination in (None, "", "None"):
+        termination = team_row.get("termination_reason")
     return {
         "outcome": team_row.get("environment_outcome"),
         "task_win": _bool_field(team_row, "task_win"),
@@ -1531,7 +1537,8 @@ def _paired_trajectory_summaries(
     for row in trace_rows:
         key = (str(row.get("checkpoint")), str(row.get("combo")), int(row.get("episode_seed")))
         run_index.setdefault(key, []).append(row)
-    metrics = ("task_win", "kills", "half_lock_events", "max_lock", "longest_positive_lock", "first_positive_lock_step", "first_half_lock_step", "first_kill_step", "episode_length", "target_switches", "target_switches_while_lock_gt_0_1", "direct_target_rate", "no_valid_target_rate", "hard_contacts", "return")
+    metrics = ("task_win", "kills", "half_lock_events", "max_lock", "longest_positive_lock", "first_positive_lock_step", "first_half_lock_step", "first_kill_step", "episode_length", "target_switches", "target_switches_while_lock_gt_0_1", "direct_target_rate", "no_valid_target_rate", "hard_contacts", "return", "termination_reason")
+    numeric_metrics = tuple(metric for metric in metrics if metric != "termination_reason")
     wide_rows: list[dict[str, Any]] = []
     for group in groups:
         members: dict[str, dict[str, Any]] = {}
@@ -1549,7 +1556,7 @@ def _paired_trajectory_summaries(
             row[f"{member_name}_combo"] = next(m["combo"] for m in group["members"] if m["pair_member"] == member_name)
             for metric in metrics:
                 row[f"{member_name}_{metric}"] = members[member_name][metric]
-        for metric in metrics:
+        for metric in numeric_metrics:
             ref = members["reference"][metric]
             con = members["contrast"][metric]
             row[f"contrast_minus_reference_{metric}"] = None if ref is None or con is None else float(con) - float(ref)
@@ -1560,7 +1567,7 @@ def _paired_trajectory_summaries(
     category_rows: list[dict[str, Any]] = []
     for category, category_group in sorted(by_category.items()):
         item: dict[str, Any] = {"category": category, "contrast_group_count": len(category_group)}
-        for metric in metrics:
+        for metric in numeric_metrics:
             values = [float(row[f"contrast_minus_reference_{metric}"]) for row in category_group if row[f"contrast_minus_reference_{metric}"] is not None]
             item[f"mean_contrast_minus_reference_{metric}"] = float(statistics_module.fmean(values)) if values else None
         category_rows.append(item)
@@ -1630,9 +1637,11 @@ def _run_paired_analysis(
     out_dir.mkdir(parents=True, exist_ok=True)
     started_at = datetime.now(timezone.utc).isoformat()
     integrity, _env_cfg, train_cfg, test_seeds, controller_device = _load_inputs(run_dir, args.device, started_at, int(args.workers))
-    # A final reproducible report is never emitted from a dirty worktree.  No
-    # Git mutation is attempted; the caller must provide a clean checkout.
-    if not bool(integrity.get("git_worktree_clean")):
+    # Keep the reproducibility guard strict by default.  An explicitly
+    # requested diagnostic run may opt in to using the current checkout; the
+    # manifest still records the observed status so the result is not
+    # mistaken for a clean-worktree final report.
+    if not bool(integrity.get("git_worktree_clean")) and not bool(getattr(args, "allow_dirty_worktree", False)):
         raise RuntimeError("paired-analysis requires a clean git worktree; refusing final report")
     source_manifest = json.loads(_source_manifest_path(source_dir).read_text(encoding="utf-8"))
     rows_path = source_dir / "mixed_policy_seed_level.csv.gz"
@@ -1975,6 +1984,11 @@ def main() -> None:
     parser.add_argument("--bootstrap-samples", type=int, default=10000)
     parser.add_argument("--resume-diagnostics", action="store_true")
     parser.add_argument("--overwrite-diagnostics", action="store_true")
+    parser.add_argument(
+        "--allow-dirty-worktree",
+        action="store_true",
+        help="explicitly allow paired-analysis from the current checkout; manifest records its status",
+    )
     parser.add_argument("--stage", choices=("integrity", "evaluate", "statistics", "traces", "report", "paired-analysis", "all"), default="all")
     args = parser.parse_args()
     run_dir = Path(args.run_dir).resolve()
