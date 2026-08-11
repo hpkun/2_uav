@@ -1,4 +1,4 @@
-"""Train v13A/v13B role-shared HAPPO on the frozen v12 4v3 environment."""
+"""Train v13 or mission-aligned v14 role-shared HAPPO experiments."""
 from __future__ import annotations
 
 import argparse
@@ -21,11 +21,17 @@ from uav_combat.happo.evaluation_4v3 import (
     validate_evaluation_seed_manifest,
 )
 from uav_combat.happo.evaluation_role_shared_4v3 import evaluate_role_shared_happo_fixed_blue_4v3
+from uav_combat.happo.evaluation_v14_4v3 import evaluate_v14_happo_fixed_blue_4v3
 from uav_combat.happo.trainer_4v3 import compute_best_score_4v3
 from uav_combat.happo.trainer_role_shared_4v3 import (
     CHECKPOINT_FAMILY_ROLE_SHARED_HAPPO_4V3,
     ROLE_POLICY_MAPPING,
     RoleSharedHAPPO4v3Trainer,
+)
+from uav_combat.happo.trainer_v14_4v3 import (
+    CHECKPOINT_FAMILY_V14_HAPPO_4V3,
+    CREDIT_MODE_ROLE_LOCAL,
+    MissionAlignedRoleSharedHAPPO4v3Trainer,
 )
 
 
@@ -91,8 +97,16 @@ def _manifest(cfg: dict[str, Any], out: Path, supplied: str | None) -> dict[str,
     return manifest
 
 
+def _is_v14(cfg: dict[str, Any]) -> bool:
+    return cfg["training"].get("training_mode") == "fixed_rule_blue_heterogeneous_4v3_v14_happo"
+
+
+def _trainer_class(cfg: dict[str, Any]):
+    return MissionAlignedRoleSharedHAPPO4v3Trainer if _is_v14(cfg) else RoleSharedHAPPO4v3Trainer
+
+
 def _evaluate(
-    trainer: RoleSharedHAPPO4v3Trainer,
+    trainer: Any,
     env_config: str,
     cfg: dict[str, Any],
     manifest: dict[str, Any],
@@ -102,10 +116,19 @@ def _evaluate(
     checkpoint: Path,
 ) -> dict[str, Any]:
     seeds = evaluation_seeds_from_manifest(manifest, split)
-    summary = evaluate_role_shared_happo_fixed_blue_4v3(
-        trainer.actors, env_config, seeds=seeds, num_envs=min(8, int(cfg["training"]["num_envs"])),
-        device=trainer.device, split=split, seed_manifest=manifest,
-    )
+    if _is_v14(cfg):
+        summary = evaluate_v14_happo_fixed_blue_4v3(
+            trainer.actors, env_config, seeds=seeds,
+            num_envs=min(8, int(cfg["training"]["num_envs"])),
+            device=trainer.device, split=split, seed_manifest=manifest,
+            training_diagnostics=trainer.last_update_metrics,
+        )
+    else:
+        summary = evaluate_role_shared_happo_fixed_blue_4v3(
+            trainer.actors, env_config, seeds=seeds,
+            num_envs=min(8, int(cfg["training"]["num_envs"])),
+            device=trainer.device, split=split, seed_manifest=manifest,
+        )
     records = summary.pop("episode_records")
     _write_json(out / f"{label}_evaluation.json", {**summary, "label": label, "checkpoint": str(checkpoint), "checkpoint_sha256": _sha256(checkpoint)})
     _write_episode_csv(out / f"{label}_per_episode.csv", records)
@@ -165,18 +188,31 @@ def main() -> None:
     _write_yaml(out / "resolved_environment_config.yaml", env_cfg)
     _write_yaml(out / "resolved_training_config.yaml", cfg)
     manifest = _manifest(cfg, out, args.seed_manifest)
+    trainer_class = _trainer_class(cfg)
+    checkpoint_family = CHECKPOINT_FAMILY_V14_HAPPO_4V3 if _is_v14(cfg) else CHECKPOINT_FAMILY_ROLE_SHARED_HAPPO_4V3
     _write_json(out / "experiment_contract.json", {
-        "checkpoint_family": CHECKPOINT_FAMILY_ROLE_SHARED_HAPPO_4V3,
+        "checkpoint_family": checkpoint_family,
         "checkpoint_version": 1, "algorithm_variant": cfg["experiment"]["variant"],
         "role_policy_mapping": ROLE_POLICY_MAPPING,
         "environment_config": str(args.env_config), "training_config": str(args.train_config),
         "reward_contract_version": env_cfg["combat"]["reward_contract_version"],
         "reward_contract": env_cfg["rewards"], "evaluation_seed_manifest_hash": manifest["manifest_hash"],
     })
-    trainer = RoleSharedHAPPO4v3Trainer(args.env_config, cfg)
+    trainer = trainer_class(args.env_config, cfg)
     trainer.seed_manifest = deepcopy(manifest)
     support_before = _parameter_snapshot(trainer.actors.support_actor)
     combat_before = _parameter_snapshot(trainer.actors.combat_actor)
+    critic_before = _parameter_snapshot(trainer.critic)
+    support_critic_before = (
+        _parameter_snapshot(trainer.role_critics.support_critic)
+        if _is_v14(cfg) and trainer.credit_mode == CREDIT_MODE_ROLE_LOCAL
+        else []
+    )
+    combat_critic_before = (
+        _parameter_snapshot(trainer.role_critics.combat_critic)
+        if _is_v14(cfg) and trainer.credit_mode == CREDIT_MODE_ROLE_LOCAL
+        else []
+    )
     try:
         if args.resume:
             trainer.load_checkpoint(args.resume)
@@ -232,7 +268,7 @@ def main() -> None:
         smoke_validation: dict[str, Any] | None = None
         if args.smoke:
             main_actions, main_lp, main_values, _ = trainer._select_actions()
-            restored = RoleSharedHAPPO4v3Trainer(args.env_config, cfg)
+            restored = trainer_class(args.env_config, cfg)
             try:
                 restored.load_checkpoint(out / "final.pt")
                 restored_actions, restored_lp, restored_values, _ = restored._select_actions()
@@ -245,6 +281,7 @@ def main() -> None:
                     "reward_and_losses_finite": bool(np.isfinite(numeric_metrics).all()),
                     "support_parameters_changed": _parameters_changed(support_before, trainer.actors.support_actor),
                     "combat_shared_parameters_changed": _parameters_changed(combat_before, trainer.actors.combat_actor),
+                    "critic_parameters_changed": _parameters_changed(critic_before, trainer.critic),
                     "actor_optimizer_count": len(trainer.actor_optimizers),
                     "combat_optimizer_is_single": trainer.actor_optimizers["combat"] is trainer.combat_optimizer,
                     "recurrent_hidden_activity": trainer.last_update_metrics.get("recurrent_hidden_activity", 0.0),
@@ -255,6 +292,31 @@ def main() -> None:
                     "resume_value_equal": bool(np.array_equal(main_values, restored_values)),
                     "checkpoint_exists": (out / "final.pt").exists(),
                 }
+                if _is_v14(cfg):
+                    smoke_validation.update({
+                        "credit_mode": trainer.credit_mode,
+                        "team_rewards_finite": bool(np.isfinite(trainer.buffer.team_rewards).all()),
+                        "agent_rewards_finite": bool(
+                            trainer.credit_mode != CREDIT_MODE_ROLE_LOCAL
+                            or np.isfinite(trainer.buffer.agent_rewards).all()
+                        ),
+                        "agent_advantages_finite": bool(
+                            trainer.credit_mode != CREDIT_MODE_ROLE_LOCAL
+                            or np.isfinite(trainer.buffer.advantages).all()
+                        ),
+                        "support_critic_parameters_changed": bool(
+                            trainer.credit_mode != CREDIT_MODE_ROLE_LOCAL
+                            or _parameters_changed(support_critic_before, trainer.role_critics.support_critic)
+                        ),
+                        "combat_critic_parameters_changed": bool(
+                            trainer.credit_mode != CREDIT_MODE_ROLE_LOCAL
+                            or _parameters_changed(combat_critic_before, trainer.role_critics.combat_critic)
+                        ),
+                        "combat_critic_is_single": bool(
+                            trainer.credit_mode != CREDIT_MODE_ROLE_LOCAL
+                            or hasattr(trainer.role_critics, "combat_critic")
+                        ),
+                    })
                 _write_json(out / "smoke_validation.json", smoke_validation)
             finally:
                 restored.close()
@@ -262,7 +324,7 @@ def main() -> None:
         final_entries: list[dict[str, Any]] = []
         for checkpoint_name in ("best", "final"):
             checkpoint = out / f"{checkpoint_name}.pt"
-            report = RoleSharedHAPPO4v3Trainer(args.env_config, cfg)
+            report = trainer_class(args.env_config, cfg)
             report.seed_manifest = deepcopy(manifest)
             try:
                 report.load_checkpoint(checkpoint)

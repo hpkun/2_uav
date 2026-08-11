@@ -1,0 +1,52 @@
+experiment:
+  seed: 42
+  device: cuda
+  output_dir: outputs/happo_heterogeneous_4v3_main_v14b_role_shared_combat_mlp_mission_aligned_role_credit_3m_seed42
+  variant: v14b_role_shared_combat_mlp_mission_aligned_role_credit
+
+network:
+  hidden_dim: 128
+  log_std_init: -1.0
+  log_std_min: -3.0
+  log_std_max: -0.3
+
+training:
+  training_mode: fixed_rule_blue_heterogeneous_4v3_v14_happo
+  credit_mode: role_local
+  share_combat_actor: true
+  recurrent_actor: false
+  total_env_steps: 3000000
+  schedule_env_steps: 3000000
+  num_envs: 8
+  num_env_workers: 4
+  rollout_steps: 256
+  team_size: 4
+  observation_dims: [118, 118, 118, 118]
+  action_dims: [3, 3, 3, 3]
+  ppo_epochs: 5
+  minibatch_size: 1024
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_coef: 0.2
+  actor_lr: 0.0003
+  actor_lr_final: 0.0001
+  critic_lr: 0.0003
+  critic_lr_final: 0.00005
+  entropy_coef: 0.003
+  entropy_coef_final: 0.0005
+  value_loss_coef: 0.5
+  max_grad_norm: 0.5
+  evaluation_interval_env_steps: 100000
+  quick_evaluation_episodes: 60
+  checkpoint_interval_env_steps: 100000
+
+evaluation:
+  deterministic: true
+  selection_episodes: 60
+  test_episodes: 200
+  selection_seed_offset: 50000
+  test_seed_offset: 150000
+
+notes:
+  algorithm: "Role-shared credit-aware HAPPO variant with per-slot Combat surrogate."
+  reward: "v14 common mission plus Support/Combat-local reward streams."

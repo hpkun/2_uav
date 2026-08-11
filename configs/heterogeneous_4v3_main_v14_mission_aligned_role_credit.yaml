@@ -1,0 +1,142 @@
+simulation:
+  dt: 0.1
+  max_steps: 900
+  gravity: 9.81
+
+action:
+  delta_yaw_max: 3.141592653589793
+  delta_pitch_max: 1.0471975511965976
+  delta_speed_max: 50.0
+  mapping_mode: rate_aligned_v1
+
+aircraft:
+  v_min: 100.0
+  v_max: 250.0
+  theta_min: -0.7853981633974483
+  theta_max: 0.7853981633974483
+  nx_min: -1.0
+  nx_max: 1.0
+  nz_min: -3.0
+  nz_max: 3.0
+  phi_min: -1.5707963267948966
+  phi_max: 1.5707963267948966
+  yaw_rate_max: 0.35
+  pitch_rate_max: 0.25
+  acceleration_max: 8.0
+  k_yaw: 1.0
+  k_pitch: 1.0
+  k_speed: 0.5
+
+battlefield:
+  x_limit: 20000.0
+  y_limit: 20000.0
+  collision_distance: 0.0
+  altitude_min: 500.0
+  altitude_max: 6000.0
+
+boundary:
+  mode: soft_containment
+  horizontal_soft_margin: 800.0
+  altitude_soft_margin: 250.0
+  max_recovery_blend: 0.85
+  hard_horizontal_buffer: 50.0
+  hard_altitude_buffer: 20.0
+  recovery_heading_error_scale: 0.7853981634
+  recovery_pitch_error_scale: 0.3490658504
+  red_hard_contact_penalty: -0.10
+
+combat:
+  reward_mode: functional_heterogeneous_4v3_role_credit_v14
+  reward_contract_version: v14_mission_aligned_role_credit
+
+combat_profile:
+  sensor_range: 2500.0
+  v_min: 100.0
+  v_max: 250.0
+  theta_min: -0.7853981634
+  theta_max: 0.7853981634
+  yaw_rate_max: 0.35
+  pitch_rate_max: 0.25
+  acceleration_max: 8.0
+  lock_distance_min: 100.0
+  lock_distance_optimal_max: 1500.0
+  lock_distance_fade_max: 2500.0
+  lock_ata_fade_max: 1.5707963268
+  lock_aa_fade_max: 2.6179938780
+  lock_increment_scale: 0.17
+  lock_decay_per_step: 0.03
+  lock_kill_threshold: 1.0
+  target_min_hold_steps: 30
+  target_lost_release_steps: 10
+  target_switch_distance_ratio: 0.70
+
+scenario:
+  type: functional_heterogeneous_4v3_v14_mirrored_head_on
+  red_team_size: 4
+  blue_team_size: 3
+  separation_min: 3200.0
+  separation_max: 3800.0
+  lateral_spacing: 400.0
+  altitude_center: 3000.0
+  altitude_jitter: 60.0
+  speed_center: 150.0
+  speed_jitter: 6.0
+  heading_jitter: 0.0523598776
+  support_trailing_distance: 1000.0
+
+heterogeneous:
+  enabled: true
+  roles:
+    red_0: support
+    red_1: combat
+    red_2: combat
+    red_3: combat
+    blue_0: combat
+    blue_1: combat
+    blue_2: combat
+  sensor_range:
+    red_support: 6000.0
+  can_attack:
+    support: false
+    combat: true
+  information_sharing:
+    red_support_to_red_combat: true
+    combat_to_combat: false
+    blue_sharing: false
+
+support_formation:
+  progress_scale: 0.002
+
+rewards:
+  mission:
+    red_full_elimination: 20.0
+    red_total_loss: -15.0
+    mutual_elimination_draw: -2.0
+    timeout_red_win: -15.0
+    timeout_red_loss: -15.0
+    timeout_draw: -15.0
+  events:
+    blue_combat_killed: 8.0
+    red_combat_killed: -4.0
+    red_support_killed: -1.0
+    red_boundary_hard_contact: -0.10
+  combat_progress:
+    geometry_scale: 0.03
+    lock_scale: 0.05
+    half_lock_event: 0.50
+  support_events:
+    unique_detection: 0.02
+    cue_to_direct: 0.02
+    cue_to_half_lock: 0.50
+    assisted_kill: 1.50
+  support_formation:
+    progress_scale: 0.002
+  dense_clip:
+    min: -0.05
+    max: 0.05
+
+blue_rule_policy:
+  mode: v12_rule
+
+red_rule_policy:
+  mode: v12_rule

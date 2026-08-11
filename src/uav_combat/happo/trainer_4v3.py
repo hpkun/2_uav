@@ -236,7 +236,10 @@ def summarize_4v3_episodes(records: list[dict[str, Any]]) -> dict[str, Any]:
         return {"episodes": 0}
     if records[0].get("environment_variant") == "functional_heterogeneous_4v3_v11_target_lock_support_cue":
         return _summarize_v11_episodes(records)
-    if records[0].get("environment_variant") == "functional_heterogeneous_4v3_v12_soft_boundary_combat_aligned":
+    if records[0].get("environment_variant") in {
+        "functional_heterogeneous_4v3_v12_soft_boundary_combat_aligned",
+        "functional_heterogeneous_4v3_v14_mission_aligned_role_credit",
+    }:
         return _summarize_v12_episodes(records)
     n = len(records)
     def mean_optional(key: str) -> float | None:
