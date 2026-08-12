@@ -42,6 +42,21 @@ def _environment_contract(config_path: str | Path):
             REWARD_COMPONENT_KEYS_V15,
             AGENT_REWARD_COMPONENT_KEYS_V15,
         )
+    if version == "v16_positive_lock_quality_reward":
+        from ..environment_4v3_v16 import (
+            AGENT_REWARD_COMPONENT_KEYS_V16,
+            REWARD_COMPONENT_KEYS_V16,
+            FunctionalHeterogeneous4v3V16APositiveLockQualityRewardEnv,
+            FunctionalHeterogeneous4v3V16BPositiveLockQualityCanonicalObsEnv,
+        )
+
+        observation = config["combat"].get("observation_contract")
+        env_class = (
+            FunctionalHeterogeneous4v3V16BPositiveLockQualityCanonicalObsEnv
+            if observation == "canonical_same_team"
+            else FunctionalHeterogeneous4v3V16APositiveLockQualityRewardEnv
+        )
+        return env_class, REWARD_COMPONENT_KEYS_V16, AGENT_REWARD_COMPONENT_KEYS_V16
     raise ValueError(f"unsupported role-credit reward contract {version!r}")
 
 

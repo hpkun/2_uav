@@ -25,6 +25,7 @@ from uav_combat.happo.evaluation_v14_4v3 import evaluate_v14_happo_fixed_blue_4v
 from uav_combat.happo.trainer_4v3 import (
     V15_BEST_SCORE_FIELDS_4V3,
     V15_REWARD_CONTRACT_VERSION,
+    V16_REWARD_CONTRACT_VERSION,
     compute_experiment_best_score_4v3,
 )
 from uav_combat.happo.trainer_role_shared_4v3 import (
@@ -105,6 +106,7 @@ def _is_v14(cfg: dict[str, Any]) -> bool:
     return cfg["training"].get("training_mode") in {
         "fixed_rule_blue_heterogeneous_4v3_v14_happo",
         "fixed_rule_blue_heterogeneous_4v3_v15_happo",
+        "fixed_rule_blue_heterogeneous_4v3_v16_happo",
     }
 
 
@@ -209,8 +211,14 @@ def _build_experiment_contract(
         "team_reward_usage": cfg["training"].get("team_reward_usage", "training"),
         "evaluation_seed_manifest_hash": manifest_hash,
     }
-    if reward_contract_version == V15_REWARD_CONTRACT_VERSION:
+    if reward_contract_version in {
+        V15_REWARD_CONTRACT_VERSION, V16_REWARD_CONTRACT_VERSION
+    }:
         contract["best_checkpoint_selection"] = list(V15_BEST_SCORE_FIELDS_4V3)
+    if reward_contract_version == V16_REWARD_CONTRACT_VERSION:
+        contract["observation_contract"] = env_cfg["combat"][
+            "observation_contract"
+        ]
     return contract
 
 
@@ -264,7 +272,9 @@ def main() -> None:
     trainer_class = _trainer_class(cfg)
     checkpoint_family = CHECKPOINT_FAMILY_V14_HAPPO_4V3 if _is_v14(cfg) else CHECKPOINT_FAMILY_ROLE_SHARED_HAPPO_4V3
     reward_contract_version = str(env_cfg["combat"]["reward_contract_version"])
-    is_v15 = reward_contract_version == V15_REWARD_CONTRACT_VERSION
+    is_v15 = reward_contract_version in {
+        V15_REWARD_CONTRACT_VERSION, V16_REWARD_CONTRACT_VERSION
+    }
     _write_json(
         out / "experiment_contract.json",
         _build_experiment_contract(
@@ -401,6 +411,11 @@ def main() -> None:
                                 "max_rollout_combat_state_reward"
                             ]
                         )
+                        combat_state_lower_bound = (
+                            0.0
+                            if reward_contract_version == V16_REWARD_CONTRACT_VERSION
+                            else -combat_scale
+                        )
                         smoke_validation.update({
                             "combat_lock_quality_finite": bool(
                                 trainer.last_update_metrics[
@@ -409,7 +424,7 @@ def main() -> None:
                             ),
                             "combat_state_reward_in_bounds": bool(
                                 np.isfinite([combat_state_min, combat_state_max]).all()
-                                and combat_state_min >= -combat_scale - 1e-7
+                                and combat_state_min >= combat_state_lower_bound - 1e-7
                                 and combat_state_max <= combat_scale + 1e-7
                             ),
                             "agent_returns_finite": bool(

@@ -36,6 +36,7 @@ from .trainer_3v3 import (
 CHECKPOINT_FAMILY_HAPPO_4V3 = "functional_heterogeneous_4v3_v9_happo"
 CHECKPOINT_VERSION_HAPPO_4V3 = 1
 V15_REWARD_CONTRACT_VERSION = "v15_paper_compact_attack_reward"
+V16_REWARD_CONTRACT_VERSION = "v16_positive_lock_quality_reward"
 V15_BEST_SCORE_FIELDS_4V3 = (
     "strict_full_elimination_rate",
     "at_least_two_kill_rate",
@@ -141,7 +142,9 @@ def compute_experiment_best_score_4v3(
     summary: dict[str, float], reward_contract_version: str | None
 ) -> tuple[tuple[float, ...], dict[str, float]]:
     """Single selector dispatch used by role-shared 4v3 experiments."""
-    if reward_contract_version == V15_REWARD_CONTRACT_VERSION:
+    if reward_contract_version in {
+        V15_REWARD_CONTRACT_VERSION, V16_REWARD_CONTRACT_VERSION
+    }:
         return compute_best_score_v15_4v3(summary)
     return compute_best_score_4v3(summary)
 
@@ -268,6 +271,8 @@ def summarize_4v3_episodes(records: list[dict[str, Any]]) -> dict[str, Any]:
         "functional_heterogeneous_4v3_v12_soft_boundary_combat_aligned",
         "functional_heterogeneous_4v3_v14_mission_aligned_role_credit",
         "functional_heterogeneous_4v3_v15_paper_compact_attack_reward",
+        "functional_heterogeneous_4v3_v16a_positive_lock_quality_reward",
+        "functional_heterogeneous_4v3_v16b_positive_lock_quality_canonical_obs",
     }:
         summary = _summarize_v12_episodes(records)
         for key in sorted(
@@ -875,6 +880,7 @@ __all__ = [
     "best_score_fields_4v3",
     "compute_best_score_v15_4v3",
     "compute_experiment_best_score_4v3",
+    "V16_REWARD_CONTRACT_VERSION",
     "compute_best_score_4v3",
     "summarize_4v3_episodes",
     "V15_BEST_SCORE_FIELDS_4V3",

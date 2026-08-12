@@ -91,6 +91,12 @@ class FunctionalHeterogeneous4v3V15PaperCompactRewardEnv(
     def _empty_agent_components(self) -> dict[str, dict[str, float]]:
         return _empty_agent_components_v15()
 
+    def _combat_state_reward(self, lock_quality: float) -> float:
+        """Version hook; v15 keeps its historical centred mapping."""
+        return combat_state_reward_v15(
+            lock_quality, self.reward_contract["combat_state"]["scale"]
+        )
+
     def reset(self, seed: int | None = None):
         values = super().reset(seed)
         self._episode_reward_components = {
@@ -189,8 +195,8 @@ class FunctionalHeterogeneous4v3V15PaperCompactRewardEnv(
                 )
             values[combat_id]["angle_state_reward"] = angle
             values[combat_id]["distance_state_reward"] = distance
-            values[combat_id]["combat_state_reward"] = combat_state_reward_v15(
-                lock_quality, self.reward_contract["combat_state"]["scale"]
+            values[combat_id]["combat_state_reward"] = self._combat_state_reward(
+                lock_quality
             )
 
         position, awareness, support_state = self._support_state_components(direct)
@@ -236,7 +242,9 @@ class FunctionalHeterogeneous4v3V15PaperCompactRewardEnv(
         numeric = [*team_components.values(), *rewards.values()]
         numeric.extend(value for row in values.values() for value in row.values())
         if not np.isfinite(numeric).all():
-            raise FloatingPointError("v15 reward components must be finite")
+            raise FloatingPointError(
+                f"{self.reward_contract_version} reward components must be finite"
+            )
         return team_reward, team_components
 
     def _agent_rewards(self, *args: Any, **kwargs: Any):

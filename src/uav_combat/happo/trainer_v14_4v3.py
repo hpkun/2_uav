@@ -31,6 +31,12 @@ from ..scenario_4v3_v15 import (
     REWARD_CONTRACT_VERSION_V15,
     resolved_reward_contract_v15,
 )
+from ..scenario_4v3_v16 import (
+    AGENT_REWARD_COMPONENT_KEYS_V16,
+    REWARD_COMPONENT_KEYS_V16,
+    REWARD_CONTRACT_VERSION_V16,
+    resolved_reward_contract_v16,
+)
 from .metrics import explained_variance
 from .networks import CentralizedValueCritic
 from .role_credit_buffer import (
@@ -109,14 +115,23 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
             )
             self.reward_keys = REWARD_COMPONENT_KEYS_V15
             self.agent_reward_keys = AGENT_REWARD_COMPONENT_KEYS_V15
+        elif contract_version == REWARD_CONTRACT_VERSION_V16:
+            self.reward_contract = resolved_reward_contract_v16(
+                self.env_contract_config
+            )
+            self.reward_keys = REWARD_COMPONENT_KEYS_V16
+            self.agent_reward_keys = AGENT_REWARD_COMPONENT_KEYS_V16
         else:
-            raise ValueError("role-credit HAPPO requires a v14 or v15 environment")
+            raise ValueError("role-credit HAPPO requires a v14, v15, or v16 environment")
         self.reward_contract_version = str(contract_version)
         self.experiment_variant = str(self.config["experiment"]["variant"])
         t = self.config["training"]
         n = self.config["network"]
         e = self.config["experiment"]
         expected_mode = (
+            "fixed_rule_blue_heterogeneous_4v3_v16_happo"
+            if contract_version == REWARD_CONTRACT_VERSION_V16
+            else
             "fixed_rule_blue_heterogeneous_4v3_v15_happo"
             if contract_version == REWARD_CONTRACT_VERSION_V15
             else "fixed_rule_blue_heterogeneous_4v3_v14_happo"
@@ -139,11 +154,14 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
         self.sequence_chunk_length = 0
         self.obs_dim = OBS_DIM_V14
         self.gs_dim = GS_DIM_V14
-        if contract_version == REWARD_CONTRACT_VERSION_V15:
+        if contract_version in {
+            REWARD_CONTRACT_VERSION_V15,
+            REWARD_CONTRACT_VERSION_V16,
+        }:
             if str(t.get("credit_mode")) != CREDIT_MODE_ROLE_LOCAL:
-                raise ValueError("v15 requires credit_mode=role_local")
+                raise ValueError("v15/v16 requires credit_mode=role_local")
             if str(t.get("team_reward_usage")) != "reporting_only":
-                raise ValueError("v15 requires team_reward_usage=reporting_only")
+                raise ValueError("v15/v16 requires team_reward_usage=reporting_only")
         self.device = resolve_device(str(e["device"]))
         torch.manual_seed(int(e["seed"]))
         if self.device.type == "cuda":
@@ -275,6 +293,16 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
             signature.update(
                 {
                     "reward_contract_version": self.reward_contract_version,
+                    "team_reward_usage": "reporting_only",
+                }
+            )
+        elif self.reward_contract_version == REWARD_CONTRACT_VERSION_V16:
+            signature.update(
+                {
+                    "reward_contract_version": self.reward_contract_version,
+                    "observation_contract": self.env_contract_config["combat"][
+                        "observation_contract"
+                    ],
                     "team_reward_usage": "reporting_only",
                 }
             )
@@ -451,18 +479,23 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
             )
         if combat_state_index is not None:
             scale = float(self.reward_contract.get("combat_state", {}).get("scale", 0.02))
+            if self.reward_contract_version == REWARD_CONTRACT_VERSION_V16:
+                quality_bounds = [
+                    combat_state_min / scale,
+                    combat_state_max / scale,
+                ]
+            else:
+                quality_bounds = [
+                    (combat_state_min / scale + 1.0) / 2.0,
+                    (combat_state_max / scale + 1.0) / 2.0,
+                ]
             self.last_rollout_reward_means.update(
                 {
                     "min_rollout_combat_state_reward": combat_state_min,
                     "max_rollout_combat_state_reward": combat_state_max,
                     "combat_lock_quality_finite": float(
                         combat_state_finite
-                        and np.isfinite(
-                            [
-                                (combat_state_min / scale + 1.0) / 2.0,
-                                (combat_state_max / scale + 1.0) / 2.0,
-                            ]
-                        ).all()
+                        and np.isfinite(quality_bounds).all()
                     ),
                 }
             )
@@ -1058,6 +1091,10 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
                 self.config["training"].get("team_reward_usage", "training")
             ),
         }
+        if self.reward_contract_version == REWARD_CONTRACT_VERSION_V16:
+            payload["observation_contract"] = self.env_contract_config["combat"][
+                "observation_contract"
+            ]
         (out / "run_summary.json").write_text(
             json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
         )

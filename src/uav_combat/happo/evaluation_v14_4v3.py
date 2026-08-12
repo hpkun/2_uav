@@ -46,6 +46,18 @@ def _evaluation_env_class(env_config: str | Path):
             pass
 
         return _RoleMetricEnvV15
+    if version == "v16_positive_lock_quality_reward":
+        config = load_config(env_config)
+        from ..environment_4v3_v16 import (
+            FunctionalHeterogeneous4v3V16APositiveLockQualityRewardEnv,
+            FunctionalHeterogeneous4v3V16BPositiveLockQualityCanonicalObsEnv,
+        )
+        base = (
+            FunctionalHeterogeneous4v3V16BPositiveLockQualityCanonicalObsEnv
+            if config["combat"].get("observation_contract") == "canonical_same_team"
+            else FunctionalHeterogeneous4v3V16APositiveLockQualityRewardEnv
+        )
+        return type("_RoleMetricEnvV16", (_RoleMetricMixin, base), {})
     raise ValueError(f"unsupported evaluation reward contract {version!r}")
 
 
