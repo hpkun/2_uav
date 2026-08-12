@@ -98,7 +98,10 @@ def _manifest(cfg: dict[str, Any], out: Path, supplied: str | None) -> dict[str,
 
 
 def _is_v14(cfg: dict[str, Any]) -> bool:
-    return cfg["training"].get("training_mode") == "fixed_rule_blue_heterogeneous_4v3_v14_happo"
+    return cfg["training"].get("training_mode") in {
+        "fixed_rule_blue_heterogeneous_4v3_v14_happo",
+        "fixed_rule_blue_heterogeneous_4v3_v15_happo",
+    }
 
 
 def _trainer_class(cfg: dict[str, Any]):
@@ -196,7 +199,10 @@ def main() -> None:
         "role_policy_mapping": ROLE_POLICY_MAPPING,
         "environment_config": str(args.env_config), "training_config": str(args.train_config),
         "reward_contract_version": env_cfg["combat"]["reward_contract_version"],
-        "reward_contract": env_cfg["rewards"], "evaluation_seed_manifest_hash": manifest["manifest_hash"],
+        "reward_contract": env_cfg["rewards"],
+        "training_credit_mode": cfg["training"].get("credit_mode"),
+        "team_reward_usage": cfg["training"].get("team_reward_usage", "training"),
+        "evaluation_seed_manifest_hash": manifest["manifest_hash"],
     })
     trainer = trainer_class(args.env_config, cfg)
     trainer.seed_manifest = deepcopy(manifest)

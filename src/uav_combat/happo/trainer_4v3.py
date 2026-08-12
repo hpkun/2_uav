@@ -239,8 +239,25 @@ def summarize_4v3_episodes(records: list[dict[str, Any]]) -> dict[str, Any]:
     if records[0].get("environment_variant") in {
         "functional_heterogeneous_4v3_v12_soft_boundary_combat_aligned",
         "functional_heterogeneous_4v3_v14_mission_aligned_role_credit",
+        "functional_heterogeneous_4v3_v15_paper_compact_attack_reward",
     }:
-        return _summarize_v12_episodes(records)
+        summary = _summarize_v12_episodes(records)
+        for key in sorted(
+            {
+                key
+                for record in records
+                for key in record.get("reward_components", {})
+            }
+        ):
+            summary[key] = float(
+                np.mean(
+                    [
+                        record.get("reward_components", {}).get(key, 0.0)
+                        for record in records
+                    ]
+                )
+            )
+        return summary
     n = len(records)
     def mean_optional(key: str) -> float | None:
         values = [float(r[key]) for r in records if r.get(key) is not None]

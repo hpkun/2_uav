@@ -17,12 +17,36 @@ from .role_shared_networks import RoleSharedHAPPOActors
 from .trainer_4v3 import summarize_4v3_episodes
 
 
-class _RoleMetricEnvV14(FunctionalHeterogeneous4v3V14MissionAlignedEnv):
+class _RoleMetricMixin:
     def _update_locks(self, *args: Any, **kwargs: Any):
         half_events, killers = super()._update_locks(*args, **kwargs)
         self._evaluation_last_half_events = set(half_events)
         self._evaluation_last_killers = dict(killers)
         return half_events, killers
+
+
+class _RoleMetricEnvV14(_RoleMetricMixin, FunctionalHeterogeneous4v3V14MissionAlignedEnv):
+    pass
+
+
+def _evaluation_env_class(env_config: str | Path):
+    from ..config import load_config
+
+    version = load_config(env_config).get("combat", {}).get("reward_contract_version")
+    if version == "v14_mission_aligned_role_credit":
+        return _RoleMetricEnvV14
+    if version == "v15_paper_compact_attack_reward":
+        from ..environment_4v3_v15 import (
+            FunctionalHeterogeneous4v3V15PaperCompactRewardEnv,
+        )
+
+        class _RoleMetricEnvV15(
+            _RoleMetricMixin, FunctionalHeterogeneous4v3V15PaperCompactRewardEnv
+        ):
+            pass
+
+        return _RoleMetricEnvV15
+    raise ValueError(f"unsupported evaluation reward contract {version!r}")
 
 
 def _resolve_seeds(
@@ -99,7 +123,8 @@ def evaluate_v14_happo_fixed_blue_4v3(
         capacity = max(1, int(num_envs))
         for start in range(0, len(seed_list), capacity):
             batch_seeds = seed_list[start : start + capacity]
-            envs = [_RoleMetricEnvV14(env_config) for _ in batch_seeds]
+            env_class = _evaluation_env_class(env_config)
+            envs = [env_class(env_config) for _ in batch_seeds]
             reset_values = [
                 env.reset(item_seed) for env, item_seed in zip(envs, batch_seeds)
             ]
@@ -186,6 +211,50 @@ def evaluate_v14_happo_fixed_blue_4v3(
                     [float(row["agent_returns"][agent_id]) for row in records]
                 )
             )
+            agent_component_keys = sorted(
+                {
+                    key
+                    for row in records
+                    for key in row.get("agent_reward_components", {})
+                    .get(agent_id, {})
+                }
+            )
+            for key in agent_component_keys:
+                summary[f"mean_{agent_id}_{key}"] = float(
+                    np.mean(
+                        [
+                            float(
+                                row.get("agent_reward_components", {})
+                                .get(agent_id, {})
+                                .get(key, 0.0)
+                            )
+                            for row in records
+                        ]
+                    )
+                )
+        if "mean_red_0_support_state_reward" in summary:
+            summary["mean_support_state_reward"] = summary[
+                "mean_red_0_support_state_reward"
+            ]
+            summary["mean_combat_state_reward"] = float(
+                np.mean(
+                    [
+                        summary[f"mean_red_{slot}_combat_state_reward"]
+                        for slot in (1, 2, 3)
+                    ]
+                )
+            )
+            for key in (
+                "own_kill_reward",
+                "team_kill_reward",
+                "death_penalty",
+                "boundary_penalty",
+            ):
+                summary[f"mean_agent_{key}"] = float(
+                    np.mean(
+                        [summary[f"mean_red_{slot}_{key}"] for slot in range(4)]
+                    )
+                )
         summary.update(
             {
                 "mean_support_agent_return": summary["mean_red_0_agent_return"],

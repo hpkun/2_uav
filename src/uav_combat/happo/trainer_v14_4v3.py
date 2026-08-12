@@ -25,6 +25,12 @@ from ..scenario_4v3_v14 import (
     REWARD_CONTRACT_VERSION_V14,
     resolved_reward_contract_v14,
 )
+from ..scenario_4v3_v15 import (
+    AGENT_REWARD_COMPONENT_KEYS_V15,
+    REWARD_COMPONENT_KEYS_V15,
+    REWARD_CONTRACT_VERSION_V15,
+    resolved_reward_contract_v15,
+)
 from .metrics import explained_variance
 from .networks import CentralizedValueCritic
 from .role_credit_buffer import (
@@ -88,21 +94,35 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
         self.env_config = str(env_config)
         self.env_contract_config = load_config(self.env_config)
         self.config = deepcopy(config)
-        if (
-            self.env_contract_config.get("combat", {}).get(
-                "reward_contract_version"
+        contract_version = self.env_contract_config.get("combat", {}).get(
+            "reward_contract_version"
+        )
+        if contract_version == REWARD_CONTRACT_VERSION_V14:
+            self.reward_contract = resolved_reward_contract_v14(
+                self.env_contract_config
             )
-            != REWARD_CONTRACT_VERSION_V14
-        ):
-            raise ValueError("v14 HAPPO requires the v14 mission-aligned environment")
-        self.reward_contract_version = REWARD_CONTRACT_VERSION_V14
-        self.reward_contract = resolved_reward_contract_v14(self.env_contract_config)
+            self.reward_keys = REWARD_COMPONENT_KEYS_V14
+            self.agent_reward_keys = AGENT_REWARD_COMPONENT_KEYS_V14
+        elif contract_version == REWARD_CONTRACT_VERSION_V15:
+            self.reward_contract = resolved_reward_contract_v15(
+                self.env_contract_config
+            )
+            self.reward_keys = REWARD_COMPONENT_KEYS_V15
+            self.agent_reward_keys = AGENT_REWARD_COMPONENT_KEYS_V15
+        else:
+            raise ValueError("role-credit HAPPO requires a v14 or v15 environment")
+        self.reward_contract_version = str(contract_version)
         self.experiment_variant = str(self.config["experiment"]["variant"])
         t = self.config["training"]
         n = self.config["network"]
         e = self.config["experiment"]
-        if t.get("training_mode") != "fixed_rule_blue_heterogeneous_4v3_v14_happo":
-            raise ValueError("invalid v14 training_mode")
+        expected_mode = (
+            "fixed_rule_blue_heterogeneous_4v3_v15_happo"
+            if contract_version == REWARD_CONTRACT_VERSION_V15
+            else "fixed_rule_blue_heterogeneous_4v3_v14_happo"
+        )
+        if t.get("training_mode") != expected_mode:
+            raise ValueError(f"invalid {self.reward_contract_version} training_mode")
         if not bool(t.get("share_combat_actor", False)):
             raise ValueError("v14 requires share_combat_actor=true")
         if bool(t.get("recurrent_actor", False)):
@@ -119,8 +139,11 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
         self.sequence_chunk_length = 0
         self.obs_dim = OBS_DIM_V14
         self.gs_dim = GS_DIM_V14
-        self.reward_keys = REWARD_COMPONENT_KEYS_V14
-        self.agent_reward_keys = AGENT_REWARD_COMPONENT_KEYS_V14
+        if contract_version == REWARD_CONTRACT_VERSION_V15:
+            if str(t.get("credit_mode")) != CREDIT_MODE_ROLE_LOCAL:
+                raise ValueError("v15 requires credit_mode=role_local")
+            if str(t.get("team_reward_usage")) != "reporting_only":
+                raise ValueError("v15 requires team_reward_usage=reporting_only")
         self.device = resolve_device(str(e["device"]))
         torch.manual_seed(int(e["seed"]))
         if self.device.type == "cuda":
@@ -225,7 +248,7 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
         )
 
     def training_signature(self) -> dict[str, Any]:
-        return {
+        signature = {
             "checkpoint_family": CHECKPOINT_FAMILY_V14_HAPPO_4V3,
             "checkpoint_version": CHECKPOINT_VERSION_V14_HAPPO_4V3,
             "algorithm_variant": self.experiment_variant,
@@ -245,6 +268,17 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
             "obs_dim": self.obs_dim,
             "state_dim": self.gs_dim,
         }
+        # Preserve the exact historical v14 checkpoint signature. The v15-only
+        # fields make the reporting-only scalar contract explicit without
+        # invalidating existing v14A/v14B checkpoints.
+        if self.reward_contract_version == REWARD_CONTRACT_VERSION_V15:
+            signature.update(
+                {
+                    "reward_contract_version": self.reward_contract_version,
+                    "team_reward_usage": "reporting_only",
+                }
+            )
+        return signature
 
     @torch.no_grad()
     def _select_actions(self):
@@ -287,6 +321,9 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
         episodes: list[dict[str, Any]] = []
         component_sum = np.zeros(len(self.reward_keys), np.float64)
         agent_reward_sum = np.zeros(4, np.float64)
+        agent_component_sum = np.zeros(
+            (4, len(self.agent_reward_keys)), np.float64
+        )
         for _ in range(steps):
             actions, log_probs, values, _ = self._select_actions()
             current_alive = self.alive_masks[:, :4].copy()
@@ -318,6 +355,7 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
                 )
             component_sum += result.red_reward_components.sum(0)
             agent_reward_sum += result.agent_rewards.sum(0)
+            agent_component_sum += result.red_agent_reward_components.sum(0)
             self.obs = result.observations
             self.global_states = result.global_states
             self.alive_masks = result.alive_masks
@@ -369,6 +407,31 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
             self.last_rollout_reward_means[
                 f"mean_rollout_red_{slot}_agent_reward"
             ] = float(value / denom)
+        for slot in range(4):
+            for key, value in zip(
+                self.agent_reward_keys, agent_component_sum[slot]
+            ):
+                self.last_rollout_reward_means[
+                    f"mean_rollout_red_{slot}_{key}"
+                ] = float(value / denom)
+        if "support_state_reward" in self.agent_reward_keys:
+            self.last_rollout_reward_means["mean_rollout_support_state_reward"] = (
+                self.last_rollout_reward_means[
+                    "mean_rollout_red_0_support_state_reward"
+                ]
+            )
+            self.last_rollout_reward_means["mean_rollout_combat_state_reward"] = (
+                float(
+                    np.mean(
+                        [
+                            self.last_rollout_reward_means[
+                                f"mean_rollout_red_{slot}_combat_state_reward"
+                            ]
+                            for slot in (1, 2, 3)
+                        ]
+                    )
+                )
+            )
         return episodes
 
     def _update_credit_actors(
@@ -957,6 +1020,9 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
             "seed_manifest": self.seed_manifest,
             "reward_contract_version": self.reward_contract_version,
             "reward_contract": self.reward_contract,
+            "team_reward_usage": str(
+                self.config["training"].get("team_reward_usage", "training")
+            ),
         }
         (out / "run_summary.json").write_text(
             json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"

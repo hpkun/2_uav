@@ -70,20 +70,41 @@ class FunctionalHeterogeneous4v3V14MissionAlignedEnv(
 
     variant = "functional_heterogeneous_4v3_v14_mission_aligned_role_credit"
     reward_contract_version = REWARD_CONTRACT_VERSION_V14
+    default_config_path = (
+        "configs/heterogeneous_4v3_main_v14_mission_aligned_role_credit.yaml"
+    )
+    scenario_class = FunctionalHeterogeneous4v3V14Scenario
+    reward_component_keys = REWARD_COMPONENT_KEYS_V14
+    agent_reward_component_keys = AGENT_REWARD_COMPONENT_KEYS_V14
+
+    def _validate_config(self, config: dict[str, Any]) -> None:
+        validate_heterogeneous_4v3_v14_config(config)
+
+    def _resolve_reward_contract(self, config: dict[str, Any]) -> dict[str, Any]:
+        return resolved_reward_contract_v14(config)
+
+    def _empty_agent_components(self) -> dict[str, dict[str, float]]:
+        return {
+            agent_id: {
+                key: 0.0 for key in self.agent_reward_component_keys
+            }
+            for agent_id in RED_IDS_V14
+        }
 
     def __init__(
         self,
-        config_path: str | Path = "configs/heterogeneous_4v3_main_v14_mission_aligned_role_credit.yaml",
+        config_path: str | Path | None = None,
     ) -> None:
         # This mirrors only v12 construction. All transition, observation,
         # targeting, cue, lock, dynamics, and boundary methods are inherited.
-        self.config_path = str(config_path)
-        self.config = load_config(config_path)
-        validate_heterogeneous_4v3_v14_config(self.config)
-        self.reward_contract = resolved_reward_contract_v14(self.config)
+        resolved_path = self.default_config_path if config_path is None else config_path
+        self.config_path = str(resolved_path)
+        self.config = load_config(resolved_path)
+        self._validate_config(self.config)
+        self.reward_contract = self._resolve_reward_contract(self.config)
         self.profile = self.config["combat_profile"]
         simulation = self.config["simulation"]
-        self.scenario = FunctionalHeterogeneous4v3V14Scenario(self.config)
+        self.scenario = self.scenario_class(self.config)
         self.dynamics = PointMassDynamics(float(simulation.get("gravity", 9.81)))
         self.integrator = RK4Integrator(float(simulation["dt"]))
         self.controller = TargetStateController(
@@ -110,25 +131,25 @@ class FunctionalHeterogeneous4v3V14MissionAlignedEnv(
         self._support_cues = {cid: None for cid in RED_COMBAT_IDS_V14}
         self._last_formation_score = 0.0
         self._episode_reward_components = {
-            key: 0.0 for key in REWARD_COMPONENT_KEYS_V14
+            key: 0.0 for key in self.reward_component_keys
         }
         self._last_reward_components = {
-            key: 0.0 for key in REWARD_COMPONENT_KEYS_V14
+            key: 0.0 for key in self.reward_component_keys
         }
         self._last_raw_dense_reward = 0.0
         self._episode_metrics: dict[str, float] = {}
         self._episode_return = 0.0
         self._last_agent_rewards = {agent_id: 0.0 for agent_id in RED_IDS_V14}
-        self._last_agent_reward_components = _empty_agent_components()
+        self._last_agent_reward_components = self._empty_agent_components()
         self._episode_agent_returns = {agent_id: 0.0 for agent_id in RED_IDS_V14}
-        self._episode_agent_reward_components = _empty_agent_components()
+        self._episode_agent_reward_components = self._empty_agent_components()
 
     def reset(self, seed: int | None = None):
         values = super().reset(seed)
         self._last_agent_rewards = {agent_id: 0.0 for agent_id in RED_IDS_V14}
-        self._last_agent_reward_components = _empty_agent_components()
+        self._last_agent_reward_components = self._empty_agent_components()
         self._episode_agent_returns = {agent_id: 0.0 for agent_id in RED_IDS_V14}
-        self._episode_agent_reward_components = _empty_agent_components()
+        self._episode_agent_reward_components = self._empty_agent_components()
         for agent_id in RED_IDS_V14:
             self._episode_metrics[f"{agent_id}_boundary_hard_contacts"] = 0.0
             self._episode_metrics[f"{agent_id}_boundary_hard_contacts_step"] = 0.0
@@ -152,7 +173,7 @@ class FunctionalHeterogeneous4v3V14MissionAlignedEnv(
         killers: dict[str, str],
         team_components: dict[str, float],
     ) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
-        values = _empty_agent_components()
+        values = self._empty_agent_components()
         common = float(team_components["mission_outcome_reward"])
         for agent_id in RED_IDS_V14:
             values[agent_id]["common_mission_reward"] = common
@@ -307,8 +328,11 @@ class FunctionalHeterogeneous4v3V14MissionAlignedEnv(
         info["agent_reward_components"] = deepcopy(
             self._last_agent_reward_components
         )
-        info["reward_groups"] = reward_group_totals_v12(info["reward_components"])
+        info["reward_groups"] = self._reward_groups(info["reward_components"])
         return obs, state, masks, reward, done, truncated, info
+
+    def _reward_groups(self, components: dict[str, float]) -> dict[str, float]:
+        return reward_group_totals_v12(components)
 
     def _episode_summary(self, outcome, reason):
         summary = super()._episode_summary(outcome, reason)

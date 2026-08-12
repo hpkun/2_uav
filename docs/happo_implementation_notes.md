@@ -75,3 +75,32 @@ Checkpoints do not persist vector-worker or aircraft physical episode state. On 
 ## What this baseline does not claim
 
 This code is a baseline implementation for the current project environment. It does not claim to reproduce the original HAPPO paper's experimental results, and it does not add HARL-specific engineering modules beyond the HAPPO sequential update behavior needed here.
+# v15 compact paper-adapted reward
+
+The v15 main experiment keeps the complete v14B role-local training path:
+one Support MLP actor, one shared Combat MLP actor, per-agent GAE, a Support
+critic, one shared Combat critic, slot-local Combat PPO surrogates, and the
+joint Combat ratio only for the HAPPO preceding factor. The scalar team reward
+is the arithmetic mean of the four agent rewards and is reporting-only.
+
+The reward is a compact project adaptation of the TAM-HAPPO paper's separation
+between MAV Support/Safety/Event objectives and UAV air-combat-state/Event
+objectives. It is not claimed to reproduce the paper's full missile, altitude,
+speed, or evasion reward model, because those mechanisms are absent from this
+point-mass lock-based environment.
+
+For a living Combat agent with a valid target,
+`RA=clip(1-(ATA+AA)/pi,-1,1)`, `RD=2*distance_score_v11-1`, and
+`Rstate=0.02*(RA+RD)/2`. A living Combat without a valid target uses
+`RA=RD=-1`; a dead Combat has zero state reward. Its remaining active terms are
+`+8` for its own attributed blue kill, `+1` for every team blue kill, `-4` for
+its own death, and `-0.1` per own hard-boundary contact.
+
+For a living Support agent, `Rpos=2*formation_score-1`,
+`Raware=2*(direct-visible alive blue / alive blue)-1`, and
+`Rstate=0.01*(0.6*Rpos+0.4*Raware)`. With no living blue aircraft, awareness is
+zero. Its remaining active terms are the common `+1` team-kill contribution,
+`-4` own death, and `-0.1` per own hard-boundary contact. Terminal outcomes,
+lock/geometry deltas, half-lock, cue transitions, assisted kills, soft recovery,
+survival, and time are retained only as behavioral metrics and do not enter the
+v15 reward.

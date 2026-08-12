@@ -21,6 +21,30 @@ from ..environment_4v3_v14 import (
 from ..scenario_4v3_v14 import RED_IDS_V14
 
 
+def _environment_contract(config_path: str | Path):
+    config = load_config(config_path)
+    version = config.get("combat", {}).get("reward_contract_version")
+    if version == "v14_mission_aligned_role_credit":
+        return (
+            FunctionalHeterogeneous4v3V14MissionAlignedEnv,
+            REWARD_COMPONENT_KEYS_V14,
+            AGENT_REWARD_COMPONENT_KEYS_V14,
+        )
+    if version == "v15_paper_compact_attack_reward":
+        from ..environment_4v3_v15 import (
+            AGENT_REWARD_COMPONENT_KEYS_V15,
+            REWARD_COMPONENT_KEYS_V15,
+            FunctionalHeterogeneous4v3V15PaperCompactRewardEnv,
+        )
+
+        return (
+            FunctionalHeterogeneous4v3V15PaperCompactRewardEnv,
+            REWARD_COMPONENT_KEYS_V15,
+            AGENT_REWARD_COMPONENT_KEYS_V15,
+        )
+    raise ValueError(f"unsupported role-credit reward contract {version!r}")
+
+
 class VectorStepResult4v3V14(NamedTuple):
     observations: np.ndarray
     global_states: np.ndarray
@@ -48,29 +72,33 @@ def _actions_for_env(actions: np.ndarray) -> dict[str, np.ndarray]:
 def _hold(env: FunctionalHeterogeneous4v3V14MissionAlignedEnv):
     obs, state, masks = env._observations()
     return obs, state, masks, 0.0, False, False, {
-        "reward_components": {key: 0.0 for key in REWARD_COMPONENT_KEYS_V14},
+        "reward_components": {key: 0.0 for key in env.reward_component_keys},
         "agent_rewards": {agent_id: 0.0 for agent_id in RED_IDS_V14},
         "agent_reward_components": {
-            agent_id: {key: 0.0 for key in AGENT_REWARD_COMPONENT_KEYS_V14}
+            agent_id: {key: 0.0 for key in env.agent_reward_component_keys}
             for agent_id in RED_IDS_V14
         },
         "episode_summary": None,
     }
 
 
-def _pack(results: list[tuple[Any, ...]]) -> VectorStepResult4v3V14:
+def _pack(
+    results: list[tuple[Any, ...]],
+    reward_keys: tuple[str, ...] = REWARD_COMPONENT_KEYS_V14,
+    agent_reward_keys: tuple[str, ...] = AGENT_REWARD_COMPONENT_KEYS_V14,
+) -> VectorStepResult4v3V14:
     obs, states, masks, rewards, terms, truncs, infos = zip(*results)
     team_components = np.zeros(
-        (len(results), len(REWARD_COMPONENT_KEYS_V14)), dtype=np.float32
+        (len(results), len(reward_keys)), dtype=np.float32
     )
     agent_rewards = np.zeros((len(results), 4), dtype=np.float32)
     agent_components = np.zeros(
-        (len(results), 4, len(AGENT_REWARD_COMPONENT_KEYS_V14)), dtype=np.float32
+        (len(results), 4, len(agent_reward_keys)), dtype=np.float32
     )
     summaries: list[dict[str, Any] | None] = []
     valid = np.zeros(len(results), dtype=bool)
     for row, info in enumerate(infos):
-        for column, key in enumerate(REWARD_COMPONENT_KEYS_V14):
+        for column, key in enumerate(reward_keys):
             team_components[row, column] = float(
                 info.get("reward_components", {}).get(key, 0.0)
             )
@@ -79,7 +107,7 @@ def _pack(results: list[tuple[Any, ...]]) -> VectorStepResult4v3V14:
                 info.get("agent_rewards", {}).get(agent_id, 0.0)
             )
             values = info.get("agent_reward_components", {}).get(agent_id, {})
-            for column, key in enumerate(AGENT_REWARD_COMPONENT_KEYS_V14):
+            for column, key in enumerate(agent_reward_keys):
                 agent_components[row, slot, column] = float(values.get(key, 0.0))
         summary = info.get("episode_summary")
         summaries.append(summary)
@@ -106,7 +134,7 @@ def _pack(results: list[tuple[Any, ...]]) -> VectorStepResult4v3V14:
         result.red_agent_reward_components,
     )
     if not all(np.isfinite(value).all() for value in numeric):
-        raise FloatingPointError("v14 vector result must be finite")
+        raise FloatingPointError("role-credit vector result must be finite")
     return result
 
 
@@ -117,8 +145,11 @@ class LocalCombatVectorEnv4v3V14:
         self.config_path = str(config_path)
         self.num_envs = int(num_envs)
         self.seed = int(seed)
+        env_class, self.reward_keys, self.agent_reward_keys = _environment_contract(
+            config_path
+        )
         self.envs = [
-            FunctionalHeterogeneous4v3V14MissionAlignedEnv(config_path)
+            env_class(config_path)
             for _ in range(self.num_envs)
         ]
         self.reset()
@@ -154,7 +185,9 @@ class LocalCombatVectorEnv4v3V14:
                 if env._running
                 else _hold(env)
                 for index, env in enumerate(self.envs)
-            ]
+            ],
+            self.reward_keys,
+            self.agent_reward_keys,
         )
 
     def policy_modes(self):
@@ -179,8 +212,9 @@ class LocalCombatVectorEnv4v3V14:
 
 def _worker(conn, config_path: str, envs_per_worker: int, worker_index: int, seed: int):
     try:
+        env_class, reward_keys, agent_reward_keys = _environment_contract(config_path)
         envs = [
-            FunctionalHeterogeneous4v3V14MissionAlignedEnv(config_path)
+            env_class(config_path)
             for _ in range(envs_per_worker)
         ]
         for index, env in enumerate(envs):
@@ -215,7 +249,9 @@ def _worker(conn, config_path: str, envs_per_worker: int, worker_index: int, see
                             if envs[index]._running
                             else _hold(envs[index])
                             for index in range(envs_per_worker)
-                        ]
+                        ],
+                        reward_keys,
+                        agent_reward_keys,
                     )
                 )
             elif command == "policy_modes":
