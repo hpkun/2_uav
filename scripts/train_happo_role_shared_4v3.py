@@ -22,7 +22,11 @@ from uav_combat.happo.evaluation_4v3 import (
 )
 from uav_combat.happo.evaluation_role_shared_4v3 import evaluate_role_shared_happo_fixed_blue_4v3
 from uav_combat.happo.evaluation_v14_4v3 import evaluate_v14_happo_fixed_blue_4v3
-from uav_combat.happo.trainer_4v3 import compute_best_score_4v3
+from uav_combat.happo.trainer_4v3 import (
+    V15_BEST_SCORE_FIELDS_4V3,
+    V15_REWARD_CONTRACT_VERSION,
+    compute_experiment_best_score_4v3,
+)
 from uav_combat.happo.trainer_role_shared_4v3 import (
     CHECKPOINT_FAMILY_ROLE_SHARED_HAPPO_4V3,
     ROLE_POLICY_MAPPING,
@@ -117,6 +121,7 @@ def _evaluate(
     label: str,
     split: str,
     checkpoint: Path,
+    reward_contract_version: str,
 ) -> dict[str, Any]:
     seeds = evaluation_seeds_from_manifest(manifest, split)
     if _is_v14(cfg):
@@ -136,12 +141,77 @@ def _evaluate(
     _write_json(out / f"{label}_evaluation.json", {**summary, "label": label, "checkpoint": str(checkpoint), "checkpoint_sha256": _sha256(checkpoint)})
     _write_episode_csv(out / f"{label}_per_episode.csv", records)
     full = {**summary, "episode_records": records}
-    score, fields = compute_best_score_4v3(full)
+    score, fields = compute_experiment_best_score_4v3(
+        full, reward_contract_version
+    )
     trainer.evaluation_history.append({
         "label": label, "env_steps": trainer.env_steps, "summary": deepcopy(full),
         "score": list(score), "score_fields": fields, "checkpoint": str(checkpoint),
     })
     return full
+
+
+def _format_update_line(
+    trainer: Any, total: int, metrics: dict[str, Any], *, is_v15: bool
+) -> str:
+    prefix = f"env_steps={trainer.env_steps}/{total} update={trainer.update_count}"
+    if is_v15:
+        prefix += (
+            f" reward={float(metrics.get('mean_rollout_team_total_reward', 0.0)):.5f}"
+            f" combat_state_r={float(metrics.get('mean_rollout_combat_state_reward', 0.0)):.5f}"
+            f" support_state_r={float(metrics.get('mean_rollout_support_state_reward', 0.0)):.5f}"
+        )
+    return (
+        f"{prefix} order={metrics['group_update_order']} "
+        f"support_kl={metrics['support_kl']:.5f} "
+        f"combat_kl={metrics['combat_joint_kl']:.5f} "
+        f"entropy={metrics['entropy']:.4f}"
+    )
+
+
+def _update_best_from_latest_evaluation(
+    trainer: Any, checkpoint: Path, scheduled_env_steps: int
+) -> bool:
+    """Apply the score already produced by the single selector dispatch."""
+    entry = trainer.evaluation_history[-1]
+    score = tuple(float(value) for value in entry["score"])
+    if trainer.best_score is not None and score <= trainer.best_score:
+        return False
+    trainer.best_score = score
+    trainer.best_score_fields = dict(entry["score_fields"])
+    trainer.best_evaluation = entry["summary"]
+    trainer.best_checkpoint_name = checkpoint.name
+    trainer.best_scheduled_env_steps = int(scheduled_env_steps)
+    trainer.best_actual_env_steps = int(trainer.env_steps)
+    return True
+
+
+def _build_experiment_contract(
+    *,
+    checkpoint_family: str,
+    cfg: dict[str, Any],
+    env_cfg: dict[str, Any],
+    env_config: str,
+    train_config: str,
+    manifest_hash: str,
+) -> dict[str, Any]:
+    reward_contract_version = str(env_cfg["combat"]["reward_contract_version"])
+    contract = {
+        "checkpoint_family": checkpoint_family,
+        "checkpoint_version": 1,
+        "algorithm_variant": cfg["experiment"]["variant"],
+        "role_policy_mapping": ROLE_POLICY_MAPPING,
+        "environment_config": env_config,
+        "training_config": train_config,
+        "reward_contract_version": reward_contract_version,
+        "reward_contract": env_cfg["rewards"],
+        "training_credit_mode": cfg["training"].get("credit_mode"),
+        "team_reward_usage": cfg["training"].get("team_reward_usage", "training"),
+        "evaluation_seed_manifest_hash": manifest_hash,
+    }
+    if reward_contract_version == V15_REWARD_CONTRACT_VERSION:
+        contract["best_checkpoint_selection"] = list(V15_BEST_SCORE_FIELDS_4V3)
+    return contract
 
 
 def _append_metrics(path: Path, metrics: dict[str, Any], elapsed: float, start_steps: int) -> None:
@@ -193,17 +263,19 @@ def main() -> None:
     manifest = _manifest(cfg, out, args.seed_manifest)
     trainer_class = _trainer_class(cfg)
     checkpoint_family = CHECKPOINT_FAMILY_V14_HAPPO_4V3 if _is_v14(cfg) else CHECKPOINT_FAMILY_ROLE_SHARED_HAPPO_4V3
-    _write_json(out / "experiment_contract.json", {
-        "checkpoint_family": checkpoint_family,
-        "checkpoint_version": 1, "algorithm_variant": cfg["experiment"]["variant"],
-        "role_policy_mapping": ROLE_POLICY_MAPPING,
-        "environment_config": str(args.env_config), "training_config": str(args.train_config),
-        "reward_contract_version": env_cfg["combat"]["reward_contract_version"],
-        "reward_contract": env_cfg["rewards"],
-        "training_credit_mode": cfg["training"].get("credit_mode"),
-        "team_reward_usage": cfg["training"].get("team_reward_usage", "training"),
-        "evaluation_seed_manifest_hash": manifest["manifest_hash"],
-    })
+    reward_contract_version = str(env_cfg["combat"]["reward_contract_version"])
+    is_v15 = reward_contract_version == V15_REWARD_CONTRACT_VERSION
+    _write_json(
+        out / "experiment_contract.json",
+        _build_experiment_contract(
+            checkpoint_family=checkpoint_family,
+            cfg=cfg,
+            env_cfg=env_cfg,
+            env_config=str(args.env_config),
+            train_config=str(args.train_config),
+            manifest_hash=manifest["manifest_hash"],
+        ),
+    )
     trainer = trainer_class(args.env_config, cfg)
     trainer.seed_manifest = deepcopy(manifest)
     support_before = _parameter_snapshot(trainer.actors.support_actor)
@@ -226,10 +298,8 @@ def main() -> None:
             trainer.next_evaluation_env_steps = int(cfg["training"]["evaluation_interval_env_steps"])
             trainer.next_checkpoint_env_steps = int(cfg["training"]["checkpoint_interval_env_steps"])
             trainer.save_checkpoint(out / "initial.pt", scheduled_env_steps=0)
-            initial = _evaluate(trainer, args.env_config, cfg, manifest, out, "initial_selection", "selection", out / "initial.pt")
-            trainer.best_score, trainer.best_score_fields = compute_best_score_4v3(initial)
-            trainer.best_evaluation = initial; trainer.best_checkpoint_name = "initial.pt"
-            trainer.best_scheduled_env_steps = 0; trainer.best_actual_env_steps = 0
+            initial = _evaluate(trainer, args.env_config, cfg, manifest, out, "initial_selection", "selection", out / "initial.pt", reward_contract_version)
+            _update_best_from_latest_evaluation(trainer, out / "initial.pt", 0)
             trainer.save_checkpoint(out / "best.pt", is_best=True, scheduled_env_steps=0)
         total = int(cfg["training"]["total_env_steps"])
         eval_interval = int(cfg["training"]["evaluation_interval_env_steps"])
@@ -247,11 +317,7 @@ def main() -> None:
                 elapsed = time.perf_counter() - started
                 _append_metrics(out / "training_metrics.csv", metrics, elapsed, start_steps)
                 trainer.save_checkpoint(out / "latest.pt", scheduled_env_steps=trainer.env_steps)
-                print(
-                    f"env_steps={trainer.env_steps}/{total} update={trainer.update_count} "
-                    f"order={metrics['group_update_order']} support_kl={metrics['support_kl']:.5f} "
-                    f"combat_kl={metrics['combat_joint_kl']:.5f} entropy={metrics['entropy']:.4f}", flush=True,
-                )
+                print(_format_update_line(trainer, total, metrics, is_v15=is_v15), flush=True)
             hit_eval = trainer.env_steps == next_eval
             hit_checkpoint = trainer.env_steps == next_checkpoint
             if hit_checkpoint:
@@ -259,12 +325,10 @@ def main() -> None:
                 next_checkpoint += checkpoint_interval
             if hit_eval:
                 checkpoint = out / f"step_{trainer.env_steps:07d}.pt" if hit_checkpoint else out / "latest.pt"
-                summary = _evaluate(trainer, args.env_config, cfg, manifest, out, f"evaluation_selection_step_{trainer.env_steps:07d}", "selection", checkpoint)
-                score, fields = compute_best_score_4v3(summary)
-                if trainer.best_score is None or score > trainer.best_score:
-                    trainer.best_score = score; trainer.best_score_fields = fields; trainer.best_evaluation = summary
-                    trainer.best_checkpoint_name = checkpoint.name; trainer.best_scheduled_env_steps = trainer.env_steps
-                    trainer.best_actual_env_steps = trainer.env_steps
+                summary = _evaluate(trainer, args.env_config, cfg, manifest, out, f"evaluation_selection_step_{trainer.env_steps:07d}", "selection", checkpoint, reward_contract_version)
+                if _update_best_from_latest_evaluation(
+                    trainer, checkpoint, trainer.env_steps
+                ):
                     trainer.save_checkpoint(out / "best.pt", is_best=True, scheduled_env_steps=trainer.env_steps)
                 next_eval += eval_interval
             trainer.next_evaluation_env_steps = next_eval; trainer.next_checkpoint_env_steps = next_checkpoint
@@ -323,6 +387,38 @@ def main() -> None:
                             or hasattr(trainer.role_critics, "combat_critic")
                         ),
                     })
+                    if is_v15:
+                        combat_scale = float(
+                            trainer.reward_contract["combat_state"]["scale"]
+                        )
+                        combat_state_min = float(
+                            trainer.last_update_metrics[
+                                "min_rollout_combat_state_reward"
+                            ]
+                        )
+                        combat_state_max = float(
+                            trainer.last_update_metrics[
+                                "max_rollout_combat_state_reward"
+                            ]
+                        )
+                        smoke_validation.update({
+                            "combat_lock_quality_finite": bool(
+                                trainer.last_update_metrics[
+                                    "combat_lock_quality_finite"
+                                ]
+                            ),
+                            "combat_state_reward_in_bounds": bool(
+                                np.isfinite([combat_state_min, combat_state_max]).all()
+                                and combat_state_min >= -combat_scale - 1e-7
+                                and combat_state_max <= combat_scale + 1e-7
+                            ),
+                            "agent_returns_finite": bool(
+                                np.isfinite(trainer.buffer.returns).all()
+                            ),
+                            "terminal_reward_printed": "reward=" in _format_update_line(
+                                trainer, total, trainer.last_update_metrics, is_v15=True
+                            ),
+                        })
                 _write_json(out / "smoke_validation.json", smoke_validation)
             finally:
                 restored.close()
@@ -335,7 +431,7 @@ def main() -> None:
             try:
                 report.load_checkpoint(checkpoint)
                 for split in ("selection", "test"):
-                    summary = _evaluate(report, args.env_config, cfg, manifest, out, f"{checkpoint_name}_{split}", split, checkpoint)
+                    summary = _evaluate(report, args.env_config, cfg, manifest, out, f"{checkpoint_name}_{split}", split, checkpoint, reward_contract_version)
                     final_entries.append(report.evaluation_history[-1])
             finally:
                 report.close()

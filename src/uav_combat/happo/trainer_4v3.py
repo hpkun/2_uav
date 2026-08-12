@@ -35,6 +35,15 @@ from .trainer_3v3 import (
 
 CHECKPOINT_FAMILY_HAPPO_4V3 = "functional_heterogeneous_4v3_v9_happo"
 CHECKPOINT_VERSION_HAPPO_4V3 = 1
+V15_REWARD_CONTRACT_VERSION = "v15_paper_compact_attack_reward"
+V15_BEST_SCORE_FIELDS_4V3 = (
+    "strict_full_elimination_rate",
+    "at_least_two_kill_rate",
+    "any_kill_rate",
+    "mean_red_kills",
+    "half_lock_episode_rate",
+    "mean_max_lock_progress",
+)
 
 
 def _restore_cuda_rng_state(states: Any) -> None:
@@ -116,6 +125,25 @@ def compute_best_score_4v3(summary: dict[str, float]) -> tuple[tuple[float, ...]
         "negative_mean_episode_length": -float(summary.get("mean_episode_length", 0.0)),
     }
     return tuple(fields[key] for key in best_score_fields_4v3()), fields
+
+
+def compute_best_score_v15_4v3(
+    summary: dict[str, float],
+) -> tuple[tuple[float, ...], dict[str, float]]:
+    """Attack-only v15 selector; timeout wins and returns are intentionally absent."""
+    fields = {
+        key: float(summary.get(key, 0.0)) for key in V15_BEST_SCORE_FIELDS_4V3
+    }
+    return tuple(fields[key] for key in V15_BEST_SCORE_FIELDS_4V3), fields
+
+
+def compute_experiment_best_score_4v3(
+    summary: dict[str, float], reward_contract_version: str | None
+) -> tuple[tuple[float, ...], dict[str, float]]:
+    """Single selector dispatch used by role-shared 4v3 experiments."""
+    if reward_contract_version == V15_REWARD_CONTRACT_VERSION:
+        return compute_best_score_v15_4v3(summary)
+    return compute_best_score_4v3(summary)
 
 
 def _summarize_v11_episodes(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -845,6 +873,9 @@ __all__ = [
     "CHECKPOINT_FAMILY_HAPPO_4V3",
     "HAPPO4v3Trainer",
     "best_score_fields_4v3",
+    "compute_best_score_v15_4v3",
+    "compute_experiment_best_score_4v3",
     "compute_best_score_4v3",
     "summarize_4v3_episodes",
+    "V15_BEST_SCORE_FIELDS_4V3",
 ]

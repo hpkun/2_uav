@@ -324,6 +324,14 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
         agent_component_sum = np.zeros(
             (4, len(self.agent_reward_keys)), np.float64
         )
+        combat_state_index = (
+            self.agent_reward_keys.index("combat_state_reward")
+            if "combat_state_reward" in self.agent_reward_keys
+            else None
+        )
+        combat_state_min = float("inf")
+        combat_state_max = float("-inf")
+        combat_state_finite = True
         for _ in range(steps):
             actions, log_probs, values, _ = self._select_actions()
             current_alive = self.alive_masks[:, :4].copy()
@@ -356,6 +364,15 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
             component_sum += result.red_reward_components.sum(0)
             agent_reward_sum += result.agent_rewards.sum(0)
             agent_component_sum += result.red_agent_reward_components.sum(0)
+            if combat_state_index is not None:
+                combat_state = result.red_agent_reward_components[
+                    :, 1:4, combat_state_index
+                ]
+                combat_state_finite = bool(
+                    combat_state_finite and np.isfinite(combat_state).all()
+                )
+                combat_state_min = min(combat_state_min, float(combat_state.min()))
+                combat_state_max = max(combat_state_max, float(combat_state.max()))
             self.obs = result.observations
             self.global_states = result.global_states
             self.alive_masks = result.alive_masks
@@ -431,6 +448,23 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
                         ]
                     )
                 )
+            )
+        if combat_state_index is not None:
+            scale = float(self.reward_contract.get("combat_state", {}).get("scale", 0.02))
+            self.last_rollout_reward_means.update(
+                {
+                    "min_rollout_combat_state_reward": combat_state_min,
+                    "max_rollout_combat_state_reward": combat_state_max,
+                    "combat_lock_quality_finite": float(
+                        combat_state_finite
+                        and np.isfinite(
+                            [
+                                (combat_state_min / scale + 1.0) / 2.0,
+                                (combat_state_max / scale + 1.0) / 2.0,
+                            ]
+                        ).all()
+                    ),
+                }
             )
         return episodes
 

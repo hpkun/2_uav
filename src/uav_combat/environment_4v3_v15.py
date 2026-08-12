@@ -6,7 +6,7 @@ from typing import Any
 
 import numpy as np
 
-from .environment_4v3_v11 import distance_score_v11
+from .environment_4v3_v11 import distance_score_v11, lock_quality_v11
 from .environment_4v3_v12 import DEATH_LOCK_V12
 from .environment_4v3_v14 import (
     BLUE_TEAM_SIZE_V14,
@@ -34,16 +34,27 @@ RED_TEAM_SIZE_V15 = RED_TEAM_SIZE_V14
 BLUE_TEAM_SIZE_V15 = BLUE_TEAM_SIZE_V14
 
 
-def angle_state_score_v15(ata: float, aa: float) -> float:
-    return float(np.clip(1.0 - (float(ata) + float(aa)) / np.pi, -1.0, 1.0))
+def angle_state_score_v15(
+    ata: float, aa: float, profile: dict[str, Any]
+) -> float:
+    """Diagnostic angle score using the same fade limits as lock mechanics."""
+    ata_quality = float(
+        np.clip(1.0 - float(ata) / float(profile["lock_ata_fade_max"]), 0.0, 1.0)
+    )
+    aa_quality = float(
+        np.clip(1.0 - float(aa) / float(profile["lock_aa_fade_max"]), 0.0, 1.0)
+    )
+    return float(2.0 * ata_quality * aa_quality - 1.0)
 
 
 def distance_state_score_v15(distance: float, profile: dict[str, Any]) -> float:
     return float(2.0 * distance_score_v11(distance, profile) - 1.0)
 
 
-def combat_state_reward_v15(angle_score: float, distance_score: float) -> float:
-    return float(0.02 * (float(angle_score) + float(distance_score)) / 2.0)
+def combat_state_reward_v15(lock_quality: float, scale: float = 0.02) -> float:
+    """Active current-state reward derived only from instantaneous lock quality."""
+    quality = float(np.clip(lock_quality, 0.0, 1.0))
+    return float(float(scale) * (2.0 * quality - 1.0))
 
 
 def support_state_reward_v15(position_score: float, awareness_score: float) -> float:
@@ -155,21 +166,31 @@ class FunctionalHeterogeneous4v3V15PaperCompactRewardEnv(
             if not self._alive(combat_id):
                 continue
             target_id = self.targets.get(combat_id)
-            if target_id is None or not self._alive(target_id):
+            if target_id not in BLUE_IDS_V15 or not self._alive(target_id):
                 angle = -1.0
                 distance = -1.0
+                lock_quality = 0.0
             else:
+                attacker_state = self._by_id(combat_id).state
+                target_state = self._by_id(target_id).state
                 geometry = compute_pairwise_geometry(
-                    self._by_id(combat_id).state, self._by_id(target_id).state
+                    attacker_state, target_state
                 )
-                angle = angle_state_score_v15(geometry.ata, geometry.aa)
+                angle = angle_state_score_v15(
+                    geometry.ata, geometry.aa, self.profile
+                )
                 distance = distance_state_score_v15(
                     geometry.distance, self.profile
+                )
+                # Reward and accumulation deliberately share the exact same
+                # source of truth for instantaneous lock feasibility.
+                lock_quality = lock_quality_v11(
+                    attacker_state, target_state, self.profile
                 )
             values[combat_id]["angle_state_reward"] = angle
             values[combat_id]["distance_state_reward"] = distance
             values[combat_id]["combat_state_reward"] = combat_state_reward_v15(
-                angle, distance
+                lock_quality, self.reward_contract["combat_state"]["scale"]
             )
 
         position, awareness, support_state = self._support_state_components(direct)
