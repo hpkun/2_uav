@@ -26,6 +26,7 @@ from uav_combat.happo.trainer_4v3 import (
     V15_BEST_SCORE_FIELDS_4V3,
     V15_REWARD_CONTRACT_VERSION,
     V16_REWARD_CONTRACT_VERSION,
+    V17_REWARD_CONTRACT_VERSION,
     compute_experiment_best_score_4v3,
 )
 from uav_combat.happo.trainer_role_shared_4v3 import (
@@ -107,6 +108,7 @@ def _is_v14(cfg: dict[str, Any]) -> bool:
         "fixed_rule_blue_heterogeneous_4v3_v14_happo",
         "fixed_rule_blue_heterogeneous_4v3_v15_happo",
         "fixed_rule_blue_heterogeneous_4v3_v16_happo",
+        "fixed_rule_blue_heterogeneous_4v3_v17_happo",
     }
 
 
@@ -154,10 +156,22 @@ def _evaluate(
 
 
 def _format_update_line(
-    trainer: Any, total: int, metrics: dict[str, Any], *, is_v15: bool
+    trainer: Any,
+    total: int,
+    metrics: dict[str, Any],
+    *,
+    is_v15: bool,
+    is_v17: bool = False,
 ) -> str:
     prefix = f"env_steps={trainer.env_steps}/{total} update={trainer.update_count}"
-    if is_v15:
+    if is_v17:
+        prefix += (
+            f" reward={float(metrics.get('mean_rollout_team_total_reward', 0.0)):.5f}"
+            f" combat_sit_r={float(metrics.get('mean_rollout_combat_situation_reward', 0.0)):.5f}"
+            f" support_sit_r={float(metrics.get('mean_rollout_support_situation_reward', 0.0)):.5f}"
+            f" mission_r={float(metrics.get('mean_rollout_mission_reward', 0.0)):.5f}"
+        )
+    elif is_v15:
         prefix += (
             f" reward={float(metrics.get('mean_rollout_team_total_reward', 0.0)):.5f}"
             f" combat_state_r={float(metrics.get('mean_rollout_combat_state_reward', 0.0)):.5f}"
@@ -212,10 +226,15 @@ def _build_experiment_contract(
         "evaluation_seed_manifest_hash": manifest_hash,
     }
     if reward_contract_version in {
-        V15_REWARD_CONTRACT_VERSION, V16_REWARD_CONTRACT_VERSION
+        V15_REWARD_CONTRACT_VERSION,
+        V16_REWARD_CONTRACT_VERSION,
+        V17_REWARD_CONTRACT_VERSION,
     }:
         contract["best_checkpoint_selection"] = list(V15_BEST_SCORE_FIELDS_4V3)
-    if reward_contract_version == V16_REWARD_CONTRACT_VERSION:
+    if reward_contract_version in {
+        V16_REWARD_CONTRACT_VERSION,
+        V17_REWARD_CONTRACT_VERSION,
+    }:
         contract["observation_contract"] = env_cfg["combat"][
             "observation_contract"
         ]
@@ -275,6 +294,7 @@ def main() -> None:
     is_v15 = reward_contract_version in {
         V15_REWARD_CONTRACT_VERSION, V16_REWARD_CONTRACT_VERSION
     }
+    is_v17 = reward_contract_version == V17_REWARD_CONTRACT_VERSION
     _write_json(
         out / "experiment_contract.json",
         _build_experiment_contract(
@@ -327,7 +347,16 @@ def main() -> None:
                 elapsed = time.perf_counter() - started
                 _append_metrics(out / "training_metrics.csv", metrics, elapsed, start_steps)
                 trainer.save_checkpoint(out / "latest.pt", scheduled_env_steps=trainer.env_steps)
-                print(_format_update_line(trainer, total, metrics, is_v15=is_v15), flush=True)
+                print(
+                    _format_update_line(
+                        trainer,
+                        total,
+                        metrics,
+                        is_v15=is_v15,
+                        is_v17=is_v17,
+                    ),
+                    flush=True,
+                )
             hit_eval = trainer.env_steps == next_eval
             hit_checkpoint = trainer.env_steps == next_checkpoint
             if hit_checkpoint:
@@ -434,6 +463,59 @@ def main() -> None:
                                 trainer, total, trainer.last_update_metrics, is_v15=True
                             ),
                         })
+                    if is_v17:
+                        situation_scale = float(
+                            trainer.reward_contract["situation"]["scale"]
+                        )
+                        situation_min = float(
+                            trainer.last_update_metrics[
+                                "min_rollout_combat_situation_reward"
+                            ]
+                        )
+                        situation_max = float(
+                            trainer.last_update_metrics[
+                                "max_rollout_combat_situation_reward"
+                            ]
+                        )
+                        update_line = _format_update_line(
+                            trainer,
+                            total,
+                            trainer.last_update_metrics,
+                            is_v15=False,
+                            is_v17=True,
+                        )
+                        smoke_validation.update(
+                            {
+                                "combat_situation_finite": bool(
+                                    trainer.last_update_metrics[
+                                        "combat_situation_finite"
+                                    ]
+                                ),
+                                "combat_situation_reward_in_bounds": bool(
+                                    np.isfinite([situation_min, situation_max]).all()
+                                    and situation_min >= -situation_scale - 1e-7
+                                    and situation_max <= situation_scale + 1e-7
+                                ),
+                                "agent_returns_finite": bool(
+                                    np.isfinite(trainer.buffer.returns).all()
+                                ),
+                                "v17_reward_log_fields_present": all(
+                                    field in update_line
+                                    for field in (
+                                        "reward=",
+                                        "combat_sit_r=",
+                                        "support_sit_r=",
+                                        "mission_r=",
+                                        "support_kl=",
+                                        "combat_kl=",
+                                        "entropy=",
+                                    )
+                                ),
+                                "legacy_combat_state_log_absent": (
+                                    "combat_state_r=" not in update_line
+                                ),
+                            }
+                        )
                 _write_json(out / "smoke_validation.json", smoke_validation)
             finally:
                 restored.close()

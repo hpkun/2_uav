@@ -57,6 +57,18 @@ def _environment_contract(config_path: str | Path):
             else FunctionalHeterogeneous4v3V16APositiveLockQualityRewardEnv
         )
         return env_class, REWARD_COMPONENT_KEYS_V16, AGENT_REWARD_COMPONENT_KEYS_V16
+    if version == "v17_role_situation_event_mission_reward":
+        from ..environment_4v3_v17 import (
+            AGENT_REWARD_COMPONENT_KEYS_V17,
+            REWARD_COMPONENT_KEYS_V17,
+            FunctionalHeterogeneous4v3V17RoleSituationEventMissionRewardEnv,
+        )
+
+        return (
+            FunctionalHeterogeneous4v3V17RoleSituationEventMissionRewardEnv,
+            REWARD_COMPONENT_KEYS_V17,
+            AGENT_REWARD_COMPONENT_KEYS_V17,
+        )
     raise ValueError(f"unsupported role-credit reward contract {version!r}")
 
 

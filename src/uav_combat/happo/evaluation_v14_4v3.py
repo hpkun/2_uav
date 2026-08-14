@@ -58,6 +58,19 @@ def _evaluation_env_class(env_config: str | Path):
             else FunctionalHeterogeneous4v3V16APositiveLockQualityRewardEnv
         )
         return type("_RoleMetricEnvV16", (_RoleMetricMixin, base), {})
+    if version == "v17_role_situation_event_mission_reward":
+        from ..environment_4v3_v17 import (
+            FunctionalHeterogeneous4v3V17RoleSituationEventMissionRewardEnv,
+        )
+
+        return type(
+            "_RoleMetricEnvV17",
+            (
+                _RoleMetricMixin,
+                FunctionalHeterogeneous4v3V17RoleSituationEventMissionRewardEnv,
+            ),
+            {},
+        )
     raise ValueError(f"unsupported evaluation reward contract {version!r}")
 
 
@@ -261,6 +274,29 @@ def evaluate_v14_happo_fixed_blue_4v3(
                 "team_kill_reward",
                 "death_penalty",
                 "boundary_penalty",
+            ):
+                summary[f"mean_agent_{key}"] = float(
+                    np.mean(
+                        [summary[f"mean_red_{slot}_{key}"] for slot in range(4)]
+                    )
+                )
+        if "mean_red_0_support_situation_reward" in summary:
+            summary["mean_support_situation_reward"] = summary[
+                "mean_red_0_support_situation_reward"
+            ]
+            summary["mean_combat_situation_reward"] = float(
+                np.mean(
+                    [
+                        summary[f"mean_red_{slot}_combat_situation_reward"]
+                        for slot in (1, 2, 3)
+                    ]
+                )
+            )
+            for key in (
+                "own_kill_reward",
+                "support_team_kill_reward",
+                "death_penalty",
+                "mission_reward",
             ):
                 summary[f"mean_agent_{key}"] = float(
                     np.mean(
