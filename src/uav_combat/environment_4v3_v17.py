@@ -207,11 +207,13 @@ class FunctionalHeterogeneous4v3V17RoleSituationEventMissionRewardEnv(
                     events["own_blue_kill"]
                 )
                 blue_kills += 1
-        support["support_team_kill_reward"] = (
-            float(events["support_team_kill_total_cap"])
-            / float(BLUE_TEAM_SIZE_V17)
-            * float(blue_kills)
-        )
+        support_active_this_step = self._alive("red_0") or "red_0" in deaths
+        if support_active_this_step:
+            support["support_team_kill_reward"] = (
+                float(events["support_team_kill_total_cap"])
+                / float(BLUE_TEAM_SIZE_V17)
+                * float(blue_kills)
+            )
 
         for agent_id in deaths:
             if agent_id in RED_IDS_V17:

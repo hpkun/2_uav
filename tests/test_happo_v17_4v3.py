@@ -197,6 +197,53 @@ def test_v17_event_credit_is_strictly_role_local():
     assert rows["red_2"]["death_penalty"] == -1.0
 
 
+def test_v17_support_alive_receives_team_kill_event():
+    env = FunctionalHeterogeneous4v3V17RoleSituationEventMissionRewardEnv(ENV_V17)
+    env.reset(1710)
+    assert env._alive("red_0")
+    _reward_call(env, killers={"blue_0": "red_1"})
+    assert env._last_agent_reward_components["red_0"][
+        "support_team_kill_reward"
+    ] == pytest.approx(1.0 / 3.0)
+
+
+def test_v17_support_same_step_death_still_receives_team_kill_event():
+    env = FunctionalHeterogeneous4v3V17RoleSituationEventMissionRewardEnv(ENV_V17)
+    env.reset(1711)
+    env._by_id("red_0").state.alive = False
+    _reward_call(
+        env,
+        deaths={"red_0": 1},
+        killers={"blue_0": "red_1"},
+    )
+    support = env._last_agent_reward_components["red_0"]
+    assert support["support_team_kill_reward"] == pytest.approx(1.0 / 3.0)
+    assert support["death_penalty"] == -1.0
+
+
+def test_v17_support_prior_dead_receives_no_future_team_kill_event():
+    env = FunctionalHeterogeneous4v3V17RoleSituationEventMissionRewardEnv(ENV_V17)
+    env.reset(1712)
+    env._by_id("red_0").state.alive = False
+    _reward_call(env, killers={"blue_0": "red_1"})
+    assert env._last_agent_reward_components["red_0"][
+        "support_team_kill_reward"
+    ] == 0.0
+
+
+def test_v17_prior_dead_support_keeps_common_terminal_mission_credit(monkeypatch):
+    env = FunctionalHeterogeneous4v3V17RoleSituationEventMissionRewardEnv(ENV_V17)
+    env.reset(1713)
+    env._by_id("red_0").state.alive = False
+    monkeypatch.setattr(
+        env, "_terminal_result", lambda: (True, "red", "red_full_elimination")
+    )
+    _reward_call(env, killers={"blue_0": "red_1"})
+    support = env._last_agent_reward_components["red_0"]
+    assert support["support_team_kill_reward"] == 0.0
+    assert support["mission_reward"] == 3.0
+
+
 @pytest.mark.parametrize(
     ("reason", "expected"),
     [
