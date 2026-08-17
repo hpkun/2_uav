@@ -38,6 +38,7 @@ CHECKPOINT_VERSION_HAPPO_4V3 = 1
 V15_REWARD_CONTRACT_VERSION = "v15_paper_compact_attack_reward"
 V16_REWARD_CONTRACT_VERSION = "v16_positive_lock_quality_reward"
 V17_REWARD_CONTRACT_VERSION = "v17_role_situation_event_mission_reward"
+V18_REWARD_CONTRACT_VERSION = "v18_role_situation_event_mission_reward"
 V15_BEST_SCORE_FIELDS_4V3 = (
     "strict_full_elimination_rate",
     "at_least_two_kill_rate",
@@ -147,6 +148,7 @@ def compute_experiment_best_score_4v3(
         V15_REWARD_CONTRACT_VERSION,
         V16_REWARD_CONTRACT_VERSION,
         V17_REWARD_CONTRACT_VERSION,
+        V18_REWARD_CONTRACT_VERSION,
     }:
         return compute_best_score_v15_4v3(summary)
     return compute_best_score_4v3(summary)
@@ -886,6 +888,7 @@ __all__ = [
     "compute_experiment_best_score_4v3",
     "V16_REWARD_CONTRACT_VERSION",
     "V17_REWARD_CONTRACT_VERSION",
+    "V18_REWARD_CONTRACT_VERSION",
     "compute_best_score_4v3",
     "summarize_4v3_episodes",
     "V15_BEST_SCORE_FIELDS_4V3",

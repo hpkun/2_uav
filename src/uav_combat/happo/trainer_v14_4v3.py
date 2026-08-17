@@ -43,6 +43,12 @@ from ..scenario_4v3_v17 import (
     REWARD_CONTRACT_VERSION_V17,
     resolved_reward_contract_v17,
 )
+from ..scenario_4v3_v18 import (
+    AGENT_REWARD_COMPONENT_KEYS_V18,
+    REWARD_COMPONENT_KEYS_V18,
+    REWARD_CONTRACT_VERSION_V18,
+    resolved_reward_contract_v18,
+)
 from .metrics import explained_variance
 from .networks import CentralizedValueCritic
 from .role_credit_buffer import (
@@ -50,8 +56,9 @@ from .role_credit_buffer import (
     normalize_role_advantages,
 )
 from .role_credit_networks import RoleSharedCentralizedCritics4v3
-from .role_shared_buffer import RoleSharedRolloutBuffer4v3
-from .role_shared_networks import RoleSharedHAPPOActors
+from .recurrent_role_credit_buffer import RecurrentAgentCreditRolloutBuffer4v3
+from .role_shared_buffer import RoleSharedRolloutBuffer4v3, SequenceChunk
+from .role_shared_networks import RoleHiddenState, RoleSharedHAPPOActors
 from .trainer_3v3 import ppo_clipped_policy_loss, sha256_file, signature_mismatches
 from .trainer_role_shared_4v3 import (
     ROLE_POLICY_MAPPING,
@@ -133,9 +140,15 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
             )
             self.reward_keys = REWARD_COMPONENT_KEYS_V17
             self.agent_reward_keys = AGENT_REWARD_COMPONENT_KEYS_V17
+        elif contract_version == REWARD_CONTRACT_VERSION_V18:
+            self.reward_contract = resolved_reward_contract_v18(
+                self.env_contract_config
+            )
+            self.reward_keys = REWARD_COMPONENT_KEYS_V18
+            self.agent_reward_keys = AGENT_REWARD_COMPONENT_KEYS_V18
         else:
             raise ValueError(
-                "role-credit HAPPO requires a v14, v15, v16, or v17 environment"
+                "role-credit HAPPO requires a v14, v15, v16, v17, or v18 environment"
             )
         self.reward_contract_version = str(contract_version)
         self.experiment_variant = str(self.config["experiment"]["variant"])
@@ -145,6 +158,8 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
         expected_mode = (
             "fixed_rule_blue_heterogeneous_4v3_v17_happo"
             if contract_version == REWARD_CONTRACT_VERSION_V17
+            else "fixed_rule_blue_heterogeneous_4v3_v18_happo"
+            if contract_version == REWARD_CONTRACT_VERSION_V18
             else
             "fixed_rule_blue_heterogeneous_4v3_v16_happo"
             if contract_version == REWARD_CONTRACT_VERSION_V16
@@ -157,24 +172,28 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
             raise ValueError(f"invalid {self.reward_contract_version} training_mode")
         if not bool(t.get("share_combat_actor", False)):
             raise ValueError("v14 requires share_combat_actor=true")
-        if bool(t.get("recurrent_actor", False)):
-            raise ValueError("v14A/v14B require recurrent_actor=false")
+        recurrent_requested = bool(t.get("recurrent_actor", False))
+        if recurrent_requested and contract_version != REWARD_CONTRACT_VERSION_V18:
+            raise ValueError("only v18 role-local HAPPO enables recurrent_actor")
+        if contract_version == REWARD_CONTRACT_VERSION_V18 and not recurrent_requested:
+            raise ValueError("v18 requires recurrent_actor=true")
         if int(t.get("team_size", -1)) != 4:
             raise ValueError("v14 requires team_size=4")
         self.credit_mode = str(t.get("credit_mode", ""))
         if self.credit_mode not in {CREDIT_MODE_TEAM, CREDIT_MODE_ROLE_LOCAL}:
             raise ValueError("v14 credit_mode must be team or role_local")
-        self.recurrent = False
-        self.mask_inactive_hidden = True
-        self.recurrent_hidden_dim = 0
-        self.recurrent_num_layers = 0
-        self.sequence_chunk_length = 0
+        self.recurrent = recurrent_requested
+        self.mask_inactive_hidden = bool(t.get("mask_inactive_hidden", True))
+        self.recurrent_hidden_dim = int(t.get("recurrent_hidden_dim", 128)) if self.recurrent else 0
+        self.recurrent_num_layers = int(t.get("recurrent_num_layers", 1)) if self.recurrent else 0
+        self.sequence_chunk_length = int(t.get("sequence_chunk_length", 32)) if self.recurrent else 0
         self.obs_dim = OBS_DIM_V14
         self.gs_dim = GS_DIM_V14
         if contract_version in {
             REWARD_CONTRACT_VERSION_V15,
             REWARD_CONTRACT_VERSION_V16,
             REWARD_CONTRACT_VERSION_V17,
+            REWARD_CONTRACT_VERSION_V18,
         }:
             if str(t.get("credit_mode")) != CREDIT_MODE_ROLE_LOCAL:
                 raise ValueError("v15/v16/v17 requires credit_mode=role_local")
@@ -207,7 +226,9 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
             log_std_init=float(n["log_std_init"]),
             log_std_min=float(n["log_std_min"]),
             log_std_max=float(n["log_std_max"]),
-            recurrent=False,
+            recurrent=self.recurrent,
+            recurrent_hidden_dim=self.recurrent_hidden_dim or 128,
+            recurrent_num_layers=self.recurrent_num_layers or 1,
         ).to(self.device)
         if self.credit_mode == CREDIT_MODE_TEAM:
             self.critic: nn.Module = CentralizedValueCritic(
@@ -245,7 +266,7 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
         )
         self.buffer = self._new_buffer(self.rollout_steps)
         self.obs, self.global_states, self.alive_masks = self.envs.reset()
-        self.hidden = None
+        self.hidden = self.actors.initial_hidden(self.num_envs, self.device)
         self.hidden_reset_masks = np.zeros((self.num_envs, 4), np.float32)
         self.current_episode_seeds = [
             int(e["seed"]) + i for i in range(self.num_envs)
@@ -281,6 +302,14 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
             return RoleSharedRolloutBuffer4v3(
                 steps, self.num_envs, self.obs_dim, self.gs_dim, recurrent=False
             )
+        if self.recurrent:
+            return RecurrentAgentCreditRolloutBuffer4v3(
+                steps,
+                self.num_envs,
+                self.obs_dim,
+                self.gs_dim,
+                self.recurrent_hidden_dim,
+            )
         return AgentCreditRolloutBuffer4v3(
             steps, self.num_envs, self.obs_dim, self.gs_dim
         )
@@ -300,7 +329,7 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
                 else "support_plus_shared_combat"
             ),
             "share_combat_actor": True,
-            "recurrent_actor": False,
+            "recurrent_actor": self.recurrent,
             "num_envs": self.num_envs,
             "rollout_steps": self.rollout_steps,
             "obs_dim": self.obs_dim,
@@ -336,6 +365,20 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
                     "team_reward_usage": "reporting_only",
                 }
             )
+        elif self.reward_contract_version == REWARD_CONTRACT_VERSION_V18:
+            signature.update(
+                {
+                    "reward_contract_version": self.reward_contract_version,
+                    "observation_contract": self.env_contract_config["combat"][
+                        "observation_contract"
+                    ],
+                    "team_reward_usage": "reporting_only",
+                    "recurrent_hidden_dim": self.recurrent_hidden_dim,
+                    "recurrent_num_layers": self.recurrent_num_layers,
+                    "sequence_chunk_length": self.sequence_chunk_length,
+                    "mask_inactive_hidden": self.mask_inactive_hidden,
+                }
+            )
         return signature
 
     @torch.no_grad()
@@ -346,8 +389,11 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
         alive = torch.as_tensor(
             self.alive_masks[:, :4], dtype=torch.float32, device=self.device
         )
-        actions, log_probs, _ = self.actors.sample_actions(
-            obs, alive, None, None
+        reset = torch.as_tensor(
+            self.hidden_reset_masks, dtype=torch.float32, device=self.device
+        )
+        actions, log_probs, next_hidden = self.actors.sample_actions(
+            obs, alive, self.hidden, reset
         )
         states = torch.as_tensor(
             self.global_states, dtype=torch.float32, device=self.device
@@ -361,7 +407,7 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
             actions.cpu().numpy().astype(np.float32),
             log_probs.cpu().numpy().astype(np.float32),
             values.cpu().numpy().astype(np.float32),
-            None,
+            next_hidden,
         )
 
     def collect_rollout(self, max_env_steps: int | None = None):
@@ -399,7 +445,8 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
         combat_situation_max = float("-inf")
         combat_situation_finite = True
         for _ in range(steps):
-            actions, log_probs, values, _ = self._select_actions()
+            support_hidden, combat_hidden = self._hidden_numpy()
+            actions, log_probs, values, next_hidden = self._select_actions()
             current_alive = self.alive_masks[:, :4].copy()
             result = self.envs.step(actions)
             dones = result.terminated | result.truncated
@@ -416,17 +463,33 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
                     dones,
                 )
             else:
-                self.buffer.add(
-                    self.obs[:, :4],
-                    self.global_states,
-                    actions,
-                    log_probs,
-                    current_alive,
-                    result.team_rewards,
-                    result.agent_rewards,
-                    values,
-                    dones,
-                )
+                if self.recurrent:
+                    self.buffer.add(
+                        self.obs[:, :4],
+                        self.global_states,
+                        actions,
+                        log_probs,
+                        current_alive,
+                        self.hidden_reset_masks,
+                        result.team_rewards,
+                        result.agent_rewards,
+                        values,
+                        dones,
+                        support_hidden_before=support_hidden,
+                        combat_hidden_before=combat_hidden,
+                    )
+                else:
+                    self.buffer.add(
+                        self.obs[:, :4],
+                        self.global_states,
+                        actions,
+                        log_probs,
+                        current_alive,
+                        result.team_rewards,
+                        result.agent_rewards,
+                        values,
+                        dones,
+                    )
             component_sum += result.red_reward_components.sum(0)
             agent_reward_sum += result.agent_rewards.sum(0)
             agent_component_sum += result.red_agent_reward_components.sum(0)
@@ -460,6 +523,13 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
                 * self.alive_masks[:, :4]
                 * (~dones).astype(np.float32)[:, None]
             )
+            self.hidden = next_hidden
+            if self.hidden is not None and self.mask_inactive_hidden:
+                hidden_mask = torch.as_tensor(
+                    continuation, dtype=torch.float32, device=self.device
+                )
+                self.hidden.support.mul_(hidden_mask[:, 0:1])
+                self.hidden.combat.mul_(hidden_mask[:, 1:4].unsqueeze(-1))
             self.hidden_reset_masks = continuation.astype(np.float32)
             for env_index, summary in enumerate(result.episode_summaries):
                 if summary is None:
@@ -474,7 +544,7 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
                     self.alive_masks[env_index],
                 ) = self.envs.reset_at(env_index, seed)
                 self.current_episode_seeds[env_index] = seed
-                self.hidden_reset_masks[env_index] = 0.0
+                self.reset_hidden_at(env_index)
             self.vector_steps += 1
             self.env_steps += self.num_envs
         with torch.no_grad():
@@ -779,6 +849,214 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
             )
         return rows, factor
 
+    def _update_recurrent_credit_actors(
+        self,
+        old_lp_flat: torch.Tensor,
+        masks_flat: torch.Tensor,
+        advantages_flat: torch.Tensor,
+    ) -> tuple[list[dict[str, Any]], torch.Tensor]:
+        """Sequence PPO with Support-local and shared-Combat slot-local credit."""
+        t = self.config["training"]
+        total = old_lp_flat.shape[0]
+        support_np, combat_np = normalize_role_advantages(
+            advantages_flat.detach().cpu().numpy(),
+            masks_flat.detach().cpu().numpy(),
+        )
+        support_adv = torch.as_tensor(
+            support_np, dtype=torch.float32, device=self.device
+        )
+        combat_adv = torch.as_tensor(
+            combat_np, dtype=torch.float32, device=self.device
+        )
+        factor = torch.ones(total, dtype=torch.float32, device=self.device)
+        chunks = self.buffer.sequence_chunks(self.sequence_chunk_length)
+        chunks_per_batch = max(
+            1, int(t["minibatch_size"]) // self.sequence_chunk_length
+        )
+        groups = (
+            ["support", "combat"]
+            if int(self.rng.integers(0, 2)) == 0
+            else ["combat", "support"]
+        )
+        self.last_group_order = groups
+        rows: list[dict[str, Any]] = []
+        group_active = {
+            "support": masks_flat[:, 0] > 0.5,
+            "combat": masks_flat[:, 1:4].sum(-1) > 0.5,
+        }
+        for group in groups:
+            optimizer = self.actor_optimizers[group]
+            optimizer_steps = 0
+            for _ in range(int(t["ppo_epochs"])):
+                order = self.rng.permutation(len(chunks))
+                for start in range(0, len(chunks), chunks_per_batch):
+                    selected = [
+                        chunks[int(index)]
+                        for index in order[start : start + chunks_per_batch]
+                    ]
+                    batch = self.buffer.padded_chunk_batch(
+                        selected, self.sequence_chunk_length
+                    )
+                    support_lp, support_ent, combat_lp, combat_ent = (
+                        self._evaluate_recurrent_batch(batch)
+                    )
+                    old = torch.as_tensor(
+                        batch["old_log_probs"],
+                        dtype=torch.float32,
+                        device=self.device,
+                    )
+                    alive = torch.as_tensor(
+                        batch["alive_masks"],
+                        dtype=torch.float32,
+                        device=self.device,
+                    )
+                    valid = torch.as_tensor(
+                        batch["valid_mask"],
+                        dtype=torch.float32,
+                        device=self.device,
+                    )
+                    indices = torch.as_tensor(
+                        batch["factor_indices"],
+                        dtype=torch.long,
+                        device=self.device,
+                    )
+                    safe = indices.clamp_min(0)
+                    batch_factor = factor[safe]
+                    if group == "support":
+                        active = valid * alive[:, :, 0]
+                        selected_mask = active > 0.5
+                        if not selected_mask.any():
+                            continue
+                        log_ratio = (
+                            support_lp[selected_mask] - old[:, :, 0][selected_mask]
+                        )
+                        ratio = log_ratio.exp()
+                        effective_advantage = (
+                            batch_factor[selected_mask]
+                            * support_adv[safe][selected_mask]
+                        ).detach()
+                        policy_loss = ppo_clipped_policy_loss(
+                            ratio, effective_advantage, float(t["clip_coef"])
+                        )
+                        entropy = support_ent[selected_mask].mean()
+                        local_kl = ((ratio - 1.0) - log_ratio).mean()
+                        local_clip = (
+                            (ratio - 1.0).abs() > float(t["clip_coef"])
+                        ).float().mean()
+                        joint_kl, joint_clip = local_kl, local_clip
+                        active_samples = int(selected_mask.sum().item())
+                    else:
+                        slot_active = valid.unsqueeze(-1) * alive[:, :, 1:4]
+                        if not (slot_active > 0.5).any():
+                            continue
+                        local_advantage = (
+                            batch_factor.unsqueeze(-1)
+                            * combat_adv[safe]
+                        ).detach()
+                        policy_loss = combat_local_clipped_policy_loss(
+                            combat_lp,
+                            old[:, :, 1:4],
+                            local_advantage,
+                            slot_active,
+                            float(t["clip_coef"]),
+                        )
+                        selected_slots = slot_active > 0.5
+                        entropy = combat_ent[selected_slots].mean()
+                        slot_log_ratio = combat_lp - old[:, :, 1:4]
+                        slot_ratio = slot_log_ratio.exp()
+                        local_kl = (
+                            ((slot_ratio - 1.0) - slot_log_ratio)[selected_slots]
+                        ).mean()
+                        local_clip = (
+                            (slot_ratio - 1.0).abs() > float(t["clip_coef"])
+                        )[selected_slots].float().mean()
+                        time_active = (slot_active.sum(-1) > 0.5) & (valid > 0.5)
+                        new_joint = combat_joint_log_probability(
+                            combat_lp, slot_active
+                        )
+                        old_joint = combat_joint_log_probability(
+                            old[:, :, 1:4], slot_active
+                        )
+                        joint_log_ratio = new_joint[time_active] - old_joint[time_active]
+                        joint_ratio = joint_log_ratio.exp()
+                        joint_kl = (
+                            (joint_ratio - 1.0) - joint_log_ratio
+                        ).mean()
+                        joint_clip = (
+                            (joint_ratio - 1.0).abs() > float(t["clip_coef"])
+                        ).float().mean()
+                        active_samples = int(selected_slots.sum().item())
+                    loss = policy_loss - self.current_entropy_coef * entropy
+                    optimizer.zero_grad(set_to_none=True)
+                    loss.backward()
+                    params = (
+                        self.actors.support_actor.parameters()
+                        if group == "support"
+                        else self.actors.combat_actor.parameters()
+                    )
+                    grad = nn.utils.clip_grad_norm_(
+                        params, float(t["max_grad_norm"])
+                    )
+                    optimizer.step()
+                    self.actors.clamp_log_std_()
+                    optimizer_steps += 1
+                    row = {
+                        "group": group,
+                        "policy_loss": float(policy_loss.detach()),
+                        "entropy": float(entropy.detach()),
+                        "approx_kl": float(local_kl.detach()),
+                        "clip_fraction": float(local_clip.detach()),
+                        "joint_kl": float(joint_kl.detach()),
+                        "joint_clip": float(joint_clip.detach()),
+                        "grad_norm": float(grad),
+                        "active_samples": active_samples,
+                    }
+                    if group == "combat":
+                        for slot in range(3):
+                            selected_slot = slot_active[:, :, slot] > 0.5
+                            if selected_slot.any():
+                                lr = slot_log_ratio[:, :, slot][selected_slot]
+                                rr = lr.exp()
+                                row[f"slot_{slot + 1}_kl"] = float(
+                                    (((rr - 1.0) - lr).mean()).detach()
+                                )
+                                row[f"slot_{slot + 1}_clip"] = float(
+                                    (
+                                        (rr - 1.0).abs()
+                                        > float(t["clip_coef"])
+                                    ).float().mean().detach()
+                                )
+                    rows.append(row)
+            new_lp_flat = self._recurrent_log_probs_all(chunks)
+            if group == "support":
+                factor = role_group_factor_update(
+                    factor,
+                    old_lp_flat[:, 0],
+                    new_lp_flat[:, 0],
+                    masks_flat[:, 0],
+                )
+            else:
+                combat_alive = masks_flat[:, 1:4]
+                factor = role_group_factor_update(
+                    factor,
+                    combat_joint_log_probability(
+                        old_lp_flat[:, 1:4], combat_alive
+                    ),
+                    combat_joint_log_probability(
+                        new_lp_flat[:, 1:4], combat_alive
+                    ),
+                    (combat_alive.sum(-1) > 0.5).float(),
+                )
+            rows.append(
+                {
+                    "group": group,
+                    "active_samples": int(group_active[group].sum().item()),
+                    "optimizer_steps": optimizer_steps,
+                    "summary": True,
+                }
+            )
+        return rows, factor
+
     def update(self) -> dict[str, Any]:
         if self.credit_mode == CREDIT_MODE_TEAM:
             metrics = super().update()
@@ -827,9 +1105,14 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
             dtype=torch.float32,
             device=self.device,
         )
-        actor_rows, factor = self._update_credit_actors(
-            obs, actions, old_lp, masks, advantages
-        )
+        if self.recurrent:
+            actor_rows, factor = self._update_recurrent_credit_actors(
+                old_lp, masks, advantages
+            )
+        else:
+            actor_rows, factor = self._update_credit_actors(
+                obs, actions, old_lp, masks, advantages
+            )
 
         with torch.no_grad():
             before = self.role_critics(states, obs).cpu().numpy()
@@ -978,7 +1261,17 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
             "combat_shared_std": float(
                 np.mean(self.actors.combat_actor.effective_std_by_dim)
             ),
-            "recurrent_hidden_activity": 0.0,
+            "recurrent_hidden_activity": float(
+                max(
+                    0.0,
+                    float(np.max(np.abs(self.buffer.support_hidden_before)))
+                    if self.recurrent
+                    else 0.0,
+                    float(np.max(np.abs(self.buffer.combat_hidden_before)))
+                    if self.recurrent
+                    else 0.0,
+                )
+            ),
             "hidden_reset_zero_count": int(
                 np.count_nonzero(self.hidden_reset_masks <= 0.0)
             ),
@@ -1065,6 +1358,17 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
             "global_states": self.global_states,
             "alive_masks": self.alive_masks,
             "hidden_reset_masks": self.hidden_reset_masks,
+            "recurrent_actor": self.recurrent,
+            "support_online_hidden": (
+                self.hidden.support.detach().cpu().numpy()
+                if self.hidden is not None
+                else None
+            ),
+            "combat_online_hidden": (
+                self.hidden.combat.detach().cpu().numpy()
+                if self.hidden is not None
+                else None
+            ),
             "vector_env_state": self.envs.state_dict(),
             "numpy_rng_state": self.rng.bit_generator.state,
             "episode_seed_rng_state": self.episode_seed_rng.bit_generator.state,
@@ -1130,6 +1434,21 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
         self.hidden_reset_masks = np.asarray(
             ckpt["hidden_reset_masks"], np.float32
         )
+        if self.recurrent:
+            self.hidden = RoleHiddenState(
+                support=torch.as_tensor(
+                    ckpt["support_online_hidden"],
+                    dtype=torch.float32,
+                    device=self.device,
+                ),
+                combat=torch.as_tensor(
+                    ckpt["combat_online_hidden"],
+                    dtype=torch.float32,
+                    device=self.device,
+                ),
+            )
+        else:
+            self.hidden = None
         self.current_actor_lr = float(ckpt["current_actor_lr"])
         self.current_critic_lr = float(ckpt["current_critic_lr"])
         self.current_entropy_coef = float(ckpt["current_entropy_coef"])
@@ -1150,7 +1469,7 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
             "algorithm_variant": self.experiment_variant,
             "credit_mode": self.credit_mode,
             "role_policy_mapping": ROLE_POLICY_MAPPING,
-            "recurrent_actor": False,
+            "recurrent_actor": self.recurrent,
             "env_steps": self.env_steps,
             "vector_steps": self.vector_steps,
             "update_count": self.update_count,
@@ -1176,6 +1495,7 @@ class MissionAlignedRoleSharedHAPPO4v3Trainer(RoleSharedHAPPO4v3Trainer):
         if self.reward_contract_version in {
             REWARD_CONTRACT_VERSION_V16,
             REWARD_CONTRACT_VERSION_V17,
+            REWARD_CONTRACT_VERSION_V18,
         }:
             payload["observation_contract"] = self.env_contract_config["combat"][
                 "observation_contract"

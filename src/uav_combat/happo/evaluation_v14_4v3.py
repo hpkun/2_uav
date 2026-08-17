@@ -71,6 +71,16 @@ def _evaluation_env_class(env_config: str | Path):
             ),
             {},
         )
+    if version == "v18_role_situation_event_mission_reward":
+        from ..environment_4v3_v18 import (
+            FunctionalHeterogeneous4v3V18RecurrentFireGeometryEnv,
+        )
+
+        return type(
+            "_RoleMetricEnvV18",
+            (_RoleMetricMixin, FunctionalHeterogeneous4v3V18RecurrentFireGeometryEnv),
+            {},
+        )
     raise ValueError(f"unsupported evaluation reward contract {version!r}")
 
 
@@ -157,6 +167,8 @@ def evaluate_v14_happo_fixed_blue_4v3(
             alive = np.stack([value[2] for value in reset_values]).astype(np.float32)[
                 :, :4
             ]
+            hidden = actors.initial_hidden(len(envs), dev)
+            hidden_reset = np.zeros((len(envs), 4), np.float32)
             finished = np.zeros(len(envs), bool)
             slot_kills = np.zeros((len(envs), 3), np.float32)
             slot_max_lock = np.zeros((len(envs), 3), np.float32)
@@ -166,8 +178,11 @@ def evaluate_v14_happo_fixed_blue_4v3(
                     obs[:, :4], dtype=torch.float32, device=dev
                 )
                 alive_t = torch.as_tensor(alive, dtype=torch.float32, device=dev)
-                actions_t, _ = actors.deterministic_actions(
-                    obs_t, alive_t, None, None
+                actions_t, next_hidden = actors.deterministic_actions(
+                    obs_t,
+                    alive_t,
+                    hidden,
+                    torch.as_tensor(hidden_reset, dtype=torch.float32, device=dev),
                 )
                 actions = actions_t.cpu().numpy().astype(np.float32)
                 next_obs = obs.copy()
@@ -225,6 +240,15 @@ def evaluate_v14_happo_fixed_blue_4v3(
                             )
                         records.append(record)
                         finished[index] = True
+                continuation = alive * next_alive * (~finished).astype(np.float32)[:, None]
+                hidden = next_hidden
+                if hidden is not None:
+                    mask = torch.as_tensor(
+                        continuation, dtype=torch.float32, device=dev
+                    )
+                    hidden.support.mul_(mask[:, 0:1])
+                    hidden.combat.mul_(mask[:, 1:4].unsqueeze(-1))
+                hidden_reset = continuation
                 obs, alive = next_obs, next_alive
             del envs
         records.sort(key=lambda row: int(row["episode_seed"]))
@@ -318,7 +342,7 @@ def evaluate_v14_happo_fixed_blue_4v3(
                 "evaluation_seconds": float(time.perf_counter() - started),
                 "episode_records": records,
                 "deterministic": True,
-                "recurrent_actor": False,
+                "recurrent_actor": bool(actors.recurrent),
             }
         )
         diagnostics = training_diagnostics or {}

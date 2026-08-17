@@ -27,6 +27,7 @@ from uav_combat.happo.trainer_4v3 import (
     V15_REWARD_CONTRACT_VERSION,
     V16_REWARD_CONTRACT_VERSION,
     V17_REWARD_CONTRACT_VERSION,
+    V18_REWARD_CONTRACT_VERSION,
     compute_experiment_best_score_4v3,
 )
 from uav_combat.happo.trainer_role_shared_4v3 import (
@@ -109,6 +110,7 @@ def _is_v14(cfg: dict[str, Any]) -> bool:
         "fixed_rule_blue_heterogeneous_4v3_v15_happo",
         "fixed_rule_blue_heterogeneous_4v3_v16_happo",
         "fixed_rule_blue_heterogeneous_4v3_v17_happo",
+        "fixed_rule_blue_heterogeneous_4v3_v18_happo",
     }
 
 
@@ -229,11 +231,13 @@ def _build_experiment_contract(
         V15_REWARD_CONTRACT_VERSION,
         V16_REWARD_CONTRACT_VERSION,
         V17_REWARD_CONTRACT_VERSION,
+        V18_REWARD_CONTRACT_VERSION,
     }:
         contract["best_checkpoint_selection"] = list(V15_BEST_SCORE_FIELDS_4V3)
     if reward_contract_version in {
         V16_REWARD_CONTRACT_VERSION,
         V17_REWARD_CONTRACT_VERSION,
+        V18_REWARD_CONTRACT_VERSION,
     }:
         contract["observation_contract"] = env_cfg["combat"][
             "observation_contract"
@@ -294,7 +298,12 @@ def main() -> None:
     is_v15 = reward_contract_version in {
         V15_REWARD_CONTRACT_VERSION, V16_REWARD_CONTRACT_VERSION
     }
-    is_v17 = reward_contract_version == V17_REWARD_CONTRACT_VERSION
+    # v18 deliberately freezes the v17 reward/logging contract; its only reward-
+    # adjacent change is the physical fire-quality hook.
+    is_v17 = reward_contract_version in {
+        V17_REWARD_CONTRACT_VERSION,
+        V18_REWARD_CONTRACT_VERSION,
+    }
     _write_json(
         out / "experiment_contract.json",
         _build_experiment_contract(
@@ -376,15 +385,68 @@ def main() -> None:
 
         smoke_validation: dict[str, Any] | None = None
         if args.smoke:
-            main_actions, main_lp, main_values, _ = trainer._select_actions()
+            main_actions, main_lp, main_values, main_next_hidden = trainer._select_actions()
             restored = trainer_class(args.env_config, cfg)
             try:
                 restored.load_checkpoint(out / "final.pt")
-                restored_actions, restored_lp, restored_values, _ = restored._select_actions()
+                restored_actions, restored_lp, restored_values, restored_next_hidden = restored._select_actions()
                 hidden_equal = True
+                next_hidden_equal = True
                 if trainer.hidden is not None:
                     hidden_equal = torch.equal(trainer.hidden.support, restored.hidden.support) and torch.equal(trainer.hidden.combat, restored.hidden.combat)
+                    next_hidden_equal = (
+                        main_next_hidden is not None
+                        and restored_next_hidden is not None
+                        and torch.equal(main_next_hidden.support, restored_next_hidden.support)
+                        and torch.equal(main_next_hidden.combat, restored_next_hidden.combat)
+                    )
                 numeric_metrics = [float(v) for v in trainer.last_update_metrics.values() if isinstance(v, (int, float, np.number))]
+                loss_values = [
+                    float(value)
+                    for key, value in trainer.last_update_metrics.items()
+                    if "loss" in key and isinstance(value, (int, float, np.number))
+                ]
+                kl_values = [
+                    float(value)
+                    for key, value in trainer.last_update_metrics.items()
+                    if "kl" in key and isinstance(value, (int, float, np.number))
+                ]
+                gradient_values = [
+                    float(value)
+                    for key, value in trainer.last_update_metrics.items()
+                    if "grad_norm" in key and isinstance(value, (int, float, np.number))
+                ]
+                exact_seeds = evaluation_seeds_from_manifest(manifest, "selection")[:1]
+                if _is_v14(cfg):
+                    exact_one = evaluate_v14_happo_fixed_blue_4v3(
+                        restored.actors,
+                        args.env_config,
+                        seeds=exact_seeds,
+                        num_envs=1,
+                        device=restored.device,
+                    )
+                    exact_two = evaluate_v14_happo_fixed_blue_4v3(
+                        restored.actors,
+                        args.env_config,
+                        seeds=exact_seeds,
+                        num_envs=1,
+                        device=restored.device,
+                    )
+                else:
+                    exact_one = evaluate_role_shared_happo_fixed_blue_4v3(
+                        restored.actors,
+                        args.env_config,
+                        seeds=exact_seeds,
+                        num_envs=1,
+                        device=restored.device,
+                    )
+                    exact_two = evaluate_role_shared_happo_fixed_blue_4v3(
+                        restored.actors,
+                        args.env_config,
+                        seeds=exact_seeds,
+                        num_envs=1,
+                        device=restored.device,
+                    )
                 smoke_validation = {
                     "env_steps": trainer.env_steps, "updates": trainer.update_count,
                     "reward_and_losses_finite": bool(np.isfinite(numeric_metrics).all()),
@@ -396,9 +458,18 @@ def main() -> None:
                     "recurrent_hidden_activity": trainer.last_update_metrics.get("recurrent_hidden_activity", 0.0),
                     "hidden_reset_zero_count": trainer.last_update_metrics.get("hidden_reset_zero_count", 0),
                     "checkpoint_hidden_equal": hidden_equal,
+                    "resume_next_hidden_equal": next_hidden_equal,
                     "resume_next_action_equal": bool(np.array_equal(main_actions, restored_actions)),
                     "resume_next_log_prob_equal": bool(np.array_equal(main_lp, restored_lp)),
                     "resume_value_equal": bool(np.array_equal(main_values, restored_values)),
+                    "losses_finite": bool(loss_values and np.isfinite(loss_values).all()),
+                    "kl_finite": bool(kl_values and np.isfinite(kl_values).all()),
+                    "gradients_finite": bool(
+                        gradient_values and np.isfinite(gradient_values).all()
+                    ),
+                    "deterministic_evaluation_exact": bool(
+                        exact_one["episode_records"] == exact_two["episode_records"]
+                    ),
                     "checkpoint_exists": (out / "final.pt").exists(),
                 }
                 if _is_v14(cfg):

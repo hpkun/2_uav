@@ -69,6 +69,18 @@ def _environment_contract(config_path: str | Path):
             REWARD_COMPONENT_KEYS_V17,
             AGENT_REWARD_COMPONENT_KEYS_V17,
         )
+    if version == "v18_role_situation_event_mission_reward":
+        from ..environment_4v3_v18 import (
+            AGENT_REWARD_COMPONENT_KEYS_V18,
+            REWARD_COMPONENT_KEYS_V18,
+            FunctionalHeterogeneous4v3V18RecurrentFireGeometryEnv,
+        )
+
+        return (
+            FunctionalHeterogeneous4v3V18RecurrentFireGeometryEnv,
+            REWARD_COMPONENT_KEYS_V18,
+            AGENT_REWARD_COMPONENT_KEYS_V18,
+        )
     raise ValueError(f"unsupported role-credit reward contract {version!r}")
 
 

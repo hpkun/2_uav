@@ -508,6 +508,10 @@ class FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv:
                     self._cue_to_direct_pairs.add(pair)
                     self._episode_metrics["support_cue_to_direct_events"] += 1.0
 
+    def _attack_quality(self, attacker: AircraftState, target: AircraftState) -> float:
+        """Return the historical v11-v17 distance × ATA × AA lock quality."""
+        return lock_quality_v11(attacker, target, self.profile)
+
     def _update_locks(self, direct: dict[str, set[str]]) -> tuple[set[tuple[str, str]], dict[str, str]]:
         half_events: set[tuple[str, str]] = set()
         killers: dict[str, str] = {}
@@ -529,7 +533,10 @@ class FunctionalHeterogeneous4v3V11TargetLockSupportCueEnv:
             if target_id is None or not self._alive(target_id) or target_id not in direct[attacker_id]:
                 new = max(0.0, old - float(self.profile["lock_decay_per_step"]))
             else:
-                quality = lock_quality_v11(self._by_id(attacker_id).state, self._by_id(target_id).state, self.profile)
+                quality = self._attack_quality(
+                    self._by_id(attacker_id).state,
+                    self._by_id(target_id).state,
+                )
                 new = float(np.clip(old + float(self.profile["lock_increment_scale"]) * quality, 0.0, 1.0)) if quality > 0.0 else max(0.0, old - float(self.profile["lock_decay_per_step"]))
             self.lock_progress[attacker_id] = new
             self.max_lock_progress = max(self.max_lock_progress, new)
