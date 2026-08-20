@@ -1,7 +1,19 @@
-"""同构无人机三维对抗基础环境。"""
+"""Lightweight heterogeneous MAV/UAV air-combat research environment."""
 
-from .environment import HomogeneousAirCombatEnv
-from .geometry import PairwiseGeometry, compute_pairwise_geometry
-from .models import Aircraft, AircraftSpec, AircraftState, ControlCommand, TargetCommand
+from .mavuav import (
+    AircraftSpec,
+    BlueSpec,
+    HeterogeneousMAVUAVAirCombatEnv,
+    MAVSpec,
+    UAVSpec,
+)
+from .mappo.vector_env_mavuav import MAVUAVVectorEnv
 
-__all__ = ["Aircraft", "AircraftSpec", "AircraftState", "ControlCommand", "TargetCommand", "PairwiseGeometry", "compute_pairwise_geometry", "HomogeneousAirCombatEnv"]
+__all__ = [
+    "AircraftSpec",
+    "MAVSpec",
+    "UAVSpec",
+    "BlueSpec",
+    "HeterogeneousMAVUAVAirCombatEnv",
+    "MAVUAVVectorEnv",
+]

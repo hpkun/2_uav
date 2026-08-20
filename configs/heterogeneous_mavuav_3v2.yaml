@@ -1,0 +1,21 @@
+simulation:
+  dt: 0.2
+  max_steps: 500
+aircraft_specs:
+  MAV: {v_min: 120, v_max: 300, nx: [-1, 1], ny: [-2, 2], nz: [-3, 3], sensor_range: 6000}
+  UAV: {v_min: 100, v_max: 220, nx: [-1, 1], ny: [-1.5, 1.5], nz: [-2, 2], sensor_range: 6000}
+  Blue: {v_min: 150, v_max: 320, nx: [-1, 1], ny: [-2, 2], nz: [-3, 3], sensor_range: 6000}
+scenario:
+  name: heterogeneous_3v2
+  red_count: 3
+  blue_count: 2
+  randomize: false
+  initial:
+    MAV: {position: [-1500, 0, 3000], speed: 210, heading_deg: 0}
+    UAV1: {position: [-1800, -500, 3000], speed: 160, heading_deg: 0}
+    UAV2: {position: [-1800, 500, 3000], speed: 160, heading_deg: 0}
+    Blue1: {position: [1500, 0, 3000], speed: 235, heading_deg: 180}
+    Blue2: {position: [1500, 800, 3000], speed: 235, heading_deg: 180}
+combat: {distance_min: 1000, distance_max: 3000, ata_deg: 30, aa_deg: 90, hold_steps: 3}
+reward: {blue_kill: 10, uav_death: -5, mav_death: -15, red_win: 50, blue_eliminated: 50, mav_death_mission: -50}
+blue_policy: {name: fixed_rule, candidates: 5}
