@@ -1,19 +1,13 @@
-"""Lightweight heterogeneous MAV/UAV air-combat research environment."""
+"""MAV/UAV heterogeneous multi-agent air-combat research package."""
 
-from .mavuav import (
-    AircraftSpec,
-    BlueSpec,
-    HeterogeneousMAVUAVAirCombatEnv,
-    MAVSpec,
-    UAVSpec,
-)
-from .mappo.vector_env_mavuav import MAVUAVVectorEnv
+from .models import Aircraft, AircraftSpec, AircraftState, OverloadCommand
+from .mavuav import BlueSpec, HeterogeneousMAVUAVAirCombatEnv, MAVSpec, UAVSpec
+from .vector_env import MAVUAVVectorEnv
+from .happo import HAPPOTrainer
+from .mappo import MAPPOTrainer
 
 __all__ = [
-    "AircraftSpec",
-    "MAVSpec",
-    "UAVSpec",
-    "BlueSpec",
-    "HeterogeneousMAVUAVAirCombatEnv",
-    "MAVUAVVectorEnv",
+    "Aircraft", "AircraftSpec", "AircraftState", "OverloadCommand",
+    "MAVSpec", "UAVSpec", "BlueSpec", "HeterogeneousMAVUAVAirCombatEnv",
+    "MAVUAVVectorEnv", "HAPPOTrainer", "MAPPOTrainer",
 ]

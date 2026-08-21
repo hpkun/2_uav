@@ -1,198 +1,372 @@
-"""Lightweight heterogeneous 1 MAV + 2 UAV versus 2 Blue air-combat env."""
+"""Canonical heterogeneous 1 MAV + 2 UAV versus 2 Blue environment."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 import numpy as np
 import yaml
 
+from .blue_policy import BluePolicy
+from .dynamics import map_normalized_action, rk4_step
+from .geometry import compute_pairwise_geometry
+from .models import Aircraft, AircraftSpec, AircraftState
+from .reward import situation_reward
 
-@dataclass(frozen=True)
-class AircraftSpec:
-    aircraft_type: str
-    v_min: float
-    v_max: float
-    nx_min: float
-    nx_max: float
-    ny_min: float
-    ny_max: float
-    nz_min: float
-    nz_max: float
-    sensor_range: float = 6000.0
-
-
-MAVSpec = AircraftSpec("MAV", 120.0, 300.0, -1.0, 1.0, -2.0, 2.0, -3.0, 3.0)
-UAVSpec = AircraftSpec("UAV", 100.0, 220.0, -1.0, 1.0, -1.5, 1.5, -2.0, 2.0)
-BlueSpec = AircraftSpec("Blue", 150.0, 320.0, -1.0, 1.0, -2.0, 2.0, -3.0, 3.0)
+DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "heterogeneous_mavuav_3v2.yaml"
+RED_IDS = ("MAV", "UAV1", "UAV2")
+BLUE_IDS = ("Blue1", "Blue2")
+ENTITY_IDS = RED_IDS + BLUE_IDS
+TYPE_BY_ID = {"MAV": "MAV", "UAV1": "UAV", "UAV2": "UAV", "Blue1": "Blue", "Blue2": "Blue"}
+TYPE_VALUE = {"MAV": 0.0, "UAV": 1.0, "Blue": 2.0}
+OBS_DIM = 40
+GLOBAL_STATE_DIM = 40
 
 
-@dataclass
-class State:
-    x: float; y: float; h: float; v: float; theta: float; psi: float; alive: bool = True
-
-    def copy(self) -> "State":
-        return State(self.x, self.y, self.h, self.v, self.theta, self.psi, self.alive)
-
-
-@dataclass
-class Entity:
-    aircraft_id: str
-    team: str
-    spec: AircraftSpec
-    state: State
+def _pair(value: Any, name: str) -> tuple[float, float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError(f"{name} must contain [lower, upper]")
+    pair = (float(value[0]), float(value[1]))
+    if not np.all(np.isfinite(pair)) or pair[0] >= pair[1]:
+        raise ValueError(f"{name} must have finite lower < upper")
+    return pair
 
 
-def _geometry(a: State, b: State) -> tuple[float, float, float, float, np.ndarray, np.ndarray]:
-    rel = np.array([b.x-a.x, b.y-a.y, b.h-a.h], dtype=float)
-    va = np.array([a.v*np.cos(a.theta)*np.cos(a.psi), a.v*np.cos(a.theta)*np.sin(a.psi), a.v*np.sin(a.theta)])
-    vb = np.array([b.v*np.cos(b.theta)*np.cos(b.psi), b.v*np.cos(b.theta)*np.sin(b.psi), b.v*np.sin(b.theta)])
-    dist = float(np.linalg.norm(rel)); line = rel / max(dist, 1e-9)
-    forward_a = np.array([np.cos(a.theta)*np.cos(a.psi), np.cos(a.theta)*np.sin(a.psi), np.sin(a.theta)])
-    forward_b = np.array([np.cos(b.theta)*np.cos(b.psi), np.cos(b.theta)*np.sin(b.psi), np.sin(b.theta)])
-    ata = float(np.arccos(np.clip(np.dot(forward_a, line), -1.0, 1.0)))
-    aa = float(np.arccos(np.clip(np.dot(forward_b, line), -1.0, 1.0)))
-    return dist, ata, aa, float(np.linalg.norm(vb-va)), rel, vb-va
+def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate all fields consumed by the environment and reject stale fields."""
+    expected = {"simulation", "battlefield", "aircraft_specs", "scenario", "initial_randomization", "combat", "reward", "blue_policy"}
+    if set(config) != expected:
+        raise ValueError(f"config keys must be exactly {sorted(expected)}, got {sorted(config)}")
+    cfg = deepcopy(dict(config))
+    sim = cfg["simulation"]
+    if set(sim) != {"decision_dt", "physics_dt", "max_decision_steps"}:
+        raise ValueError("simulation has unknown or missing fields")
+    decision_dt, physics_dt = float(sim["decision_dt"]), float(sim["physics_dt"])
+    if decision_dt <= 0.0 or physics_dt <= 0.0:
+        raise ValueError("decision_dt and physics_dt must be positive")
+    ratio = decision_dt / physics_dt
+    if not np.isclose(ratio, round(ratio), atol=1e-10):
+        raise ValueError("decision_dt / physics_dt must be an integer")
+    if int(sim["max_decision_steps"]) <= 0:
+        raise ValueError("max_decision_steps must be positive")
+    if set(cfg["battlefield"]) != {"x", "y", "altitude"}:
+        raise ValueError("battlefield has unknown or missing fields")
+    for axis in ("x", "y", "altitude"):
+        cfg["battlefield"][axis] = _pair(cfg["battlefield"][axis], f"battlefield.{axis}")
+    if set(cfg["aircraft_specs"]) != {"MAV", "UAV", "Blue"}:
+        raise ValueError("aircraft_specs must define MAV, UAV and Blue exactly")
+    for aircraft_type in ("MAV", "UAV", "Blue"):
+        raw = cfg["aircraft_specs"][aircraft_type]
+        if set(raw) != {"v_min", "v_max", "nx", "ny", "nz"}:
+            raise ValueError(f"aircraft_specs.{aircraft_type} has unknown or missing fields")
+        AircraftSpec(aircraft_type, float(raw["v_min"]), float(raw["v_max"]), _pair(raw["nx"], "nx"), _pair(raw["ny"], "ny"), _pair(raw["nz"], "nz"))
+    if set(cfg["scenario"]) != {"initial"} or set(cfg["scenario"]["initial"]) != set(ENTITY_IDS):
+        raise ValueError("scenario.initial must define the five fixed entity slots exactly")
+    random_cfg = cfg["initial_randomization"]
+    if set(random_cfg) != {"enabled", "position_xy_jitter", "altitude_jitter", "speed_jitter", "heading_jitter_deg"}:
+        raise ValueError("initial_randomization has unknown or missing fields")
+    if any(float(random_cfg[key]) < 0 for key in ("position_xy_jitter", "altitude_jitter", "speed_jitter", "heading_jitter_deg")):
+        raise ValueError("initial randomization magnitudes must be non-negative")
+    combat = cfg["combat"]
+    if set(combat) != {"distance", "ata_deg", "aa_deg", "hold_steps"}:
+        raise ValueError("combat has unknown or missing fields")
+    combat["distance"] = _pair(combat["distance"], "combat.distance")
+    if int(combat["hold_steps"]) <= 0:
+        raise ValueError("combat.hold_steps must be positive")
+    if not (0.0 < float(combat["ata_deg"]) <= 180.0 and 0.0 < float(combat["aa_deg"]) <= 180.0):
+        raise ValueError("combat angles must be in (0, 180] degrees")
+    reward_fields = {"blue_kill", "uav_loss", "mav_loss", "terminal_red_win", "terminal_blue_win", "terminal_draw"}
+    if set(cfg["reward"]) != reward_fields or not np.all(np.isfinite([float(cfg["reward"][key]) for key in reward_fields])):
+        raise ValueError("reward has unknown, missing or non-finite fields")
+    if set(cfg["blue_policy"]) != {"target_mode"}:
+        raise ValueError("blue_policy has unknown or missing fields")
+    mode = cfg["blue_policy"]["target_mode"]
+    if mode not in BluePolicy.MODES:
+        raise ValueError(f"invalid blue target mode: {mode}")
+    for aircraft_id in ENTITY_IDS:
+        start = cfg["scenario"]["initial"][aircraft_id]
+        if set(start) != {"position", "speed", "heading_deg"} or len(start["position"]) != 3:
+            raise ValueError(f"invalid initial state for {aircraft_id}")
+        x, y, h = (float(v) for v in start["position"])
+        spec = cfg["aircraft_specs"][TYPE_BY_ID[aircraft_id]]
+        if not (cfg["battlefield"]["x"][0] <= x <= cfg["battlefield"]["x"][1]):
+            raise ValueError(f"{aircraft_id} initial x is outside battlefield")
+        if not (cfg["battlefield"]["y"][0] <= y <= cfg["battlefield"]["y"][1]):
+            raise ValueError(f"{aircraft_id} initial y is outside battlefield")
+        if not (cfg["battlefield"]["altitude"][0] <= h <= cfg["battlefield"]["altitude"][1]):
+            raise ValueError(f"{aircraft_id} initial altitude is outside battlefield")
+        if not (float(spec["v_min"]) <= float(start["speed"]) <= float(spec["v_max"])):
+            raise ValueError(f"{aircraft_id} initial speed is outside its limits")
+    return cfg
+
+
+def load_environment_config(path_or_config: str | Path | Mapping[str, Any] | None) -> dict[str, Any]:
+    if isinstance(path_or_config, Mapping):
+        return validate_config(path_or_config)
+    path = DEFAULT_CONFIG if path_or_config is None else Path(path_or_config)
+    with path.open("r", encoding="utf-8") as stream:
+        return validate_config(yaml.safe_load(stream))
 
 
 class HeterogeneousMAVUAVAirCombatEnv:
-    """Three red agents (MAV, UAV, UAV) and a deterministic two-Blue opponent."""
-    red_ids = ("MAV", "UAV1", "UAV2")
-    blue_ids = ("Blue1", "Blue2")
+    """Three trainable Red agents and two fixed-rule homogeneous Blue aircraft."""
 
-    def __init__(self, config_path: str | Path = "configs/heterogeneous_mavuav_3v2.yaml", dt: float | None = None, max_steps: int | None = None, seed: int | None = None):
-        with Path(config_path).open("r", encoding="utf-8") as stream:
-            self.config = yaml.safe_load(stream)
-        simulation = self.config["simulation"]
-        self.dt = float(simulation["dt"] if dt is None else dt)
-        self.max_steps = int(simulation["max_steps"] if max_steps is None else max_steps)
+    red_ids = RED_IDS
+    blue_ids = BLUE_IDS
+    observation_dim = OBS_DIM
+    global_state_dim = GLOBAL_STATE_DIM
+    action_dim = 3
+
+    def __init__(self, config_path: str | Path | Mapping[str, Any] | None = None, *, seed: int | None = None, blue_target_mode: str | None = None, randomize: bool | None = None) -> None:
+        self.config = load_environment_config(config_path)
+        sim = self.config["simulation"]
+        self.decision_dt = float(sim["decision_dt"])
+        self.physics_dt = float(sim["physics_dt"])
+        self.physics_substeps = int(round(self.decision_dt / self.physics_dt))
+        self.max_decision_steps = int(sim["max_decision_steps"])
+        self.randomize = self.config["initial_randomization"]["enabled"] if randomize is None else bool(randomize)
+        mode = blue_target_mode or self.config["blue_policy"]["target_mode"]
+        self.blue_policy = BluePolicy(mode, self.decision_dt, self.physics_dt)
         self.rng = np.random.default_rng(seed)
-        self.entities: dict[str, Entity] = {}
+        self.entities: dict[str, Aircraft] = {}
         self.step_count = 0
-        self._attack_streak: dict[tuple[str, str], int] = {}
+        self.episode_return = 0.0
         self._running = False
+        self._attack_streak: dict[tuple[str, str], int] = {}
+        self._red_attack_kills: set[str] = set()
+        self._blue_attack_kills: set[str] = set()
 
     @property
     def agents(self) -> list[str]:
         return list(self.red_ids)
 
-    def reset(self, seed: int | None = None, **_: Any) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-        if seed is not None: self.rng = np.random.default_rng(seed)
-        spec_cfg = self.config["aircraft_specs"]
-        def make_spec(name: str) -> AircraftSpec:
-            cfg = spec_cfg[name]
-            return AircraftSpec(name, cfg["v_min"], cfg["v_max"], *cfg["nx"], *cfg["ny"], *cfg["nz"], cfg["sensor_range"])
-        by_type = {name: make_spec(name) for name in ("MAV", "UAV", "Blue")}
-        types = {"MAV": "MAV", "UAV1": "UAV", "UAV2": "UAV", "Blue1": "Blue", "Blue2": "Blue"}
-        scenario = self.config["scenario"]
+    @property
+    def active_masks(self) -> np.ndarray:
+        return np.asarray([float(self.entities[aid].state.alive) for aid in self.red_ids], dtype=np.float32)
+
+    def _spec(self, aircraft_type: str) -> AircraftSpec:
+        raw = self.config["aircraft_specs"][aircraft_type]
+        return AircraftSpec(aircraft_type, float(raw["v_min"]), float(raw["v_max"]), tuple(raw["nx"]), tuple(raw["ny"]), tuple(raw["nz"]))
+
+    def reset(self, seed: int | None = None, options: Mapping[str, Any] | None = None) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+        if seed is not None:
+            self.rng = np.random.default_rng(seed)
+        randomize = self.randomize if options is None else bool(options.get("randomize", self.randomize))
+        random_cfg = self.config["initial_randomization"]
         self.entities = {}
-        for aid, aircraft_type in types.items():
-            spec = by_type[aircraft_type]
-            start = scenario["initial"][aid]
-            state = State(*start["position"], start["speed"], 0.0, np.deg2rad(start["heading_deg"]))
-            self.entities[aid] = Entity(aid, "red" if aid in self.red_ids else "blue", spec, state)
-        self.step_count = 0; self._attack_streak.clear(); self._running = True
-        return self._observations(), {"agents": self.agents, "step_count": 0, "attacks": []}
+        for aircraft_id in ENTITY_IDS:
+            aircraft_type = TYPE_BY_ID[aircraft_id]
+            start = self.config["scenario"]["initial"][aircraft_id]
+            x, y, h = (float(v) for v in start["position"])
+            speed, heading = float(start["speed"]), np.deg2rad(float(start["heading_deg"]))
+            if randomize:
+                jitter_xy = float(random_cfg["position_xy_jitter"])
+                x += self.rng.uniform(-jitter_xy, jitter_xy)
+                y += self.rng.uniform(-jitter_xy, jitter_xy)
+                h += self.rng.uniform(-float(random_cfg["altitude_jitter"]), float(random_cfg["altitude_jitter"]))
+                speed += self.rng.uniform(-float(random_cfg["speed_jitter"]), float(random_cfg["speed_jitter"]))
+                heading += np.deg2rad(self.rng.uniform(-float(random_cfg["heading_jitter_deg"]), float(random_cfg["heading_jitter_deg"])))
+            spec = self._spec(aircraft_type)
+            state = AircraftState(x, y, h, float(np.clip(speed, spec.v_min, spec.v_max)), 0.0, float((heading + np.pi) % (2 * np.pi) - np.pi))
+            self.entities[aircraft_id] = Aircraft(aircraft_id, "red" if aircraft_id in RED_IDS else "blue", spec, state)
+        self.step_count = 0
+        self.episode_return = 0.0
+        self._attack_streak.clear()
+        self._red_attack_kills.clear()
+        self._blue_attack_kills.clear()
+        self._running = True
+        mode = self.blue_policy.reset(self.rng)
+        return self._observations(), {"outcome": None, "attack_events": [], "killed_ids": [], "death_causes": {}, "active_masks": self.active_masks.copy(), "blue_target_mode": mode}
 
-    def step(self, actions: dict[str, np.ndarray] | list[np.ndarray] | np.ndarray):
-        if not self._running: raise RuntimeError("reset() must be called before step()")
-        if not isinstance(actions, dict): actions = {aid: actions[i] for i, aid in enumerate(self.red_ids)}
-        for aid in self.red_ids:
-            if aid not in actions: raise KeyError(f"missing action for {aid}")
-        all_actions = {aid: np.zeros(3) for aid in self.blue_ids}
-        all_actions.update(actions)
-        self._blue_actions(all_actions)
-        for aid, entity in self.entities.items():
-            if entity.state.alive:
-                self._integrate(entity, np.asarray(all_actions[aid], dtype=float))
-        attacks, killed = self._resolve_attacks()
+    def _action_dict(self, actions: Mapping[str, np.ndarray] | np.ndarray | list[np.ndarray]) -> dict[str, np.ndarray]:
+        if isinstance(actions, Mapping):
+            if set(actions) != set(RED_IDS):
+                raise KeyError(f"actions must contain exactly {RED_IDS}")
+            result = {aid: np.asarray(actions[aid], dtype=np.float64) for aid in RED_IDS}
+        else:
+            values = np.asarray(actions, dtype=np.float64)
+            if values.shape != (3, 3):
+                raise ValueError(f"actions must have shape (3, 3), got {values.shape}")
+            result = {aid: values[index] for index, aid in enumerate(RED_IDS)}
+        for aid, action in result.items():
+            if action.shape != (3,) or not np.all(np.isfinite(action)):
+                raise ValueError(f"action for {aid} must be a finite shape-(3,) array")
+            if not self.entities[aid].state.alive:
+                result[aid] = np.zeros(3, dtype=np.float64)
+        return result
+
+    def step(self, actions: Mapping[str, np.ndarray] | np.ndarray | list[np.ndarray]):
+        if not self._running:
+            raise RuntimeError("reset() must be called before step()")
+        red_actions = self._action_dict(actions)
+        red_entities = {aid: self.entities[aid] for aid in RED_IDS}
+        all_actions = dict(red_actions)
+        for aid in BLUE_IDS:
+            all_actions[aid] = self.blue_policy.action(self.entities[aid], red_entities)
+        commands = {
+            aid: map_normalized_action(action, self.entities[aid].state, self.entities[aid].spec)
+            for aid, action in all_actions.items() if self.entities[aid].state.alive
+        }
+        for _ in range(self.physics_substeps):
+            for aid in ENTITY_IDS:
+                entity = self.entities[aid]
+                if entity.state.alive:
+                    entity.state = rk4_step(entity.state, commands[aid], self.physics_dt, entity.spec)
+        death_causes = self._apply_boundaries()
+        attack_events, attack_deaths = self._resolve_attacks()
+        death_causes.update(attack_deaths)
         self.step_count += 1
-        red_alive = all(self.entities[aid].state.alive for aid in ("MAV",))
-        blue_alive = any(self.entities[aid].state.alive for aid in self.blue_ids)
-        terminated, outcome = False, None
-        if not red_alive: terminated, outcome = True, "blue"
-        elif not blue_alive: terminated, outcome = True, "red"
-        truncated = not terminated and self.step_count >= self.max_steps
-        if truncated: outcome = "draw"
-        rewards = self._red_rewards(attacks, killed, outcome)
+        terminated, truncated, outcome = self._termination()
+        situation = self._team_situation_reward()
+        reward_cfg = self.config["reward"]
+        event = reward_cfg["blue_kill"] * sum(aid in BLUE_IDS and cause == "red_attack" for aid, cause in death_causes.items())
+        event += reward_cfg["uav_loss"] * sum(aid in ("UAV1", "UAV2") for aid in death_causes)
+        event += reward_cfg["mav_loss"] * int("MAV" in death_causes)
+        terminal = 0.0
+        if outcome == "red": terminal = float(reward_cfg["terminal_red_win"])
+        elif outcome == "blue": terminal = float(reward_cfg["terminal_blue_win"])
+        elif outcome == "draw": terminal = float(reward_cfg["terminal_draw"])
+        team_reward = float(situation + event + terminal)
+        self.episode_return += team_reward
+        rewards = {aid: team_reward for aid in RED_IDS}
         self._running = not (terminated or truncated)
-        info = {"agents": self.agents, "step_count": self.step_count, "attacks": attacks, "killed": killed, "outcome": outcome}
-        return self._observations(), rewards, terminated, truncated, info
+        info: dict[str, Any] = {
+            "outcome": outcome, "attack_events": attack_events,
+            "killed_ids": sorted(death_causes), "death_causes": dict(sorted(death_causes.items())),
+            "active_masks": self.active_masks.copy(), "team_situation": situation,
+            "event_reward": float(event), "terminal_reward": float(terminal),
+        }
+        if terminated or truncated:
+            info["episode_summary"] = self._episode_summary(outcome)
+        observations = self._observations()
+        if not np.isfinite(team_reward) or not all(np.all(np.isfinite(v)) for v in observations.values()) or not np.all(np.isfinite(self.global_state())):
+            raise FloatingPointError("environment produced non-finite output")
+        return observations, rewards, terminated, truncated, info
 
-    def _integrate(self, e: Entity, action: np.ndarray) -> None:
-        if action.shape != (3,):
-            raise ValueError(f"action for {e.aircraft_id} must have shape (3,), got {action.shape}")
-        u = np.clip(action, -1.0, 1.0); s, g, dt = e.state, 9.81, self.dt
-        nx = np.interp(u[0], (-1,1), (e.spec.nx_min,e.spec.nx_max)); ny = np.interp(u[1], (-1,1), (e.spec.ny_min,e.spec.ny_max)); nz = np.interp(u[2], (-1,1), (e.spec.nz_min,e.spec.nz_max))
-        s.x += dt*s.v*np.cos(s.theta)*np.cos(s.psi); s.y += dt*s.v*np.cos(s.theta)*np.sin(s.psi); s.h += dt*s.v*np.sin(s.theta)
-        s.v = float(np.clip(s.v + dt*g*(nx-np.sin(s.theta)), e.spec.v_min, e.spec.v_max))
-        s.theta += dt*g/max(s.v, 1e-6)*(ny-np.cos(s.theta)); s.psi += dt*g/(max(s.v,1e-6)*max(abs(np.cos(s.theta)),1e-3))*nz
+    def _deactivate(self, aid: str, cause: str, deaths: dict[str, str]) -> None:
+        entity = self.entities[aid]
+        if entity.state.alive:
+            entity.state.alive = False
+            entity.inactive_cause = cause
+            deaths[aid] = cause
 
-    def _blue_actions(self, actions: dict[str, np.ndarray]) -> None:
-        for aid in self.blue_ids:
-            b = self.entities[aid]
-            targets = [self.entities[x] for x in self.red_ids if self.entities[x].state.alive]
-            if not b.state.alive or not targets: continue
-            target = min(targets, key=lambda x: _geometry(b.state, x.state)[0])
-            _, _, _, _, rel, _ = _geometry(b.state, target.state)
-            candidates = [
-                np.array([nx, ny, nz], dtype=float)
-                for nx, ny, nz in ((0,0,0), (0,0,-1), (0,0,1), (1,0,0), (0,-1,0), (0,1,0))
-            ]
-            def score(candidate: np.ndarray) -> float:
-                predicted = Entity("predicted", "blue", b.spec, b.state.copy())
-                self._integrate(predicted, candidate)
-                distance, ata, aa, *_ = _geometry(predicted.state, target.state)
-                distance_score = np.exp(-((distance-2000.0)/1500.0)**2)
-                return float(distance_score + np.cos(ata) + 0.5*np.cos(aa))
-            actions[aid] = max(candidates, key=score)
-
-    def _resolve_attacks(self) -> tuple[list[tuple[str,str]], list[str]]:
-        attacks = []
-        for attacker in self.entities.values():
-            if not attacker.state.alive: continue
-            targets = [x for x in self.entities.values() if x.team != attacker.team and x.state.alive]
-            for target in targets:
-                d, ata, aa, *_ = _geometry(attacker.state, target.state); key=(attacker.aircraft_id,target.aircraft_id)
-                combat = self.config["combat"]
-                inside = (combat["distance_min"] <= d <= combat["distance_max"] and ata < np.deg2rad(combat["ata_deg"]) and aa < np.deg2rad(combat["aa_deg"]))
-                self._attack_streak[key] = self._attack_streak.get(key, 0)+1 if inside else 0
-                if self._attack_streak[key] >= combat["hold_steps"]:
-                    attacks.append(key); self._attack_streak[key]=0
-        killed = sorted({target for _, target in attacks})
-        for target in killed:
-            self.entities[target].state.alive = False
-        return attacks, killed
-
-    def _red_rewards(self, attacks: list[tuple[str,str]], killed: list[str], outcome: str | None) -> dict[str, float]:
-        cfg = self.config["reward"]
-        situation_terms = []
-        enemies = [self.entities[x] for x in self.blue_ids if self.entities[x].state.alive]
-        for aid in self.red_ids:
-            own = self.entities[aid]
-            if not own.state.alive or not enemies:
+    def _apply_boundaries(self) -> dict[str, str]:
+        deaths: dict[str, str] = {}
+        battlefield = self.config["battlefield"]
+        for aid in ENTITY_IDS:
+            entity = self.entities[aid]
+            if not entity.state.alive:
                 continue
-            target = min(enemies, key=lambda x: _geometry(own.state, x.state)[0])
-            distance, ata, aa, *_ = _geometry(own.state, target.state)
-            distance_term = np.exp(-((distance-2000.0)/1500.0)**2)
-            speed_term = np.clip((own.state.v-target.state.v)/200.0, -1.0, 1.0)
-            situation_terms.append(0.1*(distance_term + np.cos(ata) + np.cos(aa) + speed_term))
-        situation = float(np.mean(situation_terms)) if situation_terms else 0.0
-        event = cfg["blue_kill"]*sum(target in self.blue_ids for target in killed)
-        event += cfg["uav_death"]*sum(aid in killed for aid in ("UAV1", "UAV2"))
-        event += cfg["mav_death"]*("MAV" in killed)
-        mission = cfg["red_win"] + cfg["blue_eliminated"] if outcome == "red" else (cfg["mav_death_mission"] if outcome == "blue" else 0.0)
-        total = float(situation + event + mission)
-        return {aid: total for aid in self.red_ids}
+            state = entity.state
+            outside = not (battlefield["x"][0] <= state.x <= battlefield["x"][1] and battlefield["y"][0] <= state.y <= battlefield["y"][1] and battlefield["altitude"][0] <= state.h <= battlefield["altitude"][1])
+            if outside:
+                self._deactivate(aid, "blue_escape" if aid in BLUE_IDS else "boundary", deaths)
+        return deaths
+
+    def _resolve_attacks(self) -> tuple[list[dict[str, str]], dict[str, str]]:
+        combat = self.config["combat"]
+        pairs: list[tuple[str, str]] = []
+        for attacker_id in ENTITY_IDS:
+            attacker = self.entities[attacker_id]
+            if not attacker.state.alive:
+                continue
+            target_ids = BLUE_IDS if attacker.team == "red" else RED_IDS
+            for target_id in target_ids:
+                target = self.entities[target_id]
+                key = (attacker_id, target_id)
+                if not target.state.alive:
+                    self._attack_streak[key] = 0
+                    continue
+                geometry = compute_pairwise_geometry(attacker.state, target.state)
+                inside = combat["distance"][0] <= geometry.distance <= combat["distance"][1] and geometry.ata < np.deg2rad(combat["ata_deg"]) and geometry.aa < np.deg2rad(combat["aa_deg"])
+                self._attack_streak[key] = self._attack_streak.get(key, 0) + 1 if inside else 0
+                if self._attack_streak[key] >= int(combat["hold_steps"]):
+                    pairs.append(key)
+        events = [{"attacker": attacker, "target": target} for attacker, target in sorted(pairs)]
+        deaths: dict[str, str] = {}
+        for _, target in pairs:
+            cause = "red_attack" if target in BLUE_IDS else "blue_attack"
+            self._deactivate(target, cause, deaths)
+            if cause == "red_attack": self._red_attack_kills.add(target)
+            else: self._blue_attack_kills.add(target)
+        for key in list(self._attack_streak):
+            if key[0] in deaths or key[1] in deaths:
+                self._attack_streak[key] = 0
+        return events, deaths
+
+    def _termination(self) -> tuple[bool, bool, str | None]:
+        mav = self.entities["MAV"]
+        if not mav.state.alive:
+            return True, False, "blue"
+        all_blue_inactive = not any(self.entities[aid].state.alive for aid in BLUE_IDS)
+        if all_blue_inactive:
+            return True, False, "red" if self._red_attack_kills == set(BLUE_IDS) else "blue"
+        if self.step_count >= self.max_decision_steps:
+            return False, True, "draw"
+        return False, False, None
+
+    def _team_situation_reward(self) -> float:
+        alive_blue = [self.entities[aid] for aid in BLUE_IDS if self.entities[aid].state.alive]
+        total = 0.0
+        for aid in RED_IDS:
+            own = self.entities[aid]
+            if own.state.alive and alive_blue:
+                total += max(situation_reward(own.state, target.state) for target in alive_blue)
+        return float(total / 3.0)
+
+    def _episode_summary(self, outcome: str | None) -> dict[str, Any]:
+        return {
+            "outcome": outcome, "episode_length": self.step_count,
+            "mav_survived": bool(self.entities["MAV"].state.alive),
+            "red_uav_survivors": sum(self.entities[aid].state.alive for aid in ("UAV1", "UAV2")),
+            "blue_survivors": sum(self.entities[aid].state.alive for aid in BLUE_IDS),
+            "red_attack_kills": len(self._red_attack_kills), "blue_attack_kills": len(self._blue_attack_kills),
+            "red_uav_losses": sum(not self.entities[aid].state.alive for aid in ("UAV1", "UAV2")),
+            "mav_loss": int(not self.entities["MAV"].state.alive),
+            "blue_target_mode": self.blue_policy.episode_mode, "episode_return": float(self.episode_return),
+        }
+
+    @staticmethod
+    def _position_norm(value: float) -> float:
+        return float(value / 100000.0)
+
+    @staticmethod
+    def _altitude_norm(value: float) -> float:
+        return float(2.0 * (value - 1000.0) / 19000.0 - 1.0)
 
     def _observations(self) -> dict[str, np.ndarray]:
-        out = {}
-        for aid in self.red_ids:
-            own = self.entities[aid]; vals = [own.state.x/6000, own.state.y/6000, own.state.h/6000, own.state.v/400, own.state.theta/np.pi, own.state.psi/np.pi, 0.0 if aid=="MAV" else 1.0, float(own.state.alive)]
-            friends = [self.entities[x] for x in self.red_ids if x != aid]; enemies = [self.entities[x] for x in self.blue_ids]
-            for x in friends:
-                d,_,_,_,rel,dv = _geometry(own.state,x.state); vals += [*rel/6000, d/6000, *dv/600, float(x.state.alive), 0.0 if x.aircraft_id=="MAV" else 1.0]
-            for x in enemies:
-                d,ata,aa,_,rel,_ = _geometry(own.state,x.state); vals += [*rel/6000, d/6000, ata/np.pi, aa/np.pi, float(x.state.alive)]
-            out[aid] = np.asarray(vals, dtype=np.float32)
-        return out
+        result: dict[str, np.ndarray] = {}
+        max_distance = float(np.sqrt(200000.0 ** 2 + 200000.0 ** 2 + 19000.0 ** 2))
+        for own_id in RED_IDS:
+            own = self.entities[own_id]
+            state = own.state
+            values = [self._position_norm(state.x), self._position_norm(state.y), self._altitude_norm(state.h), state.v / 400.0, state.theta / np.pi, state.psi / np.pi, TYPE_VALUE[TYPE_BY_ID[own_id]], float(state.alive)]
+            for friend_id in RED_IDS:
+                if friend_id == own_id: continue
+                friend = self.entities[friend_id]
+                geometry = compute_pairwise_geometry(state, friend.state)
+                values.extend([geometry.relative_position[0] / 200000.0, geometry.relative_position[1] / 200000.0, geometry.relative_position[2] / 19000.0, geometry.distance / max_distance, geometry.relative_velocity[0] / 800.0, geometry.relative_velocity[1] / 800.0, geometry.relative_velocity[2] / 800.0, float(friend.state.alive), TYPE_VALUE[TYPE_BY_ID[friend_id]]])
+            for blue_id in BLUE_IDS:
+                blue = self.entities[blue_id]
+                geometry = compute_pairwise_geometry(state, blue.state)
+                values.extend([geometry.relative_position[0] / 200000.0, geometry.relative_position[1] / 200000.0, geometry.relative_position[2] / 19000.0, geometry.distance / max_distance, geometry.ata / np.pi, geometry.aa / np.pi, float(blue.state.alive)])
+            observation = np.asarray(values, dtype=np.float32)
+            if observation.shape != (OBS_DIM,):
+                raise AssertionError(f"observation contract violated: {observation.shape}")
+            result[own_id] = observation
+        return result
+
+    def global_state(self) -> np.ndarray:
+        values: list[float] = []
+        for aid in ENTITY_IDS:
+            state = self.entities[aid].state
+            values.extend([self._position_norm(state.x), self._position_norm(state.y), self._altitude_norm(state.h), state.v / 400.0, state.theta / np.pi, state.psi / np.pi, float(state.alive), TYPE_VALUE[TYPE_BY_ID[aid]]])
+        result = np.asarray(values, dtype=np.float32)
+        if result.shape != (GLOBAL_STATE_DIM,):
+            raise AssertionError(f"global state contract violated: {result.shape}")
+        return result
+
+
+MAVSpec = AircraftSpec("MAV", 250.0, 400.0, (-1.0, 5.0), (-1.5, 2.0), (-3.0, 3.0))
+UAVSpec = AircraftSpec("UAV", 150.0, 300.0, (-1.0, 5.0), (-1.5, 1.5), (-2.0, 2.0))
+BlueSpec = AircraftSpec("Blue", 250.0, 400.0, (-1.0, 5.0), (-1.5, 3.0), (-3.0, 3.0))

@@ -1,48 +1,45 @@
-# Heterogeneous MAV/UAV Air Combat
+# MAV/UAV Heterogeneous 3v2 Air Combat
 
-This repository's primary experiment is a lightweight three-dimensional 3v2
-multi-agent air-combat environment:
+A compact research environment for multi-agent reinforcement-learning experiments:
 
-- Red: one MAV and two UAVs, all trainable and all able to attack.
-- Blue: two homogeneous high-performance aircraft controlled by a fixed rule.
-- Dynamics: six-state, three-degree-of-freedom point mass with direct
-  `[nx, ny, nz]` actions.
-- Engagement: shared geometric envelope held for three decision steps.
-- Observation: unified 40-value entity observation for every Red agent.
+- Red: one armed, high-performance, high-value MAV and two armed, lower-performance, lower-value UAVs.
+- Blue: two homogeneous aircraft controlled by a fixed rule policy.
+- Red's three aircraft are trainable agents; Blue is never trained.
 
-## Environment API
+The environment uses overload-controlled 3DOF point-mass dynamics. Each Red actor emits the normalized action `[ux, uy, uz]` in `[-1, 1]^3`; the environment maps it around the current trim overload to physical `[nx, ny, nz]`. One RL decision lasts 1 s and contains ten 0.1 s RK4 physics steps.
+
+Combat is a geometric persistent engagement: 1-3 km distance, attacker target angle below 30 degrees, entering angle below 90 degrees, held at three consecutive decision boundaries. MAV, UAV and Blue use the same rule. There are no missiles, sensors, communication, target-assignment actions, recurrent networks or attention modules.
+
+## Install and inspect
+
+```bash
+pip install -e .
+python scripts/audit_mavuav_env.py --steps 1000
+pytest
+```
 
 ```python
 import numpy as np
 from uav_combat import HeterogeneousMAVUAVAirCombatEnv
 
 env = HeterogeneousMAVUAVAirCombatEnv()
-observations, info = env.reset(seed=0)
-observations, rewards, terminated, truncated, info = env.step(
-    np.zeros((3, 3), dtype=np.float32)
-)
+observations, info = env.reset(seed=1)
+observations, rewards, terminated, truncated, info = env.step(np.zeros((3, 3)))
+state = env.global_state()
 ```
 
-Agent order is always `MAV`, `UAV1`, `UAV2`. The action shape is `[3, 3]` and
-each observation shape is `[40]`.
+Each Red observation is 40D, the centralized state is 40D, and the Red active mask is ordered `[MAV, UAV1, UAV2]`.
 
-For batched MARL sampling, `MAVUAVVectorEnv` accepts actions shaped
-`[num_envs, 3, 3]` and returns observations shaped `[num_envs, 3, 40]`.
+## Baselines
 
-Configuration lives in `configs/heterogeneous_mavuav_3v2.yaml`. Design details
-are documented in `docs/heterogeneous_mavuav_3v2.md`.
-
-## Test
-
-Run in the project environment:
+- HAPPO: three independent feed-forward actors, sequential policy updates, one centralized critic.
+- MAPPO: one shared feed-forward actor conditioned by the observation type field, one centralized critic.
 
 ```bash
-wsl -d Ubuntu
-conda activate uav
-cd /mnt/c/Users/HPK/Desktop/2_uav
-python -m pytest -q tests/test_mavuav_3v2.py
+python scripts/train_happo_mavuav.py --updates 10
+python scripts/train_mappo_mavuav.py --updates 10
+python scripts/evaluate_happo_mavuav.py outputs/happo_mavuav.pt
+python scripts/evaluate_mappo_mavuav.py outputs/mappo_mavuav.pt
 ```
 
-Historical role-oriented 4v3 environments, scenarios, policies, configurations,
-trainers, diagnostics, and tests have been removed. Remaining generic legacy
-experiments are not exported by the package entry point.
+Formal evaluation reports `nearest` and `mav_priority` Blue target modes separately. This project combines published ingredients with explicit engineering adaptations; it does not claim to reproduce any single paper's environment exactly. See [environment specification](docs/environment_spec.md) and [source provenance](docs/source_provenance.md).

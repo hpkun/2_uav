@@ -1,21 +1,39 @@
 simulation:
-  dt: 0.2
-  max_steps: 500
+  decision_dt: 1.0       # s
+  physics_dt: 0.1        # s
+  max_decision_steps: 75
+battlefield:
+  x: [-100000.0, 100000.0]  # m
+  y: [-100000.0, 100000.0]  # m
+  altitude: [1000.0, 20000.0]  # m
 aircraft_specs:
-  MAV: {v_min: 120, v_max: 300, nx: [-1, 1], ny: [-2, 2], nz: [-3, 3], sensor_range: 6000}
-  UAV: {v_min: 100, v_max: 220, nx: [-1, 1], ny: [-1.5, 1.5], nz: [-2, 2], sensor_range: 6000}
-  Blue: {v_min: 150, v_max: 320, nx: [-1, 1], ny: [-2, 2], nz: [-3, 3], sensor_range: 6000}
+  MAV: {v_min: 250.0, v_max: 400.0, nx: [-1.0, 5.0], ny: [-1.5, 2.0], nz: [-3.0, 3.0]}
+  UAV: {v_min: 150.0, v_max: 300.0, nx: [-1.0, 5.0], ny: [-1.5, 1.5], nz: [-2.0, 2.0]}
+  Blue: {v_min: 250.0, v_max: 400.0, nx: [-1.0, 5.0], ny: [-1.5, 3.0], nz: [-3.0, 3.0]}
 scenario:
-  name: heterogeneous_3v2
-  red_count: 3
-  blue_count: 2
-  randomize: false
   initial:
-    MAV: {position: [-1500, 0, 3000], speed: 210, heading_deg: 0}
-    UAV1: {position: [-1800, -500, 3000], speed: 160, heading_deg: 0}
-    UAV2: {position: [-1800, 500, 3000], speed: 160, heading_deg: 0}
-    Blue1: {position: [1500, 0, 3000], speed: 235, heading_deg: 180}
-    Blue2: {position: [1500, 800, 3000], speed: 235, heading_deg: 180}
-combat: {distance_min: 1000, distance_max: 3000, ata_deg: 30, aa_deg: 90, hold_steps: 3}
-reward: {blue_kill: 10, uav_death: -5, mav_death: -15, red_win: 50, blue_eliminated: 50, mav_death_mission: -50}
-blue_policy: {name: fixed_rule, candidates: 5}
+    MAV: {position: [-4500.0, 0.0, 5000.0], speed: 325.0, heading_deg: 0.0}
+    UAV1: {position: [-4000.0, -800.0, 5000.0], speed: 225.0, heading_deg: 0.0}
+    UAV2: {position: [-4000.0, 800.0, 5000.0], speed: 225.0, heading_deg: 0.0}
+    Blue1: {position: [4000.0, -600.0, 5000.0], speed: 325.0, heading_deg: 180.0}
+    Blue2: {position: [4000.0, 600.0, 5000.0], speed: 325.0, heading_deg: 180.0}
+initial_randomization:
+  enabled: true
+  position_xy_jitter: 200.0  # m
+  altitude_jitter: 100.0     # m
+  speed_jitter: 10.0         # m/s
+  heading_jitter_deg: 3.0
+combat:
+  distance: [1000.0, 3000.0]  # m
+  ata_deg: 30.0
+  aa_deg: 90.0
+  hold_steps: 3
+reward:
+  blue_kill: 50.0
+  uav_loss: -10.0
+  mav_loss: -100.0
+  terminal_red_win: 100.0
+  terminal_blue_win: -100.0
+  terminal_draw: 0.0
+blue_policy:
+  target_mode: mixed_episode

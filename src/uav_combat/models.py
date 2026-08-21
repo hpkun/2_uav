@@ -1,79 +1,78 @@
-"""环境使用的基础数据模型。"""
+"""Core data models for the MAV/UAV 3v2 environment."""
 from __future__ import annotations
 
 from dataclasses import dataclass
 import numpy as np
 
 
+@dataclass(frozen=True)
+class AircraftSpec:
+    """Only the performance limits used by the 3DOF model."""
+
+    aircraft_type: str
+    v_min: float
+    v_max: float
+    nx: tuple[float, float]
+    ny: tuple[float, float]
+    nz: tuple[float, float]
+
+    def __post_init__(self) -> None:
+        if self.v_min >= self.v_max:
+            raise ValueError("v_min must be smaller than v_max")
+        for name in ("nx", "ny", "nz"):
+            lower, upper = getattr(self, name)
+            if lower >= upper:
+                raise ValueError(f"{name} lower limit must be smaller than upper limit")
+
+
 @dataclass
 class AircraftState:
-    """NED 坐标中的六维点质量状态。"""
+    """Physical state ``[x, y, h, v, theta, psi]`` with altitude positive up."""
+
     x: float
     y: float
-    z: float
+    h: float
     v: float
     theta: float
     psi: float
     alive: bool = True
 
     def as_array(self) -> np.ndarray:
-        """返回动力学六维状态向量。"""
-        return np.array([self.x, self.y, self.z, self.v, self.theta, self.psi], dtype=float)
+        return np.asarray([self.x, self.y, self.h, self.v, self.theta, self.psi], dtype=np.float64)
+
+    @classmethod
+    def from_array(cls, values: np.ndarray, *, alive: bool = True) -> "AircraftState":
+        return cls(*(float(v) for v in values), alive=alive)
 
     def copy(self) -> "AircraftState":
-        """返回独立状态副本。"""
-        return AircraftState(self.x, self.y, self.z, self.v, self.theta, self.psi, self.alive)
+        return AircraftState(*self.as_array(), alive=self.alive)
 
     def velocity_vector(self) -> np.ndarray:
-        """返回 NED 坐标中的速度向量。"""
         ct = np.cos(self.theta)
-        return np.array([self.v * ct * np.cos(self.psi), self.v * ct * np.sin(self.psi), -self.v * np.sin(self.theta)])
+        return np.asarray(
+            [self.v * ct * np.cos(self.psi), self.v * ct * np.sin(self.psi), self.v * np.sin(self.theta)],
+            dtype=np.float64,
+        )
 
     @property
     def altitude(self) -> float:
-        """返回海拔高度（向上为正）。"""
-        return -self.z
+        return self.h
 
 
 @dataclass(frozen=True)
-class AircraftSpec:
-    """可配置的飞机性能和控制参数。"""
-    v_min: float; v_max: float
-    theta_min: float; theta_max: float
-    nx_min: float; nx_max: float
-    nz_min: float; nz_max: float
-    phi_min: float; phi_max: float
-    yaw_rate_max: float; pitch_rate_max: float; acceleration_max: float
-    k_yaw: float; k_pitch: float; k_speed: float
-
-
-@dataclass(frozen=True)
-class TargetCommand:
-    """期望航向、俯仰和速度。"""
-    desired_psi: float
-    desired_theta: float
-    desired_v: float
-
-
-@dataclass(frozen=True)
-class ControlCommand:
-    """动力学控制量：切向过载、法向过载和滚转角。"""
+class OverloadCommand:
     nx: float
+    ny: float
     nz: float
-    phi: float
+
+    def as_array(self) -> np.ndarray:
+        return np.asarray([self.nx, self.ny, self.nz], dtype=np.float64)
 
 
 @dataclass
 class Aircraft:
-    """具有标识、阵营、统一规格和状态的飞行实体。"""
     aircraft_id: str
     team: str
     spec: AircraftSpec
     state: AircraftState
-    role: str = "combat"
-    sensor_range: float = float("inf")
-    can_attack: bool = True
-
-    def __post_init__(self) -> None:
-        if self.role not in ("support", "combat"):
-            raise ValueError(f"unknown aircraft role: {self.role!r}")
+    inactive_cause: str | None = None
