@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-episodes", type=int, default=50)
     parser.add_argument("--final-eval-episodes", type=int, default=100)
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--num-envs", type=int, default=4)
+    parser.add_argument("--num-envs", type=int, default=16)
     parser.add_argument("--output-dir", default="outputs/calibration")
     parser.add_argument("--benchmark-steps", type=int, default=2_000)
     parser.add_argument("--baseline-episodes", type=int, default=100)
@@ -77,6 +77,8 @@ def run_benchmark(algorithm: str, seed: int, device: str, num_envs: int, sampled
     if sampled_steps % num_envs:
         raise ValueError("benchmark steps must be divisible by num_envs")
     trainer = make_trainer(algorithm, seed, device, num_envs)
+    vector_env_start_method = trainer.vector_env.start_method
+    worker_pids = trainer.vector_env.worker_pids
     diagnostics = TrainingDiagnostics(max_observation_samples=10_000)
     started = time.perf_counter()
     train_to_sampled_steps(trainer, sampled_steps, diagnostics)
@@ -85,6 +87,7 @@ def run_benchmark(algorithm: str, seed: int, device: str, num_envs: int, sampled
     throughput = sampled_steps / elapsed
     return {
         "algorithm": algorithm, "device": device, "num_envs": num_envs,
+        "vector_env_start_method": vector_env_start_method, "worker_pids": worker_pids,
         "sampled_steps": sampled_steps, "elapsed_seconds": elapsed,
         "environment_steps_per_second": throughput,
         "estimated_50k_seconds": 50_000 / throughput,

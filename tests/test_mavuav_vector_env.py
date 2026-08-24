@@ -1,5 +1,7 @@
 from copy import deepcopy
+import os
 import numpy as np
+import pytest
 
 from uav_combat import MAVUAVVectorEnv
 from uav_combat.mavuav import load_environment_config
@@ -11,29 +13,66 @@ def short_config(max_steps=1):
 
 
 def test_vector_env_shapes_and_auto_reset():
-    env = MAVUAVVectorEnv(2, short_config(), seed=3, randomize=False)
-    observations, states, masks, infos = env.reset()
-    assert observations.shape == (2, 3, 40) and states.shape == (2, 40) and masks.shape == (2, 3) and len(infos) == 2
-    observations, states, rewards, terminated, truncated, masks, infos = env.step(np.zeros((2, 3, 3)))
-    assert rewards.shape == (2, 3) and terminated.shape == truncated.shape == (2,)
-    assert truncated.all() and all(info["auto_reset"] and "episode_summary" in info for info in infos)
-    env.step(np.zeros((2, 3, 3)))
+    with MAVUAVVectorEnv(2, short_config(), seed=3, randomize=False) as env:
+        observations, states, masks, infos = env.reset()
+        assert observations.shape == (2, 3, 40) and states.shape == (2, 40) and masks.shape == (2, 3) and len(infos) == 2
+        observations, states, rewards, terminated, truncated, masks, infos = env.step(np.zeros((2, 3, 3)))
+        assert rewards.shape == (2, 3) and terminated.shape == truncated.shape == (2,)
+        assert truncated.all() and all(info["auto_reset"] and "episode_summary" in info for info in infos)
+        env.step(np.zeros((2, 3, 3)))
 
 
 def test_vector_env_shapes():
-    observations, states, masks, infos = MAVUAVVectorEnv(2, seed=3).reset()
-    assert observations.shape == (2, 3, 40) and states.shape == (2, 40) and masks.shape == (2, 3) and len(infos) == 2
+    with MAVUAVVectorEnv(2, seed=3) as env:
+        observations, states, masks, infos = env.reset()
+        assert observations.shape == (2, 3, 40) and states.shape == (2, 40) and masks.shape == (2, 3) and len(infos) == 2
 
 
 def test_vector_env_auto_reset():
-    env = MAVUAVVectorEnv(1, short_config(), seed=3); env.reset()
-    *_, truncated, masks, infos = env.step(np.zeros((1, 3, 3)))
-    assert truncated[0] and infos[0]["auto_reset"] and np.array_equal(masks[0], [1, 1, 1])
+    with MAVUAVVectorEnv(1, short_config(), seed=3) as env:
+        env.reset()
+        *_, truncated, masks, infos = env.step(np.zeros((1, 3, 3)))
+        assert truncated[0] and infos[0]["auto_reset"] and np.array_equal(masks[0], [1, 1, 1])
 
 
 def test_vector_env_can_run_1000_steps_without_manual_reset():
-    env = MAVUAVVectorEnv(1, short_config(5), seed=4)
-    observations, states, masks, _ = env.reset(); rng = np.random.default_rng(4)
-    for _ in range(1000):
-        observations, states, rewards, _, _, masks, _ = env.step(rng.uniform(-1, 1, (1, 3, 3)))
-        assert np.all(np.isfinite(observations)) and np.all(np.isfinite(states)) and np.all(np.isfinite(rewards))
+    with MAVUAVVectorEnv(1, short_config(5), seed=4) as env:
+        observations, states, masks, _ = env.reset(); rng = np.random.default_rng(4)
+        for _ in range(1000):
+            observations, states, rewards, _, _, masks, _ = env.step(rng.uniform(-1, 1, (1, 3, 3)))
+            assert np.all(np.isfinite(observations)) and np.all(np.isfinite(states)) and np.all(np.isfinite(rewards))
+
+
+def test_vector_env_uses_distinct_worker_processes_by_default():
+    with MAVUAVVectorEnv(3, short_config(), seed=8) as env:
+        pids = env.worker_pids
+        assert env.parallel
+        assert len(set(pids)) == 3
+        assert os.getpid() not in pids
+
+
+def test_parallel_results_match_serial_reference_through_auto_reset():
+    config = short_config(3)
+    rng = np.random.default_rng(19)
+    with MAVUAVVectorEnv(2, config, seed=19, randomize=True, parallel=True) as parallel_env, \
+         MAVUAVVectorEnv(2, config, seed=19, randomize=True, parallel=False) as serial_env:
+        parallel_reset = parallel_env.reset()
+        serial_reset = serial_env.reset()
+        for parallel_value, serial_value in zip(parallel_reset[:3], serial_reset[:3]):
+            np.testing.assert_array_equal(parallel_value, serial_value)
+        for _ in range(7):
+            actions = rng.uniform(-1.0, 1.0, (2, 3, 3))
+            parallel_step = parallel_env.step(actions)
+            serial_step = serial_env.step(actions)
+            for parallel_value, serial_value in zip(parallel_step[:6], serial_step[:6]):
+                np.testing.assert_array_equal(parallel_value, serial_value)
+            assert [info["auto_reset"] for info in parallel_step[6]] == [info["auto_reset"] for info in serial_step[6]]
+            np.testing.assert_array_equal(parallel_env.reset_counts, serial_env.reset_counts)
+
+
+def test_worker_error_is_propagated_without_desynchronizing_other_workers():
+    with MAVUAVVectorEnv(2, short_config(), seed=23) as env:
+        original_pids = env.worker_pids
+        with pytest.raises(RuntimeError, match="unknown vector-environment command"):
+            env._send_all("invalid-test-command", [None, None])
+        assert env.worker_pids == original_pids

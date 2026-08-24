@@ -1,7 +1,7 @@
 training:
   seed: 1
   device: cpu
-  num_envs: 4
+  num_envs: 16
   rollout_steps: 128
   gamma: 0.99
   gae_lambda: 0.95
@@ -14,4 +14,3 @@ training:
   value_loss_coef: 0.5
   max_grad_norm: 0.5
   hidden_dim: 128
-

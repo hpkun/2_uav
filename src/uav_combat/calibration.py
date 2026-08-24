@@ -357,15 +357,7 @@ def set_rollout_horizon(trainer: Any, horizon: int) -> None:
 
 
 def save_calibration_checkpoint(path: str | Path, trainer: Any, algorithm: str, sampled_steps: int, diagnostics: TrainingDiagnostics) -> None:
-    environment_states = []
-    for env in trainer.vector_env.envs:
-        environment_states.append({
-            "entities": deepcopy(env.entities), "step_count": env.step_count,
-            "episode_return": env.episode_return, "running": env._running,
-            "attack_streak": deepcopy(env._attack_streak),
-            "red_attack_kills": set(env._red_attack_kills), "blue_attack_kills": set(env._blue_attack_kills),
-            "rng": deepcopy(env.rng.bit_generator.state), "blue_episode_mode": env.blue_policy.episode_mode,
-        })
+    environment_states = trainer.vector_env.get_env_states()
     payload: dict[str, Any] = {
         "format": "mavuav_learnability_calibration_v1", "algorithm": algorithm,
         "sampled_steps": int(sampled_steps), "trainer_config": trainer.config,
@@ -376,6 +368,7 @@ def save_calibration_checkpoint(path: str | Path, trainer: Any, algorithm: str, 
             "observations": trainer.observations, "global_states": trainer.global_states,
             "active_masks": trainer.active_masks, "environment_states": environment_states,
             "vector_reset_counts": trainer.vector_env.reset_counts,
+            "vector_base_seed": trainer.vector_env.base_seed,
         },
     }
     if algorithm == "mappo":
@@ -401,13 +394,11 @@ def load_calibration_checkpoint(path: str | Path, trainer: Any, algorithm: str) 
     trainer.observations = np.asarray(rollout["observations"], dtype=np.float32)
     trainer.global_states = np.asarray(rollout["global_states"], dtype=np.float32)
     trainer.active_masks = np.asarray(rollout["active_masks"], dtype=np.float32)
-    trainer.vector_env.reset_counts = np.asarray(rollout["vector_reset_counts"], dtype=np.int64)
-    for env, state in zip(trainer.vector_env.envs, rollout["environment_states"]):
-        env.entities = state["entities"]; env.step_count = int(state["step_count"])
-        env.episode_return = float(state["episode_return"]); env._running = bool(state["running"])
-        env._attack_streak = state["attack_streak"]; env._red_attack_kills = set(state["red_attack_kills"])
-        env._blue_attack_kills = set(state["blue_attack_kills"]); env.rng.bit_generator.state = state["rng"]
-        env.blue_policy.episode_mode = state["blue_episode_mode"]
+    trainer.vector_env.set_env_states(
+        rollout["environment_states"],
+        np.asarray(rollout["vector_reset_counts"], dtype=np.int64),
+        rollout.get("vector_base_seed", trainer.vector_env.base_seed),
+    )
     return sampled_steps, TrainingDiagnostics.from_state_dict(payload["diagnostics"])
 
 

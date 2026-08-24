@@ -15,7 +15,7 @@ from .networks import IndependentActors
 
 
 DEFAULTS = {
-    "seed": 1, "device": "cpu", "num_envs": 4, "rollout_steps": 128,
+    "seed": 1, "device": "cpu", "num_envs": 16, "rollout_steps": 128,
     "gamma": 0.99, "gae_lambda": 0.95, "ppo_epochs": 4, "minibatch_size": 256,
     "clip_coef": 0.2, "actor_learning_rate": 3e-4, "critic_learning_rate": 1e-3,
     "entropy_coef": 0.01, "value_loss_coef": 0.5, "max_grad_norm": 0.5,
@@ -130,4 +130,3 @@ class HAPPOTrainer:
 
     def close(self) -> None:
         self.vector_env.close()
-

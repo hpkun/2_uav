@@ -7,7 +7,7 @@ from uav_combat import MAVUAVVectorEnv
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(); parser.add_argument("--steps", type=int, default=1000); parser.add_argument("--num-envs", type=int, default=4); parser.add_argument("--seed", type=int, default=1)
+    parser = argparse.ArgumentParser(); parser.add_argument("--steps", type=int, default=1000); parser.add_argument("--num-envs", type=int, default=16); parser.add_argument("--seed", type=int, default=1)
     args = parser.parse_args(); rng = np.random.default_rng(args.seed)
     env = MAVUAVVectorEnv(args.num_envs, seed=args.seed); observations, states, masks, _ = env.reset()
     episodes = 0
@@ -19,4 +19,3 @@ def main() -> None:
 
 
 if __name__ == "__main__": main()
-
