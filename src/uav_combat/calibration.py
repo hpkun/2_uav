@@ -72,9 +72,40 @@ class TrainingDiagnostics:
 
     max_observation_samples: int = 200_000
     observation_batches: list[np.ndarray] = field(default_factory=list)
-    action_batches: list[np.ndarray] = field(default_factory=list)
-    active_mask_batches: list[np.ndarray] = field(default_factory=list)
     observation_sample_count: int = 0
+    observation_feature_statistics: list[dict[str, float]] | None = None
+    observation_group_statistics: dict[str, dict[str, float]] | None = None
+    action_count: np.ndarray = field(default_factory=lambda: np.zeros((3, 3), dtype=np.int64))
+    action_sum: np.ndarray = field(default_factory=lambda: np.zeros((3, 3), dtype=np.float64))
+    action_sum_sq: np.ndarray = field(default_factory=lambda: np.zeros((3, 3), dtype=np.float64))
+    action_abs_sum: np.ndarray = field(default_factory=lambda: np.zeros((3, 3), dtype=np.float64))
+    action_saturation_count: np.ndarray = field(default_factory=lambda: np.zeros((3, 3), dtype=np.int64))
+
+    def _observe_actions(self, actions: np.ndarray, active_masks: np.ndarray) -> None:
+        actions = np.asarray(actions, dtype=np.float32).reshape(-1, 3, 3)
+        masks = np.asarray(active_masks, dtype=np.float32).reshape(-1, 3) > 0.5
+        for agent_index in range(3):
+            values = np.asarray(actions[masks[:, agent_index], agent_index, :], dtype=np.float64)
+            if not len(values):
+                continue
+            self.action_count[agent_index] += len(values)
+            self.action_sum[agent_index] += values.sum(axis=0)
+            self.action_sum_sq[agent_index] += np.square(values).sum(axis=0)
+            self.action_abs_sum[agent_index] += np.abs(values).sum(axis=0)
+            self.action_saturation_count[agent_index] += (np.abs(values) >= 0.95).sum(axis=0)
+
+    def _freeze_observations(self) -> None:
+        """Keep exact requested summaries and release the capped raw sample."""
+        if self.observation_feature_statistics is not None or not self.observation_batches:
+            return
+        observations = np.concatenate(self.observation_batches, axis=0)
+        self.observation_feature_statistics = [
+            _statistics(observations[:, index]) for index in range(len(OBSERVATION_FEATURES))
+        ]
+        self.observation_group_statistics = {
+            name: _statistics(observations[:, indices]) for name, indices in OBSERVATION_GROUPS.items()
+        }
+        self.observation_batches.clear()
 
     def observe_rollout(self, buffer: RolloutBuffer) -> None:
         observations = np.asarray(buffer.observations, dtype=np.float32).reshape(-1, 40)
@@ -83,49 +114,79 @@ class TrainingDiagnostics:
             kept = observations[:remaining].copy()
             self.observation_batches.append(kept)
             self.observation_sample_count += len(kept)
-        self.action_batches.append(np.asarray(buffer.actions, dtype=np.float32).reshape(-1, 3, 3).copy())
-        self.active_mask_batches.append(np.asarray(buffer.active_masks, dtype=np.float32).reshape(-1, 3).copy())
+            if self.observation_sample_count >= self.max_observation_samples:
+                self._freeze_observations()
+        self._observe_actions(buffer.actions, buffer.active_masks)
 
     def observation_rows(self, algorithm: str, seed: int, sampled_steps: int) -> list[dict[str, Any]]:
-        if not self.observation_batches:
+        if self.observation_sample_count == 0:
             return []
-        observations = np.concatenate(self.observation_batches, axis=0)
+        if self.observation_feature_statistics is None:
+            observations = np.concatenate(self.observation_batches, axis=0)
+            feature_statistics = [_statistics(observations[:, index]) for index in range(len(OBSERVATION_FEATURES))]
+            group_statistics = {name: _statistics(observations[:, indices]) for name, indices in OBSERVATION_GROUPS.items()}
+        else:
+            feature_statistics = self.observation_feature_statistics
+            group_statistics = self.observation_group_statistics or {}
         rows: list[dict[str, Any]] = []
         for index, name in enumerate(OBSERVATION_FEATURES):
-            rows.append({"algorithm": algorithm, "seed": seed, "sampled_steps": sampled_steps, "row_type": "feature", "feature": name, "indices": str(index), "samples": len(observations), **_statistics(observations[:, index])})
+            rows.append({"algorithm": algorithm, "seed": seed, "sampled_steps": sampled_steps, "row_type": "feature", "feature": name, "indices": str(index), "samples": self.observation_sample_count, **feature_statistics[index]})
         for name, indices in OBSERVATION_GROUPS.items():
-            rows.append({"algorithm": algorithm, "seed": seed, "sampled_steps": sampled_steps, "row_type": "group", "feature": name, "indices": ",".join(map(str, indices)), "samples": len(observations) * len(indices), **_statistics(observations[:, indices])})
+            rows.append({"algorithm": algorithm, "seed": seed, "sampled_steps": sampled_steps, "row_type": "group", "feature": name, "indices": ",".join(map(str, indices)), "samples": self.observation_sample_count * len(indices), **group_statistics[name]})
         return rows
 
     def action_rows(self, algorithm: str, seed: int, sampled_steps: int) -> list[dict[str, Any]]:
-        if not self.action_batches:
+        if not np.any(self.action_count):
             return []
-        actions = np.concatenate(self.action_batches, axis=0)
-        masks = np.concatenate(self.active_mask_batches, axis=0) > 0.5
         rows = []
         for agent_index, agent_name in enumerate(AGENT_NAMES):
             for action_index, action_name in enumerate(ACTION_NAMES):
-                values = actions[masks[:, agent_index], agent_index, action_index]
-                stats = _statistics(values)
-                rows.append({"algorithm": algorithm, "seed": seed, "sampled_steps": sampled_steps, "agent": agent_name, "action_dimension": action_name, "samples": len(values), "mean": stats["mean"], "std": stats["std"], "mean_abs": stats["mean_abs"], "saturation_rate": stats["saturation_rate"]})
+                count = int(self.action_count[agent_index, action_index])
+                if count:
+                    mean = self.action_sum[agent_index, action_index] / count
+                    variance = max(self.action_sum_sq[agent_index, action_index] / count - mean * mean, 0.0)
+                    mean_abs = self.action_abs_sum[agent_index, action_index] / count
+                    saturation_rate = self.action_saturation_count[agent_index, action_index] / count
+                else:
+                    mean = variance = mean_abs = saturation_rate = 0.0
+                rows.append({"algorithm": algorithm, "seed": seed, "sampled_steps": sampled_steps, "agent": agent_name, "action_dimension": action_name, "samples": count, "mean": float(mean), "std": float(np.sqrt(variance)), "mean_abs": float(mean_abs), "saturation_rate": float(saturation_rate)})
         return rows
 
     def state_dict(self) -> dict[str, Any]:
         return {
+            "format": "training_diagnostics_v2",
             "max_observation_samples": self.max_observation_samples,
             "observation_batches": self.observation_batches,
-            "action_batches": self.action_batches,
-            "active_mask_batches": self.active_mask_batches,
             "observation_sample_count": self.observation_sample_count,
+            "observation_feature_statistics": self.observation_feature_statistics,
+            "observation_group_statistics": self.observation_group_statistics,
+            "action_count": self.action_count,
+            "action_sum": self.action_sum,
+            "action_sum_sq": self.action_sum_sq,
+            "action_abs_sum": self.action_abs_sum,
+            "action_saturation_count": self.action_saturation_count,
         }
 
     @classmethod
     def from_state_dict(cls, state: Mapping[str, Any]) -> "TrainingDiagnostics":
         result = cls(int(state["max_observation_samples"]))
-        result.observation_batches = list(state["observation_batches"])
-        result.action_batches = list(state["action_batches"])
-        result.active_mask_batches = list(state["active_mask_batches"])
+        result.observation_batches = [np.asarray(batch, dtype=np.float32) for batch in state.get("observation_batches", [])]
         result.observation_sample_count = int(state["observation_sample_count"])
+        if state.get("format") == "training_diagnostics_v2":
+            feature_stats = state.get("observation_feature_statistics")
+            group_stats = state.get("observation_group_statistics")
+            result.observation_feature_statistics = list(feature_stats) if feature_stats is not None else None
+            result.observation_group_statistics = dict(group_stats) if group_stats is not None else None
+            for name in ("action_count", "action_sum", "action_sum_sq", "action_abs_sum", "action_saturation_count"):
+                dtype = np.int64 if name in ("action_count", "action_saturation_count") else np.float64
+                setattr(result, name, np.asarray(state[name], dtype=dtype).copy())
+        else:
+            # Version 1 checkpoints stored every raw action and mask.  Aggregate
+            # them once on load so resumed training immediately uses compact state.
+            for actions, masks in zip(state.get("action_batches", []), state.get("active_mask_batches", [])):
+                result._observe_actions(actions, masks)
+        if result.observation_sample_count >= result.max_observation_samples:
+            result._freeze_observations()
         return result
 
 

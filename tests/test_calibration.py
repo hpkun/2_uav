@@ -1,4 +1,5 @@
 from copy import deepcopy
+import io
 from pathlib import Path
 
 import numpy as np
@@ -43,6 +44,52 @@ def test_observation_statistics_are_finite_and_cover_groups():
     assert len([row for row in rows if row["row_type"] == "feature"]) == 40
     assert any(row["feature"] == "enemy_distance" for row in rows)
     assert all(np.isfinite(row[key]) for row in rows for key in ("mean", "std", "min", "max", "p01", "p99"))
+
+
+def test_compact_diagnostics_preserve_statistics_without_raw_action_history():
+    buffer = RolloutBuffer(2, 1)
+    buffer.observations[:] = np.linspace(-1, 1, buffer.observations.size).reshape(buffer.observations.shape)
+    buffer.actions[:] = np.linspace(-1, 1, buffer.actions.size).reshape(buffer.actions.shape)
+    buffer.active_masks[:] = 1.0
+    diagnostics = TrainingDiagnostics(max_observation_samples=4)
+    diagnostics.observe_rollout(buffer)
+    expected_actions = diagnostics.action_rows("mappo", 1, 2)
+    expected_observations = diagnostics.observation_rows("mappo", 1, 2)
+    state = diagnostics.state_dict()
+    assert state["format"] == "training_diagnostics_v2"
+    assert "action_batches" not in state and "active_mask_batches" not in state
+    assert state["observation_batches"] == []
+    restored = TrainingDiagnostics.from_state_dict(state)
+    assert restored.action_rows("mappo", 1, 2) == expected_actions
+    assert restored.observation_rows("mappo", 1, 2) == expected_observations
+
+
+def test_legacy_diagnostics_are_compacted_when_loaded():
+    actions = np.asarray([[[1.0, 0.0, -0.5], [0.5, 0.25, 0.0], [-1.0, 0.0, 0.5]]], dtype=np.float32)
+    legacy = {
+        "max_observation_samples": 1,
+        "observation_batches": [np.zeros((1, 40), dtype=np.float32)],
+        "action_batches": [actions],
+        "active_mask_batches": [np.ones((1, 3), dtype=np.float32)],
+        "observation_sample_count": 1,
+    }
+    restored = TrainingDiagnostics.from_state_dict(legacy)
+    state = restored.state_dict()
+    assert state["observation_batches"] == [] and "action_batches" not in state
+    mav_ux = next(row for row in restored.action_rows("mappo", 1, 1) if row["agent"] == "MAV" and row["action_dimension"] == "ux")
+    assert mav_ux["mean"] == 1.0 and mav_ux["saturation_rate"] == 1.0
+
+
+def test_compact_diagnostic_checkpoint_size_does_not_grow_with_action_history():
+    buffer = RolloutBuffer(2, 1)
+    buffer.active_masks[:] = 1.0
+    diagnostics = TrainingDiagnostics(max_observation_samples=4)
+    diagnostics.observe_rollout(buffer)
+    first = io.BytesIO(); torch.save(diagnostics.state_dict(), first)
+    for _ in range(1000):
+        diagnostics.observe_rollout(buffer)
+    last = io.BytesIO(); torch.save(diagnostics.state_dict(), last)
+    assert abs(last.tell() - first.tell()) < 1024
 
 
 def test_target_proxy_is_read_only_and_does_not_enter_policy_or_reward():

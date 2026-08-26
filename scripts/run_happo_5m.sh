@@ -23,6 +23,7 @@ if ! python -c "import uav_combat" >/dev/null 2>&1; then
 fi
 
 num_envs="${NUM_ENVS:-16}"
+seed="${SEED:-1}"
 sample_steps="${SAMPLE_STEPS:-5000000}"
 eval_interval="${EVAL_INTERVAL:-1000000}"
 eval_episodes="${EVAL_EPISODES:-50}"
@@ -43,7 +44,7 @@ elif [[ "$mode" != "--background" && "$mode" != "--foreground" ]]; then
     exit 2
 fi
 
-for value in "$num_envs" "$sample_steps" "$eval_interval" "$eval_episodes" "$final_eval_episodes" "$benchmark_steps"; do
+for value in "$seed" "$num_envs" "$sample_steps" "$eval_interval" "$eval_episodes" "$final_eval_episodes" "$benchmark_steps"; do
     if [[ ! "$value" =~ ^[1-9][0-9]*$ ]]; then
         echo "ERROR: numeric training options must be positive integers, got '$value'." >&2
         exit 2
@@ -60,17 +61,17 @@ if [[ "$device" == "cuda" ]] && ! python -c "import torch, sys; sys.exit(0 if to
 fi
 
 if [[ "$mode" == "--foreground" ]]; then
-    run_root="${OUTPUT_ROOT:-/tmp/happo_smoke_$(date +%Y%m%d_%H%M%S)}"
+    run_root="${OUTPUT_ROOT:-/tmp/happo_seed${seed}_smoke_$(date +%Y%m%d_%H%M%S)}"
 else
-    run_root="${OUTPUT_ROOT:-outputs/happo_5m_restart_$(date +%Y%m%d_%H%M%S)}"
+    run_root="${OUTPUT_ROOT:-outputs/happo_5m_seed${seed}_$(date +%Y%m%d_%H%M%S)}"
 fi
-run_dir="$run_root/happo_seed1"
+run_dir="$run_root/happo_seed${seed}"
 mkdir -p "$run_dir"
 
 training_command=(
     python -u scripts/calibrate_mavuav_learnability.py
     --algorithm happo
-    --seed 1
+    --seed "$seed"
     --sample-steps "$sample_steps"
     --eval-interval "$eval_interval"
     --eval-episodes "$eval_episodes"
@@ -93,7 +94,7 @@ if [[ "$mode" == "--foreground" ]]; then
     exit 0
 fi
 
-echo "$run_root" > outputs/latest_happo_5m_run.txt
+echo "$run_root" > "outputs/latest_happo_5m_seed${seed}_run.txt"
 nohup env CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
     "${training_command[@]}" > "$run_dir/run.log" 2>&1 &
 train_pid=$!
