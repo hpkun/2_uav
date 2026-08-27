@@ -3,7 +3,7 @@ import numpy as np
 
 from uav_combat.blue_policy import BLUE_ACTION_CANDIDATES, BluePolicy
 from uav_combat.dynamics import integrate_interval, map_normalized_action
-from uav_combat.mavuav import BLUE_IDS, HeterogeneousMAVUAVAirCombatEnv, load_environment_config
+from uav_combat.mavuav import BLUE_IDS, ENVIRONMENT_VERSION, HeterogeneousMAVUAVAirCombatEnv, load_environment_config
 from uav_combat.models import AircraftState
 from uav_combat.reward import (
     SITUATION_WEIGHTS, bearing_reward, distance_reward, entering_angle_reward,
@@ -106,8 +106,8 @@ def test_blue_escape_does_not_count_as_red_kill():
 def test_observation_global_state_active_masks_and_finiteness():
     e = env(); e.entities["UAV1"].state.alive = False
     observations = e._observations()
-    assert all(value.shape == (40,) for value in observations.values())
-    assert e.global_state().shape == (40,)
+    assert all(value.shape == (55,) for value in observations.values())
+    assert e.global_state().shape == (67,)
     assert np.array_equal(e.active_masks, [1, 0, 1])
     assert all(np.all(np.isfinite(value)) for value in observations.values()) and np.all(np.isfinite(e.global_state()))
 
@@ -144,6 +144,82 @@ def test_initial_randomization_is_seed_reproducible_and_optional():
     assert np.allclose(nominal.entities["MAV"].state.as_array(), [-4500, 0, 5000, 325, 0, 0])
 
 
+def test_sensor_heterogeneity_and_reliable_datalink_masking():
+    e = env()
+    e.entities["MAV"].state.x = e.entities["UAV1"].state.x = 0.0
+    e.entities["MAV"].state.y = e.entities["UAV1"].state.y = 0.0
+    e.entities["Blue1"].state.x, e.entities["Blue1"].state.y = 10_000.0, 0.0
+    assert e.direct_visible("MAV", "Blue1")
+    assert not e.direct_visible("UAV1", "Blue1")
+    assert e.datalink_visible("UAV1", "Blue1")
+    uav_enemy = e._observations()["UAV1"][33:44]
+    assert uav_enemy[7] == 0.0 and uav_enemy[8] == 1.0
+    assert np.any(uav_enemy[:6] != 0.0)
+    e.entities["Blue1"].state.x = 20_000.0
+    e.entities["UAV2"].state.x = -20_000.0
+    assert not e.team_visible("Blue1")
+    masked = e._observations()["UAV1"][33:44]
+    assert np.array_equal(masked[:6], np.zeros(6))
+    assert masked[6] == 1.0 and masked[7] == masked[8] == 0.0
+
+
+def test_observation_one_hot_streak_time_and_distance_normalization():
+    e = env()
+    e.entities["MAV"].state.x = 0.0
+    e.entities["MAV"].state.y = 0.0
+    e.entities["Blue1"].state.x = 1000.0
+    e.entities["Blue1"].state.y = 0.0
+    e._attack_streak[("MAV", "Blue1")] = 2
+    e.step_count = 15
+    observation = e._observations()["MAV"]
+    assert np.array_equal(observation[7:10], [1.0, 0.0, 0.0])
+    assert np.isclose(observation[10], 15 / 75)
+    assert np.isclose(observation[36], 1000 / 12000)
+    assert np.isclose(observation[42], 2 / 3)
+    e.entities["Blue1"].state.x = 3000.0
+    assert np.isclose(e._observations()["MAV"][36], 3000 / 12000)
+
+
+def test_global_state_contains_transition_relevant_internal_state():
+    e = env(); e.blue_policy.episode_mode = "nearest"; baseline = e.global_state().copy()
+    e._attack_streak[("MAV", "Blue1")] = 1
+    streak_state = e.global_state().copy(); assert not np.array_equal(baseline, streak_state)
+    e._attack_streak.clear(); e.blue_policy.episode_mode = "mav_priority"
+    mode_state = e.global_state().copy(); assert not np.array_equal(baseline, mode_state)
+    e.blue_policy.episode_mode = "nearest"; e.step_count = 1
+    time_state = e.global_state().copy(); assert not np.array_equal(baseline, time_state)
+    e.step_count = 0; e._red_attack_kills.add("Blue1")
+    kill_state = e.global_state().copy(); assert not np.array_equal(baseline, kill_state)
+
+
+def test_randomization_profiles_are_reproducible_and_preserve_team_formation():
+    a, b = HeterogeneousMAVUAVAirCombatEnv(), HeterogeneousMAVUAVAirCombatEnv()
+    a.reset(seed=123, options={"profile": "main"}); b.reset(seed=123, options={"profile": "main"})
+    assert all(np.array_equal(a.entities[x].state.as_array(), b.entities[x].state.as_array()) for x in a.entities)
+    learnability = HeterogeneousMAVUAVAirCombatEnv(); learnability.reset(seed=123, options={"profile": "learnability"})
+    assert any(not np.array_equal(a.entities[x].state.as_array(), learnability.entities[x].state.as_array()) for x in a.entities)
+    nominal = HeterogeneousMAVUAVAirCombatEnv(randomize=False); nominal.reset(seed=123)
+    for left, right in (("MAV", "UAV1"), ("MAV", "UAV2"), ("Blue1", "Blue2")):
+        main_delta = a.entities[left].state.as_array()[:2] - a.entities[right].state.as_array()[:2]
+        nominal_delta = nominal.entities[left].state.as_array()[:2] - nominal.entities[right].state.as_array()[:2]
+        assert np.all(np.abs(main_delta - nominal_delta) <= 600.0)
+
+
+def test_red_safe_distance_penalty_is_once_per_step_and_nonlethal():
+    e = env()
+    for entity in e.entities.values():
+        entity.state = AircraftState(50_000.0, 50_000.0, 5000.0, 250.0, 0.0, 0.0, True)
+    e.entities["MAV"].state.x = 0.0; e.entities["MAV"].state.y = 0.0
+    e.entities["UAV1"].state.x = 50.0; e.entities["UAV1"].state.y = 0.0
+    e.entities["UAV2"].state.x = 5000.0; e.entities["UAV2"].state.y = 5000.0
+    _, _, _, _, info = e.step(np.zeros((3, 3)))
+    assert info["red_safe_distance_violation"] and info["safety_reward"] == -1.0
+    assert all(e.entities[aid].state.alive for aid in e.red_ids)
+    e.entities["UAV1"].state.x = e.entities["MAV"].state.x + 100.0
+    _, _, _, _, info = e.step(np.zeros((3, 3)))
+    assert not info["red_safe_distance_violation"] and info["safety_reward"] == 0.0
+
+
 def test_blue_candidates_and_target_modes():
     assert BLUE_ACTION_CANDIDATES.shape == (27, 3) and len(np.unique(BLUE_ACTION_CANDIDATES, axis=0)) == 27
     e = env(); blue = e.entities["Blue1"]; red = {aid: e.entities[aid] for aid in e.red_ids}
@@ -160,6 +236,7 @@ def test_blue_candidates_and_target_modes():
 
 def test_config_contract_and_values():
     cfg = load_environment_config(None)
+    assert cfg["environment_version"] == ENVIRONMENT_VERSION
     assert cfg["aircraft_specs"]["MAV"]["v_min"] == 250
     assert cfg["battlefield"]["altitude"] == (1000.0, 20000.0)
 
@@ -202,11 +279,11 @@ def test_red_win_requires_both_blue_attack_killed_and_mav_alive():
     e._red_attack_kills.add("Blue2"); assert e._termination()[2] == "red"
 
 
-def test_observation_shape_is_40():
-    assert all(x.shape == (40,) for x in env()._observations().values())
+def test_observation_shape_is_55():
+    assert all(x.shape == (55,) for x in env()._observations().values())
 
 
-def test_global_state_shape_is_40(): assert env().global_state().shape == (40,)
+def test_global_state_shape_is_67(): assert env().global_state().shape == (67,)
 
 
 def test_active_masks_after_uav_death():

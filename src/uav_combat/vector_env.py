@@ -23,6 +23,7 @@ def _environment_state(env: HeterogeneousMAVUAVAirCombatEnv) -> dict[str, Any]:
         "blue_attack_kills": set(env._blue_attack_kills),
         "rng": deepcopy(env.rng.bit_generator.state),
         "blue_episode_mode": env.blue_policy.episode_mode,
+        "profile": env.profile,
     }
 
 
@@ -36,6 +37,7 @@ def _restore_environment_state(env: HeterogeneousMAVUAVAirCombatEnv, state: Mapp
     env._blue_attack_kills = set(state["blue_attack_kills"])
     env.rng.bit_generator.state = deepcopy(state["rng"])
     env.blue_policy.episode_mode = state["blue_episode_mode"]
+    env.profile = state["profile"]
 
 
 def _worker(
@@ -45,6 +47,7 @@ def _worker(
     base_seed: int | None,
     blue_target_mode: str | None,
     randomize: bool | None,
+    profile: str | None,
 ) -> None:
     """Own and advance one environment inside a dedicated process."""
     reset_count = 0
@@ -56,7 +59,7 @@ def _worker(
 
     try:
         env = HeterogeneousMAVUAVAirCombatEnv(
-            config_path, seed=episode_seed(), blue_target_mode=blue_target_mode, randomize=randomize,
+            config_path, seed=episode_seed(), blue_target_mode=blue_target_mode, randomize=randomize, profile=profile,
         )
         while True:
             command, payload = connection.recv()
@@ -127,6 +130,7 @@ class MAVUAVVectorEnv:
         seed: int | None = None,
         blue_target_mode: str | None = None,
         randomize: bool | None = None,
+        profile: str | None = None,
         parallel: bool = True,
         start_method: str | None = None,
     ) -> None:
@@ -147,7 +151,7 @@ class MAVUAVVectorEnv:
             self.envs = [
                 HeterogeneousMAVUAVAirCombatEnv(
                     config_path, seed=None if seed is None else seed + index,
-                    blue_target_mode=blue_target_mode, randomize=randomize,
+                    blue_target_mode=blue_target_mode, randomize=randomize, profile=profile,
                 )
                 for index in range(self.num_envs)
             ]
@@ -163,7 +167,7 @@ class MAVUAVVectorEnv:
             parent, child = context.Pipe()
             process = context.Process(
                 target=_worker,
-                args=(child, config_path, index, seed, blue_target_mode, randomize),
+                args=(child, config_path, index, seed, blue_target_mode, randomize, profile),
                 name=f"mavuav-env-{index}", daemon=True,
             )
             process.start()

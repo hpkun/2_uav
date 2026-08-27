@@ -12,7 +12,7 @@ import numpy as np
 import torch
 
 from uav_combat.happo.networks import IndependentActors
-from uav_combat.mavuav import ENTITY_IDS, RED_IDS, HeterogeneousMAVUAVAirCombatEnv
+from uav_combat.mavuav import ENVIRONMENT_VERSION, ENTITY_IDS, GLOBAL_STATE_DIM, OBS_DIM, RED_IDS, HeterogeneousMAVUAVAirCombatEnv
 from uav_combat.models import Aircraft, AircraftSpec, AircraftState
 
 
@@ -41,8 +41,10 @@ def load_actors(path: Path, device: torch.device) -> IndependentActors:
     ]
     with torch.serialization.safe_globals(safe_types):
         payload = torch.load(path, map_location="cpu", weights_only=True)
-    if payload.get("algorithm") != "happo" or "actors" not in payload:
-        raise RuntimeError("checkpoint is not a HAPPO calibration checkpoint")
+    expected = ("mavuav_learnability_calibration_v2", "happo", ENVIRONMENT_VERSION, OBS_DIM, GLOBAL_STATE_DIM)
+    actual = (payload.get("format"), payload.get("algorithm"), payload.get("environment_version"), payload.get("observation_dim"), payload.get("global_state_dim"))
+    if actual != expected or "actors" not in payload:
+        raise RuntimeError(f"incompatible HAPPO calibration checkpoint: got contract {actual!r}, expected {expected!r}")
     hidden_dim = int(payload.get("trainer_config", {}).get("hidden_dim", 128))
     actors = IndependentActors(hidden_dim=hidden_dim)
     actors.load_state_dict(payload["actors"])

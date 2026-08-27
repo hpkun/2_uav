@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import numpy as np
+from ..mavuav import GLOBAL_STATE_DIM, OBS_DIM
 
 
 class RolloutBuffer:
-    def __init__(self, horizon: int, num_envs: int, num_agents: int = 3, obs_dim: int = 40, state_dim: int = 40, action_dim: int = 3) -> None:
+    def __init__(self, horizon: int, num_envs: int, num_agents: int = 3, obs_dim: int = OBS_DIM, state_dim: int = GLOBAL_STATE_DIM, action_dim: int = 3) -> None:
         self.horizon, self.num_envs, self.num_agents = int(horizon), int(num_envs), int(num_agents)
         shape = (self.horizon, self.num_envs)
         self.observations = np.zeros(shape + (num_agents, obs_dim), np.float32)

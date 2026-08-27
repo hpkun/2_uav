@@ -11,6 +11,7 @@ from torch import nn
 from ..mappo.buffer import RolloutBuffer
 from ..mappo.networks import CentralizedCritic
 from ..vector_env import MAVUAVVectorEnv
+from ..mavuav import ENVIRONMENT_VERSION, GLOBAL_STATE_DIM, OBS_DIM
 from .networks import IndependentActors
 
 
@@ -38,7 +39,7 @@ class HAPPOTrainer:
         self.rng = np.random.default_rng(int(c["seed"]))
         self.vector_env = MAVUAVVectorEnv(int(c["num_envs"]), env_config, seed=int(c["seed"]))
         self.actors = IndependentActors(hidden_dim=int(c["hidden_dim"])).to(self.device)
-        self.critic = CentralizedCritic(40, int(c["hidden_dim"])).to(self.device)
+        self.critic = CentralizedCritic(GLOBAL_STATE_DIM, int(c["hidden_dim"])).to(self.device)
         self.actor_optimizers = [torch.optim.Adam(actor.parameters(), lr=float(c["actor_learning_rate"])) for actor in self.actors.actors]
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=float(c["critic_learning_rate"]))
         self.buffer = RolloutBuffer(int(c["rollout_steps"]), int(c["num_envs"]))
@@ -68,12 +69,12 @@ class HAPPOTrainer:
 
     def update(self) -> dict[str, Any]:
         c = self.config
-        observations = torch.as_tensor(self.buffer.observations.reshape(-1, 3, 40), device=self.device)
+        observations = torch.as_tensor(self.buffer.observations.reshape(-1, 3, OBS_DIM), device=self.device)
         actions = torch.as_tensor(self.buffer.actions.reshape(-1, 3, 3), device=self.device)
         old_log_probs = torch.as_tensor(self.buffer.log_probs.reshape(-1, 3), device=self.device)
         active_masks = torch.as_tensor(self.buffer.active_masks.reshape(-1, 3), device=self.device)
         advantages = torch.as_tensor(self.buffer.advantages.reshape(-1), device=self.device)
-        states = torch.as_tensor(self.buffer.global_states.reshape(-1, 40), device=self.device)
+        states = torch.as_tensor(self.buffer.global_states.reshape(-1, GLOBAL_STATE_DIM), device=self.device)
         returns = torch.as_tensor(self.buffer.returns.reshape(-1), device=self.device)
         factor = torch.ones_like(advantages)
         order = [int(v) for v in self.rng.permutation(3)]
@@ -122,10 +123,12 @@ class HAPPOTrainer:
 
     def save(self, path: str | Path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        torch.save({"actors": self.actors.state_dict(), "critic": self.critic.state_dict(), "config": self.config}, path)
+        torch.save({"environment_version": ENVIRONMENT_VERSION, "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM, "actors": self.actors.state_dict(), "critic": self.critic.state_dict(), "config": self.config}, path)
 
     def load(self, path: str | Path) -> None:
         data = torch.load(path, map_location=self.device, weights_only=False)
+        if (data.get("environment_version"), data.get("observation_dim"), data.get("global_state_dim")) != (ENVIRONMENT_VERSION, OBS_DIM, GLOBAL_STATE_DIM):
+            raise RuntimeError("incompatible HAPPO checkpoint environment contract")
         self.actors.load_state_dict(data["actors"]); self.critic.load_state_dict(data["critic"])
 
     def close(self) -> None:

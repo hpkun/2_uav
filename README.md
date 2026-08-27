@@ -8,7 +8,7 @@ A compact research environment for multi-agent reinforcement-learning experiment
 
 The environment uses overload-controlled 3DOF point-mass dynamics. Each Red actor emits the normalized action `[ux, uy, uz]` in `[-1, 1]^3`; the environment maps it around the current trim overload to physical `[nx, ny, nz]`. One RL decision lasts 1 s and contains ten 0.1 s RK4 physics steps.
 
-Combat is a geometric persistent engagement: 1-3 km distance, attacker target angle below 30 degrees, entering angle below 90 degrees, held at three consecutive decision boundaries. MAV, UAV and Blue use the same rule. There are no missiles, sensors, communication, target-assignment actions, recurrent networks or attention modules.
+Combat is a geometric persistent engagement: 1-3 km distance, attacker target angle below 30 degrees, entering angle below 90 degrees, held at three consecutive decision boundaries. MAV, UAV and Blue use the same rule. Red sensing is distance-only (MAV 12 km, UAV 8 km) with an instantaneous reliable team datalink; Blue continues to use true state. There are no missiles, communication actions, target-assignment actions, recurrent networks or attention modules.
 
 ## Install and inspect
 
@@ -28,7 +28,9 @@ observations, rewards, terminated, truncated, info = env.step(np.zeros((3, 3)))
 state = env.global_state()
 ```
 
-Each Red observation is 40D, the centralized state is 40D, and the Red active mask is ordered `[MAV, UAV1, UAV2]`.
+The active environment contract is `heterogeneous_mavuav_3v2_v2`. Each Red observation is 55D, the centralized state is 67D, and the Red active mask is ordered `[MAV, UAV1, UAV2]`. Type is one-hot. Enemy geometry is visible through direct sensing or the reliable datalink and otherwise masked to zero.
+
+Reset uses the broader seeded `main` randomization profile by default. The old-difficulty `learnability` profile is available with `env.reset(seed=1, options={"profile": "learnability"})`. A single team penalty of -1 is applied at a decision boundary if any alive Red pair is closer than 100 m; it causes no collision or death.
 
 ## Baselines
 

@@ -18,9 +18,17 @@ RED_IDS = ("MAV", "UAV1", "UAV2")
 BLUE_IDS = ("Blue1", "Blue2")
 ENTITY_IDS = RED_IDS + BLUE_IDS
 TYPE_BY_ID = {"MAV": "MAV", "UAV1": "UAV", "UAV2": "UAV", "Blue1": "Blue", "Blue2": "Blue"}
-TYPE_VALUE = {"MAV": 0.0, "UAV": 1.0, "Blue": 2.0}
-OBS_DIM = 40
-GLOBAL_STATE_DIM = 40
+TYPE_ONE_HOT = {
+    "MAV": (1.0, 0.0, 0.0),
+    "UAV": (0.0, 1.0, 0.0),
+    "Blue": (0.0, 0.0, 1.0),
+}
+ENVIRONMENT_VERSION = "heterogeneous_mavuav_3v2_v2"
+OBS_DIM = 55
+GLOBAL_STATE_DIM = 67
+CROSS_TEAM_ATTACK_PAIRS = tuple((red, blue) for red in RED_IDS for blue in BLUE_IDS) + tuple(
+    (blue, red) for blue in BLUE_IDS for red in RED_IDS
+)
 
 
 def _pair(value: Any, name: str) -> tuple[float, float]:
@@ -34,10 +42,15 @@ def _pair(value: Any, name: str) -> tuple[float, float]:
 
 def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
     """Validate all fields consumed by the environment and reject stale fields."""
-    expected = {"simulation", "battlefield", "aircraft_specs", "scenario", "initial_randomization", "combat", "reward", "blue_policy"}
+    expected = {
+        "environment_version", "simulation", "battlefield", "aircraft_specs", "scenario",
+        "randomization_profiles", "sensing", "normalization", "safety", "combat", "reward", "blue_policy",
+    }
     if set(config) != expected:
         raise ValueError(f"config keys must be exactly {sorted(expected)}, got {sorted(config)}")
     cfg = deepcopy(dict(config))
+    if cfg["environment_version"] != ENVIRONMENT_VERSION:
+        raise ValueError(f"environment_version must be {ENVIRONMENT_VERSION!r}")
     sim = cfg["simulation"]
     if set(sim) != {"decision_dt", "physics_dt", "max_decision_steps"}:
         raise ValueError("simulation has unknown or missing fields")
@@ -60,13 +73,24 @@ def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
         if set(raw) != {"v_min", "v_max", "nx", "ny", "nz"}:
             raise ValueError(f"aircraft_specs.{aircraft_type} has unknown or missing fields")
         AircraftSpec(aircraft_type, float(raw["v_min"]), float(raw["v_max"]), _pair(raw["nx"], "nx"), _pair(raw["ny"], "ny"), _pair(raw["nz"], "nz"))
-    if set(cfg["scenario"]) != {"initial"} or set(cfg["scenario"]["initial"]) != set(ENTITY_IDS):
-        raise ValueError("scenario.initial must define the five fixed entity slots exactly")
-    random_cfg = cfg["initial_randomization"]
-    if set(random_cfg) != {"enabled", "position_xy_jitter", "altitude_jitter", "speed_jitter", "heading_jitter_deg"}:
-        raise ValueError("initial_randomization has unknown or missing fields")
-    if any(float(random_cfg[key]) < 0 for key in ("position_xy_jitter", "altitude_jitter", "speed_jitter", "heading_jitter_deg")):
-        raise ValueError("initial randomization magnitudes must be non-negative")
+    if set(cfg["scenario"]) != {"default_profile", "initial"} or set(cfg["scenario"]["initial"]) != set(ENTITY_IDS):
+        raise ValueError("scenario must define default_profile and the five fixed initial entity slots")
+    profiles = cfg["randomization_profiles"]
+    if set(profiles) != {"learnability", "main"} or cfg["scenario"]["default_profile"] not in profiles:
+        raise ValueError("randomization_profiles must define learnability/main and include scenario.default_profile")
+    profile_fields = {"team_xy_jitter", "slot_xy_jitter", "altitude_jitter", "speed_jitter", "heading_jitter_deg"}
+    for profile_name, profile in profiles.items():
+        if set(profile) != profile_fields or any(float(profile[key]) < 0 for key in profile_fields):
+            raise ValueError(f"invalid randomization profile: {profile_name}")
+    if set(cfg["sensing"]) != {"MAV_range", "UAV_range"} or any(float(value) <= 0 for value in cfg["sensing"].values()):
+        raise ValueError("sensing must define positive MAV_range and UAV_range")
+    normalization_fields = {"self_xy_scale", "relative_xy_scale", "relative_altitude_scale", "distance_scale", "relative_velocity_scale"}
+    if set(cfg["normalization"]) != normalization_fields or any(float(value) <= 0 for value in cfg["normalization"].values()):
+        raise ValueError("normalization fields must be complete and positive")
+    if set(cfg["safety"]) != {"red_safe_distance", "red_safe_distance_penalty"}:
+        raise ValueError("safety has unknown or missing fields")
+    if float(cfg["safety"]["red_safe_distance"]) <= 0 or float(cfg["safety"]["red_safe_distance_penalty"]) > 0:
+        raise ValueError("safety distance must be positive and penalty non-positive")
     combat = cfg["combat"]
     if set(combat) != {"distance", "ata_deg", "aa_deg", "hold_steps"}:
         raise ValueError("combat has unknown or missing fields")
@@ -117,14 +141,17 @@ class HeterogeneousMAVUAVAirCombatEnv:
     global_state_dim = GLOBAL_STATE_DIM
     action_dim = 3
 
-    def __init__(self, config_path: str | Path | Mapping[str, Any] | None = None, *, seed: int | None = None, blue_target_mode: str | None = None, randomize: bool | None = None) -> None:
+    def __init__(self, config_path: str | Path | Mapping[str, Any] | None = None, *, seed: int | None = None, blue_target_mode: str | None = None, randomize: bool | None = None, profile: str | None = None) -> None:
         self.config = load_environment_config(config_path)
         sim = self.config["simulation"]
         self.decision_dt = float(sim["decision_dt"])
         self.physics_dt = float(sim["physics_dt"])
         self.physics_substeps = int(round(self.decision_dt / self.physics_dt))
         self.max_decision_steps = int(sim["max_decision_steps"])
-        self.randomize = self.config["initial_randomization"]["enabled"] if randomize is None else bool(randomize)
+        self.randomize = True if randomize is None else bool(randomize)
+        self.profile = profile or str(self.config["scenario"]["default_profile"])
+        if self.profile not in self.config["randomization_profiles"]:
+            raise ValueError(f"unknown randomization profile: {self.profile}")
         mode = blue_target_mode or self.config["blue_policy"]["target_mode"]
         self.blue_policy = BluePolicy(mode, self.decision_dt, self.physics_dt)
         self.rng = np.random.default_rng(seed)
@@ -151,8 +178,22 @@ class HeterogeneousMAVUAVAirCombatEnv:
     def reset(self, seed: int | None = None, options: Mapping[str, Any] | None = None) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
         if seed is not None:
             self.rng = np.random.default_rng(seed)
-        randomize = self.randomize if options is None else bool(options.get("randomize", self.randomize))
-        random_cfg = self.config["initial_randomization"]
+        options = {} if options is None else dict(options)
+        randomize = bool(options.get("randomize", self.randomize))
+        self.profile = str(options.get("profile", self.profile))
+        if self.profile not in self.config["randomization_profiles"]:
+            raise ValueError(f"unknown randomization profile: {self.profile}")
+        random_cfg = self.config["randomization_profiles"][self.profile]
+        team_offsets: dict[str, tuple[float, float]] = {}
+        if randomize:
+            team_jitter = float(random_cfg["team_xy_jitter"])
+            for team in ("red", "blue"):
+                team_offsets[team] = (
+                    float(self.rng.uniform(-team_jitter, team_jitter)),
+                    float(self.rng.uniform(-team_jitter, team_jitter)),
+                )
+        else:
+            team_offsets = {"red": (0.0, 0.0), "blue": (0.0, 0.0)}
         self.entities = {}
         for aircraft_id in ENTITY_IDS:
             aircraft_type = TYPE_BY_ID[aircraft_id]
@@ -160,9 +201,12 @@ class HeterogeneousMAVUAVAirCombatEnv:
             x, y, h = (float(v) for v in start["position"])
             speed, heading = float(start["speed"]), np.deg2rad(float(start["heading_deg"]))
             if randomize:
-                jitter_xy = float(random_cfg["position_xy_jitter"])
-                x += self.rng.uniform(-jitter_xy, jitter_xy)
-                y += self.rng.uniform(-jitter_xy, jitter_xy)
+                team = "red" if aircraft_id in RED_IDS else "blue"
+                x += team_offsets[team][0]
+                y += team_offsets[team][1]
+                slot_jitter = float(random_cfg["slot_xy_jitter"])
+                x += self.rng.uniform(-slot_jitter, slot_jitter)
+                y += self.rng.uniform(-slot_jitter, slot_jitter)
                 h += self.rng.uniform(-float(random_cfg["altitude_jitter"]), float(random_cfg["altitude_jitter"]))
                 speed += self.rng.uniform(-float(random_cfg["speed_jitter"]), float(random_cfg["speed_jitter"]))
                 heading += np.deg2rad(self.rng.uniform(-float(random_cfg["heading_jitter_deg"]), float(random_cfg["heading_jitter_deg"])))
@@ -176,7 +220,10 @@ class HeterogeneousMAVUAVAirCombatEnv:
         self._blue_attack_kills.clear()
         self._running = True
         mode = self.blue_policy.reset(self.rng)
-        return self._observations(), {"outcome": None, "attack_events": [], "killed_ids": [], "death_causes": {}, "active_masks": self.active_masks.copy(), "blue_target_mode": mode}
+        return self._observations(), {
+            "outcome": None, "attack_events": [], "killed_ids": [], "death_causes": {},
+            "active_masks": self.active_masks.copy(), "blue_target_mode": mode, "profile": self.profile,
+        }
 
     def _action_dict(self, actions: Mapping[str, np.ndarray] | np.ndarray | list[np.ndarray]) -> dict[str, np.ndarray]:
         if isinstance(actions, Mapping):
@@ -216,6 +263,10 @@ class HeterogeneousMAVUAVAirCombatEnv:
         attack_events, attack_deaths = self._resolve_attacks()
         death_causes.update(attack_deaths)
         self.step_count += 1
+        minimum_friendly_distance = self._minimum_friendly_red_distance()
+        safety_cfg = self.config["safety"]
+        safety_violation = minimum_friendly_distance < float(safety_cfg["red_safe_distance"])
+        safety_reward = float(safety_cfg["red_safe_distance_penalty"]) if safety_violation else 0.0
         terminated, truncated, outcome = self._termination()
         situation = self._team_situation_reward()
         reward_cfg = self.config["reward"]
@@ -226,7 +277,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
         if outcome == "red": terminal = float(reward_cfg["terminal_red_win"])
         elif outcome == "blue": terminal = float(reward_cfg["terminal_blue_win"])
         elif outcome == "draw": terminal = float(reward_cfg["terminal_draw"])
-        team_reward = float(situation + event + terminal)
+        team_reward = float(situation + event + terminal + safety_reward)
         self.episode_return += team_reward
         rewards = {aid: team_reward for aid in RED_IDS}
         self._running = not (terminated or truncated)
@@ -235,6 +286,8 @@ class HeterogeneousMAVUAVAirCombatEnv:
             "killed_ids": sorted(death_causes), "death_causes": dict(sorted(death_causes.items())),
             "active_masks": self.active_masks.copy(), "team_situation": situation,
             "event_reward": float(event), "terminal_reward": float(terminal),
+            "minimum_friendly_red_distance": float(minimum_friendly_distance),
+            "red_safe_distance_violation": bool(safety_violation), "safety_reward": safety_reward,
         }
         if terminated or truncated:
             info["episode_summary"] = self._episode_summary(outcome)
@@ -242,6 +295,14 @@ class HeterogeneousMAVUAVAirCombatEnv:
         if not np.isfinite(team_reward) or not all(np.all(np.isfinite(v)) for v in observations.values()) or not np.all(np.isfinite(self.global_state())):
             raise FloatingPointError("environment produced non-finite output")
         return observations, rewards, terminated, truncated, info
+
+    def _minimum_friendly_red_distance(self) -> float:
+        alive = [self.entities[aid] for aid in RED_IDS if self.entities[aid].state.alive]
+        distances = [
+            compute_pairwise_geometry(alive[i].state, alive[j].state).distance
+            for i in range(len(alive)) for j in range(i + 1, len(alive))
+        ]
+        return float(min(distances)) if distances else float("inf")
 
     def _deactivate(self, aid: str, cause: str, deaths: dict[str, str]) -> None:
         entity = self.entities[aid]
@@ -326,30 +387,81 @@ class HeterogeneousMAVUAVAirCombatEnv:
             "blue_target_mode": self.blue_policy.episode_mode, "episode_return": float(self.episode_return),
         }
 
-    @staticmethod
-    def _position_norm(value: float) -> float:
-        return float(value / 100000.0)
+    def _self_xy_norm(self, value: float) -> float:
+        return float(np.clip(value / float(self.config["normalization"]["self_xy_scale"]), -1.0, 1.0))
 
-    @staticmethod
-    def _altitude_norm(value: float) -> float:
-        return float(2.0 * (value - 1000.0) / 19000.0 - 1.0)
+    def _altitude_norm(self, value: float) -> float:
+        lower, upper = self.config["battlefield"]["altitude"]
+        return float(np.clip(2.0 * (value - lower) / (upper - lower) - 1.0, -1.0, 1.0))
+
+    def _relative_position_values(self, relative_position: np.ndarray) -> list[float]:
+        normalization = self.config["normalization"]
+        return [
+            float(np.clip(relative_position[0] / float(normalization["relative_xy_scale"]), -1.0, 1.0)),
+            float(np.clip(relative_position[1] / float(normalization["relative_xy_scale"]), -1.0, 1.0)),
+            float(np.clip(relative_position[2] / float(normalization["relative_altitude_scale"]), -1.0, 1.0)),
+        ]
+
+    def _distance_norm(self, distance: float) -> float:
+        return float(np.clip(distance / float(self.config["normalization"]["distance_scale"]), 0.0, 1.0))
+
+    def _relative_velocity_values(self, relative_velocity: np.ndarray) -> list[float]:
+        scale = float(self.config["normalization"]["relative_velocity_scale"])
+        return [float(np.clip(value / scale, -1.0, 1.0)) for value in relative_velocity]
+
+    def direct_visible(self, own_id: str, blue_id: str) -> bool:
+        own, blue = self.entities[own_id], self.entities[blue_id]
+        if own_id not in RED_IDS or blue_id not in BLUE_IDS or not own.state.alive or not blue.state.alive:
+            return False
+        sensor_range = float(self.config["sensing"][f"{TYPE_BY_ID[own_id]}_range"])
+        return compute_pairwise_geometry(own.state, blue.state).distance <= sensor_range
+
+    def team_visible(self, blue_id: str) -> bool:
+        return any(self.direct_visible(red_id, blue_id) for red_id in RED_IDS)
+
+    def datalink_visible(self, own_id: str, blue_id: str) -> bool:
+        return self.team_visible(blue_id) and not self.direct_visible(own_id, blue_id)
 
     def _observations(self) -> dict[str, np.ndarray]:
         result: dict[str, np.ndarray] = {}
-        max_distance = float(np.sqrt(200000.0 ** 2 + 200000.0 ** 2 + 19000.0 ** 2))
         for own_id in RED_IDS:
             own = self.entities[own_id]
             state = own.state
-            values = [self._position_norm(state.x), self._position_norm(state.y), self._altitude_norm(state.h), state.v / 400.0, state.theta / np.pi, state.psi / np.pi, TYPE_VALUE[TYPE_BY_ID[own_id]], float(state.alive)]
+            # Stable 55D contract: self 11D, two Red teammates 11D each,
+            # then Blue1/Blue2 enemy blocks 11D each.
+            values = [
+                self._self_xy_norm(state.x), self._self_xy_norm(state.y), self._altitude_norm(state.h),
+                float(np.clip(state.v / 400.0, 0.0, 1.0)), state.theta / np.pi, state.psi / np.pi,
+                float(state.alive), *TYPE_ONE_HOT[TYPE_BY_ID[own_id]],
+                float(np.clip(self.step_count / self.max_decision_steps, 0.0, 1.0)),
+            ]
             for friend_id in RED_IDS:
                 if friend_id == own_id: continue
                 friend = self.entities[friend_id]
                 geometry = compute_pairwise_geometry(state, friend.state)
-                values.extend([geometry.relative_position[0] / 200000.0, geometry.relative_position[1] / 200000.0, geometry.relative_position[2] / 19000.0, geometry.distance / max_distance, geometry.relative_velocity[0] / 800.0, geometry.relative_velocity[1] / 800.0, geometry.relative_velocity[2] / 800.0, float(friend.state.alive), TYPE_VALUE[TYPE_BY_ID[friend_id]]])
+                values.extend([
+                    *self._relative_position_values(geometry.relative_position), self._distance_norm(geometry.distance),
+                    *self._relative_velocity_values(geometry.relative_velocity), float(friend.state.alive),
+                    *TYPE_ONE_HOT[TYPE_BY_ID[friend_id]],
+                ])
             for blue_id in BLUE_IDS:
                 blue = self.entities[blue_id]
-                geometry = compute_pairwise_geometry(state, blue.state)
-                values.extend([geometry.relative_position[0] / 200000.0, geometry.relative_position[1] / 200000.0, geometry.relative_position[2] / 19000.0, geometry.distance / max_distance, geometry.ata / np.pi, geometry.aa / np.pi, float(blue.state.alive)])
+                direct = self.direct_visible(own_id, blue_id)
+                datalink = self.datalink_visible(own_id, blue_id)
+                if direct or datalink:
+                    geometry = compute_pairwise_geometry(state, blue.state)
+                    enemy_geometry = [
+                        *self._relative_position_values(geometry.relative_position), self._distance_norm(geometry.distance),
+                        geometry.ata / np.pi, geometry.aa / np.pi,
+                    ]
+                else:
+                    enemy_geometry = [0.0] * 6
+                hold_steps = int(self.config["combat"]["hold_steps"])
+                streak = min(self._attack_streak.get((own_id, blue_id), 0), hold_steps) / hold_steps
+                values.extend([
+                    *enemy_geometry, float(blue.state.alive), float(direct), float(datalink), float(streak),
+                    float(blue_id in self._red_attack_kills),
+                ])
             observation = np.asarray(values, dtype=np.float32)
             if observation.shape != (OBS_DIM,):
                 raise AssertionError(f"observation contract violated: {observation.shape}")
@@ -360,7 +472,19 @@ class HeterogeneousMAVUAVAirCombatEnv:
         values: list[float] = []
         for aid in ENTITY_IDS:
             state = self.entities[aid].state
-            values.extend([self._position_norm(state.x), self._position_norm(state.y), self._altitude_norm(state.h), state.v / 400.0, state.theta / np.pi, state.psi / np.pi, float(state.alive), TYPE_VALUE[TYPE_BY_ID[aid]]])
+            values.extend([
+                self._self_xy_norm(state.x), self._self_xy_norm(state.y), self._altitude_norm(state.h),
+                float(np.clip(state.v / 400.0, 0.0, 1.0)), state.theta / np.pi, state.psi / np.pi,
+                float(state.alive), *TYPE_ONE_HOT[TYPE_BY_ID[aid]],
+            ])
+        hold_steps = int(self.config["combat"]["hold_steps"])
+        values.extend(min(self._attack_streak.get(pair, 0), hold_steps) / hold_steps for pair in CROSS_TEAM_ATTACK_PAIRS)
+        values.extend(float(blue_id in self._red_attack_kills) for blue_id in BLUE_IDS)
+        values.extend([
+            float(self.blue_policy.episode_mode == "nearest"),
+            float(self.blue_policy.episode_mode == "mav_priority"),
+            float(np.clip(self.step_count / self.max_decision_steps, 0.0, 1.0)),
+        ])
         result = np.asarray(values, dtype=np.float32)
         if result.shape != (GLOBAL_STATE_DIM,):
             raise AssertionError(f"global state contract violated: {result.shape}")

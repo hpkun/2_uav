@@ -9,6 +9,7 @@ import torch
 from torch import nn
 
 from ..vector_env import MAVUAVVectorEnv
+from ..mavuav import ENVIRONMENT_VERSION, GLOBAL_STATE_DIM, OBS_DIM
 from .buffer import RolloutBuffer
 from .networks import CentralizedCritic, GaussianActor
 
@@ -31,8 +32,8 @@ class MAPPOTrainer:
         torch.manual_seed(int(c["seed"]))
         self.rng = np.random.default_rng(int(c["seed"]))
         self.vector_env = MAVUAVVectorEnv(int(c["num_envs"]), env_config, seed=int(c["seed"]))
-        self.actor = GaussianActor(40, 3, int(c["hidden_dim"])).to(self.device)
-        self.critic = CentralizedCritic(40, int(c["hidden_dim"])).to(self.device)
+        self.actor = GaussianActor(OBS_DIM, 3, int(c["hidden_dim"])).to(self.device)
+        self.critic = CentralizedCritic(GLOBAL_STATE_DIM, int(c["hidden_dim"])).to(self.device)
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=float(c["actor_learning_rate"]))
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=float(c["critic_learning_rate"]))
         self.buffer = RolloutBuffer(int(c["rollout_steps"]), int(c["num_envs"]))
@@ -47,7 +48,7 @@ class MAPPOTrainer:
             obs_tensor = torch.as_tensor(self.observations, device=self.device)
             state_tensor = torch.as_tensor(self.global_states, device=self.device)
             with torch.no_grad():
-                actions, log_probs = self.actor.sample(obs_tensor.reshape(-1, 40))
+                actions, log_probs = self.actor.sample(obs_tensor.reshape(-1, OBS_DIM))
                 values = self.critic(state_tensor)
             actions_np = actions.reshape(self.buffer.num_envs, 3, 3).cpu().numpy()
             log_probs_np = log_probs.reshape(self.buffer.num_envs, 3).cpu().numpy()
@@ -65,7 +66,7 @@ class MAPPOTrainer:
 
     def update(self) -> dict[str, float]:
         c = self.config
-        obs = torch.as_tensor(self.buffer.observations.reshape(-1, 40), device=self.device)
+        obs = torch.as_tensor(self.buffer.observations.reshape(-1, OBS_DIM), device=self.device)
         actions = torch.as_tensor(self.buffer.actions.reshape(-1, 3), device=self.device)
         old_log_probs = torch.as_tensor(self.buffer.log_probs.reshape(-1), device=self.device)
         active = torch.as_tensor(self.buffer.active_masks.reshape(-1), device=self.device) > 0.5
@@ -74,7 +75,7 @@ class MAPPOTrainer:
         if active.any():
             mean, std = advantages[active].mean(), advantages[active].std(unbiased=False).clamp_min(1e-8)
             advantages = (advantages - mean) / std
-        states = torch.as_tensor(self.buffer.global_states.reshape(-1, 40), device=self.device)
+        states = torch.as_tensor(self.buffer.global_states.reshape(-1, GLOBAL_STATE_DIM), device=self.device)
         returns = torch.as_tensor(self.buffer.returns.reshape(-1), device=self.device)
         actor_losses, critic_losses, entropies = [], [], []
         batch_size, mini = len(returns), int(c["minibatch_size"])
@@ -109,10 +110,12 @@ class MAPPOTrainer:
 
     def save(self, path: str | Path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        torch.save({"actor": self.actor.state_dict(), "critic": self.critic.state_dict(), "config": self.config}, path)
+        torch.save({"environment_version": ENVIRONMENT_VERSION, "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM, "actor": self.actor.state_dict(), "critic": self.critic.state_dict(), "config": self.config}, path)
 
     def load(self, path: str | Path) -> None:
         data = torch.load(path, map_location=self.device, weights_only=False)
+        if (data.get("environment_version"), data.get("observation_dim"), data.get("global_state_dim")) != (ENVIRONMENT_VERSION, OBS_DIM, GLOBAL_STATE_DIM):
+            raise RuntimeError("incompatible MAPPO checkpoint environment contract")
         self.actor.load_state_dict(data["actor"]); self.critic.load_state_dict(data["critic"])
 
     def close(self) -> None:

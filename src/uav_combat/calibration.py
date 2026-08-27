@@ -18,28 +18,33 @@ import torch
 
 from .geometry import compute_pairwise_geometry
 from .mappo.buffer import RolloutBuffer
-from .mavuav import BLUE_IDS, RED_IDS, HeterogeneousMAVUAVAirCombatEnv
+from .mavuav import (
+    BLUE_IDS, ENVIRONMENT_VERSION, GLOBAL_STATE_DIM, OBS_DIM, RED_IDS,
+    HeterogeneousMAVUAVAirCombatEnv,
+)
 from .reward import situation_reward
 
 AGENT_NAMES = ("MAV", "UAV1", "UAV2")
 ACTION_NAMES = ("ux", "uy", "uz")
 OBSERVATION_FEATURES = (
-    "self_x", "self_y", "self_altitude", "self_speed", "self_theta", "self_psi", "self_type", "self_alive",
-    "friend1_dx", "friend1_dy", "friend1_dh", "friend1_distance", "friend1_dvx", "friend1_dvy", "friend1_dvh", "friend1_alive", "friend1_type",
-    "friend2_dx", "friend2_dy", "friend2_dh", "friend2_distance", "friend2_dvx", "friend2_dvy", "friend2_dvh", "friend2_alive", "friend2_type",
-    "blue1_dx", "blue1_dy", "blue1_dh", "blue1_distance", "blue1_ata", "blue1_aa", "blue1_alive",
-    "blue2_dx", "blue2_dy", "blue2_dh", "blue2_distance", "blue2_ata", "blue2_aa", "blue2_alive",
+    "self_x", "self_y", "self_altitude", "self_speed", "self_theta", "self_psi", "self_alive",
+    "self_type_MAV", "self_type_UAV", "self_type_Blue", "time_fraction",
+    "friend1_dx", "friend1_dy", "friend1_dh", "friend1_distance", "friend1_dvx", "friend1_dvy", "friend1_dvh", "friend1_alive", "friend1_type_MAV", "friend1_type_UAV", "friend1_type_Blue",
+    "friend2_dx", "friend2_dy", "friend2_dh", "friend2_distance", "friend2_dvx", "friend2_dvy", "friend2_dvh", "friend2_alive", "friend2_type_MAV", "friend2_type_UAV", "friend2_type_Blue",
+    "blue1_dx", "blue1_dy", "blue1_dh", "blue1_distance", "blue1_ata", "blue1_aa", "blue1_alive", "blue1_direct_visible", "blue1_datalink_visible", "blue1_own_attack_streak", "blue1_killed_by_red",
+    "blue2_dx", "blue2_dy", "blue2_dh", "blue2_distance", "blue2_ata", "blue2_aa", "blue2_alive", "blue2_direct_visible", "blue2_datalink_visible", "blue2_own_attack_streak", "blue2_killed_by_red",
 )
 OBSERVATION_GROUPS: dict[str, tuple[int, ...]] = {
     "self_position": (0, 1), "self_altitude": (2,), "self_speed": (3,),
-    "self_theta_psi": (4, 5), "self_type_alive": (6, 7),
-    "friendly_relative_position": (8, 9, 10, 17, 18, 19),
-    "friendly_distance": (11, 20),
-    "friendly_relative_velocity": (12, 13, 14, 21, 22, 23),
-    "friendly_alive_type": (15, 16, 24, 25),
-    "enemy_relative_position": (26, 27, 28, 33, 34, 35),
-    "enemy_distance": (29, 36), "enemy_ata": (30, 37),
-    "enemy_aa": (31, 38), "enemy_alive": (32, 39),
+    "self_theta_psi": (4, 5), "self_alive_type": (6, 7, 8, 9), "time_fraction": (10,),
+    "friendly_relative_position": (11, 12, 13, 22, 23, 24),
+    "friendly_distance": (14, 25),
+    "friendly_relative_velocity": (15, 16, 17, 26, 27, 28),
+    "friendly_alive_type": (18, 19, 20, 21, 29, 30, 31, 32),
+    "enemy_relative_position": (33, 34, 35, 44, 45, 46),
+    "enemy_distance": (36, 47), "enemy_ata": (37, 48), "enemy_aa": (38, 49),
+    "enemy_alive": (39, 50), "enemy_visibility": (40, 41, 51, 52),
+    "enemy_own_attack_streak": (42, 53), "enemy_killed_by_red": (43, 54),
 }
 
 
@@ -108,7 +113,7 @@ class TrainingDiagnostics:
         self.observation_batches.clear()
 
     def observe_rollout(self, buffer: RolloutBuffer) -> None:
-        observations = np.asarray(buffer.observations, dtype=np.float32).reshape(-1, 40)
+        observations = np.asarray(buffer.observations, dtype=np.float32).reshape(-1, OBS_DIM)
         remaining = self.max_observation_samples - self.observation_sample_count
         if remaining > 0:
             kept = observations[:remaining].copy()
@@ -239,7 +244,7 @@ def evaluate_policy(
         observations, _ = env.reset(seed=int(episode_seed))
         combat_hold = int(env.config["combat"]["hold_steps"])
         rng = np.random.default_rng(int(episode_seed) + 1_000_000)
-        situation_sum = event_sum = terminal_sum = 0.0
+        situation_sum = event_sum = terminal_sum = safety_sum = 0.0
         min_cross = min_friendly = np.inf
         attack_window_steps = max_streak = 0
         proxy_counts = {aid: Counter() for aid in RED_IDS}
@@ -270,6 +275,7 @@ def evaluate_policy(
             situation_sum += float(info["team_situation"])
             event_sum += float(info["event_reward"])
             terminal_sum += float(info["terminal_reward"])
+            safety_sum += float(info["safety_reward"])
             current_max = max(env._attack_streak.values(), default=0)
             if info["attack_events"]:
                 current_max = max(current_max, combat_hold)
@@ -281,7 +287,7 @@ def evaluate_policy(
             "algorithm": algorithm, "sampled_steps": int(sampled_steps), "blue_mode": blue_mode,
             "evaluation_seed": int(episode_seed), "action_mode": action_mode,
             "situation_reward_sum": float(situation_sum), "event_reward_sum": float(event_sum),
-            "terminal_reward_sum": float(terminal_sum),
+            "terminal_reward_sum": float(terminal_sum), "safety_reward_sum": float(safety_sum),
             "minimum_cross_team_distance": float(min_cross), "minimum_friendly_red_distance": float(min_friendly),
             "attack_window_active_steps": int(attack_window_steps), "maximum_attack_streak": int(max_streak),
             "all_three_same_target_steps": int(all_same_steps), "two_or_more_same_target_steps": int(two_same_steps),
@@ -350,6 +356,7 @@ def reward_diagnostic_rows(records: list[Mapping[str, Any]], algorithm: str, see
             "outcome": outcome, "episodes": len(selected),
             "mean_situation_reward_sum": float(np.mean([r["situation_reward_sum"] for r in selected])) if selected else 0.0,
             "mean_event_reward_sum": float(np.mean([r["event_reward_sum"] for r in selected])) if selected else 0.0,
+            "mean_safety_reward_sum": float(np.mean([r["safety_reward_sum"] for r in selected])) if selected else 0.0,
             "mean_terminal_reward": float(np.mean([r["terminal_reward_sum"] for r in selected])) if selected else 0.0,
             "mean_total_return": float(np.mean([r["episode_return"] for r in selected])) if selected else 0.0,
             "return_red_attack_kills_correlation": correlation,
@@ -420,10 +427,13 @@ def set_rollout_horizon(trainer: Any, horizon: int) -> None:
 def save_calibration_checkpoint(path: str | Path, trainer: Any, algorithm: str, sampled_steps: int, diagnostics: TrainingDiagnostics) -> None:
     environment_states = trainer.vector_env.get_env_states()
     payload: dict[str, Any] = {
-        "format": "mavuav_learnability_calibration_v1", "algorithm": algorithm,
+        "format": "mavuav_learnability_calibration_v2", "algorithm": algorithm,
+        "environment_version": ENVIRONMENT_VERSION,
+        "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM,
         "sampled_steps": int(sampled_steps), "trainer_config": trainer.config,
         "critic": trainer.critic.state_dict(), "critic_optimizer": trainer.critic_optimizer.state_dict(),
         "trainer_numpy_rng": trainer.rng.bit_generator.state, "torch_rng": torch.get_rng_state(),
+        "torch_cuda_rng": torch.cuda.get_rng_state_all() if trainer.device.type == "cuda" and torch.cuda.is_available() else None,
         "diagnostics": diagnostics.state_dict(),
         "rollout_state": {
             "observations": trainer.observations, "global_states": trainer.global_states,
@@ -441,8 +451,14 @@ def save_calibration_checkpoint(path: str | Path, trainer: Any, algorithm: str, 
 
 def load_calibration_checkpoint(path: str | Path, trainer: Any, algorithm: str) -> tuple[int, TrainingDiagnostics]:
     payload = torch.load(path, map_location=trainer.device, weights_only=False)
-    if payload.get("format") != "mavuav_learnability_calibration_v1" or payload.get("algorithm") != algorithm:
-        raise RuntimeError("calibration checkpoint format or algorithm mismatch")
+    expected = {
+        "format": "mavuav_learnability_calibration_v2", "algorithm": algorithm,
+        "environment_version": ENVIRONMENT_VERSION,
+        "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM,
+    }
+    mismatches = [f"{key}={payload.get(key)!r} (expected {value!r})" for key, value in expected.items() if payload.get(key) != value]
+    if mismatches:
+        raise RuntimeError("incompatible calibration checkpoint: " + "; ".join(mismatches))
     trainer.critic.load_state_dict(payload["critic"]); trainer.critic_optimizer.load_state_dict(payload["critic_optimizer"])
     if algorithm == "mappo":
         trainer.actor.load_state_dict(payload["actor"]); trainer.actor_optimizer.load_state_dict(payload["actor_optimizer"])
@@ -450,8 +466,14 @@ def load_calibration_checkpoint(path: str | Path, trainer: Any, algorithm: str) 
         trainer.actors.load_state_dict(payload["actors"])
         for optimizer, state in zip(trainer.actor_optimizers, payload["actor_optimizers"]): optimizer.load_state_dict(state)
     sampled_steps = int(payload["sampled_steps"]); trainer.env_steps = sampled_steps
-    trainer.rng.bit_generator.state = payload["trainer_numpy_rng"]; torch.set_rng_state(payload["torch_rng"])
+    trainer.rng.bit_generator.state = payload["trainer_numpy_rng"]
+    torch.set_rng_state(payload["torch_rng"].cpu())
+    cuda_rng = payload.get("torch_cuda_rng")
+    if cuda_rng is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all([state.cpu() for state in cuda_rng])
     rollout = payload["rollout_state"]
+    if np.asarray(rollout["observations"]).shape[-1] != OBS_DIM or np.asarray(rollout["global_states"]).shape[-1] != GLOBAL_STATE_DIM:
+        raise RuntimeError("incompatible calibration checkpoint rollout dimensions")
     trainer.observations = np.asarray(rollout["observations"], dtype=np.float32)
     trainer.global_states = np.asarray(rollout["global_states"], dtype=np.float32)
     trainer.active_masks = np.asarray(rollout["active_masks"], dtype=np.float32)

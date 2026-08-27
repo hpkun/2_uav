@@ -17,7 +17,7 @@ This project deliberately combines sources and engineering choices; it is not a 
 - Each Red agent uses the maximum situation score over currently alive Blue aircraft, with no assigned target.
 - Team dense reward sums the three Red slots and always divides by three.
 - All cross-team attacker-target pairs maintain independent streaks and resolve kills synchronously.
-- Fixed 40D entity observation and fixed 40D centralized state.
+- Fixed-slot multi-target observation and centralized state, upgraded in environment contract `heterogeneous_mavuav_3v2_v2` to 55D/67D.
 
 ## D. Project engineering parameters
 
@@ -26,5 +26,14 @@ This project deliberately combines sources and engineering choices; it is not a 
 - +/-100 km horizontal volume, 1-20 km altitude, and +/-60-degree pitch guard.
 - Blue's 27-candidate overload lookahead and `mixed_episode` target mode.
 - Synchronous Python vector environment with per-environment auto-reset.
+- Distance-only heterogeneous sensor ranges (MAV 12 km, UAV 8 km).
+- Instantaneous reliable Red datalink and masking of unseen enemy geometry.
+- One-hot type fields and the explicit 55D actor-observation layout.
+- The 67D centralized state extension containing streaks, Red kill history, actual Blue episode mode and time fraction.
+- Normalization scales: 30 km self x/y, 12 km relative x/y and distance, 10 km relative altitude, and 800 m/s relative velocity.
+- Seeded `main` and `learnability` randomization profiles with team-level and slot-level offsets.
+- The implementation choice of a once-per-step -1 team penalty below 100 m Red friendly distance, without collision physics.
+
+The sensor ranges, datalink assumptions, observation masking, one-hot encoding, normalization scales, randomization profiles and 100 m safety penalty are project engineering extensions. They are not claimed to be parameters reproduced verbatim from the cited papers.
 
 Chen, Luo and Guo (2026), *A deep reinforcement learning cooperative air combat method with temporal feature and attention enhancement for heterogeneous flight vehicles*, supplies only the heterogeneous 3v2 scenario-size precedent. The local paper explicitly describes TAM-HAPPO with GRU, masking and multi-head attention; none of those extensions are included here.

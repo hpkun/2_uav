@@ -3,6 +3,7 @@ import io
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 from uav_combat.calibration import (
@@ -15,10 +16,10 @@ from uav_combat.mappo.buffer import RolloutBuffer
 from uav_combat.mavuav import HeterogeneousMAVUAVAirCombatEnv, load_environment_config
 
 
-def tiny_trainer(seed=1):
+def tiny_trainer(seed=1, device="cpu"):
     config = deepcopy(load_environment_config(None))
     config["simulation"]["max_decision_steps"] = 3
-    return MAPPOTrainer(config, {"num_envs": 1, "rollout_steps": 2, "ppo_epochs": 1, "minibatch_size": 2, "hidden_dim": 16, "seed": seed})
+    return MAPPOTrainer(config, {"num_envs": 1, "rollout_steps": 2, "ppo_epochs": 1, "minibatch_size": 2, "hidden_dim": 16, "seed": seed, "device": device})
 
 
 def test_fixed_evaluation_seeds_are_identical_across_checkpoints():
@@ -41,7 +42,7 @@ def test_observation_statistics_are_finite_and_cover_groups():
     buffer = RolloutBuffer(2, 1); buffer.observations[:] = np.linspace(-1, 1, buffer.observations.size).reshape(buffer.observations.shape)
     diagnostics = TrainingDiagnostics(); diagnostics.observe_rollout(buffer)
     rows = diagnostics.observation_rows("mappo", 1, 2)
-    assert len([row for row in rows if row["row_type"] == "feature"]) == 40
+    assert len([row for row in rows if row["row_type"] == "feature"]) == 55
     assert any(row["feature"] == "enemy_distance" for row in rows)
     assert all(np.isfinite(row[key]) for row in rows for key in ("mean", "std", "min", "max", "p01", "p99"))
 
@@ -68,7 +69,7 @@ def test_legacy_diagnostics_are_compacted_when_loaded():
     actions = np.asarray([[[1.0, 0.0, -0.5], [0.5, 0.25, 0.0], [-1.0, 0.0, 0.5]]], dtype=np.float32)
     legacy = {
         "max_observation_samples": 1,
-        "observation_batches": [np.zeros((1, 40), dtype=np.float32)],
+        "observation_batches": [np.zeros((1, 55), dtype=np.float32)],
         "action_batches": [actions],
         "active_mask_batches": [np.ones((1, 3), dtype=np.float32)],
         "observation_sample_count": 1,
@@ -105,12 +106,12 @@ def test_target_proxy_is_read_only_and_does_not_enter_policy_or_reward():
 
 def test_reward_diagnostic_decomposition_and_kill_trend():
     records = [
-        {"outcome": "red", "situation_reward_sum": 10.0, "event_reward_sum": 100.0, "terminal_reward_sum": 100.0, "episode_return": 210.0, "red_attack_kills": 2},
-        {"outcome": "draw", "situation_reward_sum": 20.0, "event_reward_sum": 0.0, "terminal_reward_sum": 0.0, "episode_return": 20.0, "red_attack_kills": 0},
+        {"outcome": "red", "situation_reward_sum": 10.0, "event_reward_sum": 100.0, "safety_reward_sum": 0.0, "terminal_reward_sum": 100.0, "episode_return": 210.0, "red_attack_kills": 2},
+        {"outcome": "draw", "situation_reward_sum": 21.0, "event_reward_sum": 0.0, "safety_reward_sum": -1.0, "terminal_reward_sum": 0.0, "episode_return": 20.0, "red_attack_kills": 0},
     ]
     rows = reward_diagnostic_rows(records, "mappo", 1, 100, "nearest")
     red = next(row for row in rows if row["outcome"] == "red"); draw = next(row for row in rows if row["outcome"] == "draw")
-    assert red["mean_total_return"] == red["mean_situation_reward_sum"] + red["mean_event_reward_sum"] + red["mean_terminal_reward"]
+    assert red["mean_total_return"] == red["mean_situation_reward_sum"] + red["mean_event_reward_sum"] + red["mean_safety_reward_sum"] + red["mean_terminal_reward"]
     assert draw["mean_total_return"] == 20.0 and red["return_red_attack_kills_correlation"] > 0.99
     assert draw_return_exceeds_red_win(rows) is False
     assert draw_return_exceeds_red_win([draw]) is None
@@ -136,6 +137,35 @@ def test_calibration_checkpoint_restores_parameters_optimizer_and_rollout_state(
     assert restored_diagnostics.observation_sample_count == diagnostics.observation_sample_count
     assert all(torch.equal(a, b) for a, b in zip(expected, restored.actor.parameters()))
     assert np.array_equal(expected_observations, restored.observations)
+    trainer.close(); restored.close()
+
+
+def test_old_40d_calibration_checkpoint_is_rejected_clearly(tmp_path: Path):
+    trainer = tiny_trainer(seed=17); diagnostics = TrainingDiagnostics()
+    train_to_sampled_steps(trainer, 2, diagnostics)
+    checkpoint = tmp_path / "v2.pt"
+    save_calibration_checkpoint(checkpoint, trainer, "mappo", 2, diagnostics)
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    payload["format"] = "mavuav_learnability_calibration_v1"
+    payload["environment_version"] = None
+    payload["observation_dim"] = 40
+    payload["global_state_dim"] = 40
+    old_checkpoint = tmp_path / "old_40d.pt"; torch.save(payload, old_checkpoint)
+    restored = tiny_trainer(seed=18)
+    with np.testing.assert_raises_regex(RuntimeError, "incompatible calibration checkpoint"):
+        load_calibration_checkpoint(old_checkpoint, restored, "mappo")
+    trainer.close(); restored.close()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_cuda_calibration_checkpoint_restores_cpu_and_cuda_rng_state(tmp_path: Path):
+    trainer = tiny_trainer(seed=21, device="cuda"); diagnostics = TrainingDiagnostics()
+    train_to_sampled_steps(trainer, 2, diagnostics)
+    checkpoint = tmp_path / "cuda_checkpoint.pt"
+    save_calibration_checkpoint(checkpoint, trainer, "mappo", 2, diagnostics)
+    restored = tiny_trainer(seed=22, device="cuda")
+    sampled_steps, _ = load_calibration_checkpoint(checkpoint, restored, "mappo")
+    assert sampled_steps == 2 and restored.observations.shape[-1] == 55 and restored.global_states.shape[-1] == 67
     trainer.close(); restored.close()
 
 

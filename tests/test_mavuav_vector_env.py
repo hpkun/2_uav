@@ -15,7 +15,7 @@ def short_config(max_steps=1):
 def test_vector_env_shapes_and_auto_reset():
     with MAVUAVVectorEnv(2, short_config(), seed=3, randomize=False) as env:
         observations, states, masks, infos = env.reset()
-        assert observations.shape == (2, 3, 40) and states.shape == (2, 40) and masks.shape == (2, 3) and len(infos) == 2
+        assert observations.shape == (2, 3, 55) and states.shape == (2, 67) and masks.shape == (2, 3) and len(infos) == 2
         observations, states, rewards, terminated, truncated, masks, infos = env.step(np.zeros((2, 3, 3)))
         assert rewards.shape == (2, 3) and terminated.shape == truncated.shape == (2,)
         assert truncated.all() and all(info["auto_reset"] and "episode_summary" in info for info in infos)
@@ -25,7 +25,7 @@ def test_vector_env_shapes_and_auto_reset():
 def test_vector_env_shapes():
     with MAVUAVVectorEnv(2, seed=3) as env:
         observations, states, masks, infos = env.reset()
-        assert observations.shape == (2, 3, 40) and states.shape == (2, 40) and masks.shape == (2, 3) and len(infos) == 2
+        assert observations.shape == (2, 3, 55) and states.shape == (2, 67) and masks.shape == (2, 3) and len(infos) == 2
 
 
 def test_vector_env_auto_reset():
@@ -70,9 +70,37 @@ def test_parallel_results_match_serial_reference_through_auto_reset():
             np.testing.assert_array_equal(parallel_env.reset_counts, serial_env.reset_counts)
 
 
+def test_parallel_and_serial_match_with_same_profile_through_auto_reset():
+    config = short_config(2)
+    rng = np.random.default_rng(31)
+    with MAVUAVVectorEnv(2, config, seed=31, profile="learnability", parallel=True) as parallel_env, \
+         MAVUAVVectorEnv(2, config, seed=31, profile="learnability", parallel=False) as serial_env:
+        parallel_reset, serial_reset = parallel_env.reset(), serial_env.reset()
+        for parallel_value, serial_value in zip(parallel_reset[:3], serial_reset[:3]):
+            np.testing.assert_array_equal(parallel_value, serial_value)
+        for _ in range(6):
+            actions = rng.uniform(-1.0, 1.0, (2, 3, 3))
+            parallel_step, serial_step = parallel_env.step(actions), serial_env.step(actions)
+            for parallel_value, serial_value in zip(parallel_step[:6], serial_step[:6]):
+                np.testing.assert_array_equal(parallel_value, serial_value)
+
+
 def test_worker_error_is_propagated_without_desynchronizing_other_workers():
     with MAVUAVVectorEnv(2, short_config(), seed=23) as env:
         original_pids = env.worker_pids
         with pytest.raises(RuntimeError, match="unknown vector-environment command"):
             env._send_all("invalid-test-command", [None, None])
         assert env.worker_pids == original_pids
+
+
+def test_vector_environment_state_round_trip_restores_next_transition():
+    with MAVUAVVectorEnv(2, short_config(5), seed=41, profile="main") as env:
+        env.reset()
+        actions = np.random.default_rng(41).uniform(-1.0, 1.0, (2, 3, 3))
+        env.step(actions)
+        states = env.get_env_states(); counts = env.reset_counts.copy(); base_seed = env.base_seed
+        expected = env.step(actions)
+        env.set_env_states(states, counts, base_seed)
+        restored = env.step(actions)
+        for expected_value, restored_value in zip(expected[:6], restored[:6]):
+            np.testing.assert_array_equal(expected_value, restored_value)

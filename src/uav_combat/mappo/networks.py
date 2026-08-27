@@ -4,10 +4,11 @@ from __future__ import annotations
 import torch
 from torch import nn
 from torch.distributions import Normal
+from ..mavuav import GLOBAL_STATE_DIM, OBS_DIM
 
 
 class GaussianActor(nn.Module):
-    def __init__(self, observation_dim: int = 40, action_dim: int = 3, hidden_dim: int = 128, log_std_init: float = -0.5) -> None:
+    def __init__(self, observation_dim: int = OBS_DIM, action_dim: int = 3, hidden_dim: int = 128, log_std_init: float = -0.5) -> None:
         super().__init__()
         self.network = nn.Sequential(nn.Linear(observation_dim, hidden_dim), nn.Tanh(), nn.Linear(hidden_dim, hidden_dim), nn.Tanh(), nn.Linear(hidden_dim, action_dim))
         self.log_std = nn.Parameter(torch.full((action_dim,), float(log_std_init)))
@@ -32,7 +33,7 @@ class GaussianActor(nn.Module):
 
 
 class CentralizedCritic(nn.Module):
-    def __init__(self, state_dim: int = 40, hidden_dim: int = 128) -> None:
+    def __init__(self, state_dim: int = GLOBAL_STATE_DIM, hidden_dim: int = 128) -> None:
         super().__init__()
         self.network = nn.Sequential(nn.Linear(state_dim, hidden_dim), nn.Tanh(), nn.Linear(hidden_dim, hidden_dim), nn.Tanh(), nn.Linear(hidden_dim, 1))
 
