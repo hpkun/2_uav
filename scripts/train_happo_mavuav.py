@@ -15,8 +15,9 @@ def summarize(records):
 
 
 def main():
-    p = argparse.ArgumentParser(); p.add_argument("--updates", type=int, default=10); p.add_argument("--config", default="configs/happo_mavuav_3v2.yaml"); p.add_argument("--env-config", default="configs/heterogeneous_mavuav_3v2.yaml"); p.add_argument("--output", default="outputs/happo_mavuav.pt"); args = p.parse_args()
+    p = argparse.ArgumentParser(); p.add_argument("--updates", type=int, default=10); p.add_argument("--config", default="configs/happo_mavuav_3v2.yaml"); p.add_argument("--env-config", default="configs/heterogeneous_mavuav_3v2.yaml"); p.add_argument("--profile", choices=("learnability", "main"), default="main"); p.add_argument("--output", default="outputs/happo_mavuav.pt"); args = p.parse_args()
     with open(args.config, encoding="utf-8") as f: config = yaml.safe_load(f)
+    config["training"]["environment_profile"] = args.profile
     trainer = HAPPOTrainer(args.env_config, config)
     for _ in range(args.updates):
         episodes, losses = trainer.train_update(); print({"sampled_environment_steps": trainer.env_steps, **summarize(episodes), **losses})

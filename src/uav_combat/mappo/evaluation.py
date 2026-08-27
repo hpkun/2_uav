@@ -27,9 +27,9 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, float]:
     }
 
 
-def evaluate_actor(actor: GaussianActor, env_config: str | Path | Mapping[str, Any] | None, episodes: int, blue_target_mode: str, seed: int = 1000, device: str = "cpu") -> list[dict[str, Any]]:
+def evaluate_actor(actor: GaussianActor, env_config: str | Path | Mapping[str, Any] | None, episodes: int, blue_target_mode: str, profile: str, seed: int = 1000, device: str = "cpu") -> list[dict[str, Any]]:
     records = []
-    env = HeterogeneousMAVUAVAirCombatEnv(env_config, blue_target_mode=blue_target_mode)
+    env = HeterogeneousMAVUAVAirCombatEnv(env_config, blue_target_mode=blue_target_mode, profile=profile)
     for episode in range(int(episodes)):
         observations, _ = env.reset(seed=seed + episode)
         done = False

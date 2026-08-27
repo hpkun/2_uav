@@ -11,8 +11,8 @@ from .networks import IndependentActors
 from ..mappo.evaluation import summarize_records
 
 
-def evaluate_actors(actors: IndependentActors, env_config: str | Path | Mapping[str, Any] | None, episodes: int, blue_target_mode: str, seed: int = 1000, device: str = "cpu") -> list[dict[str, Any]]:
-    records = []; env = HeterogeneousMAVUAVAirCombatEnv(env_config, blue_target_mode=blue_target_mode)
+def evaluate_actors(actors: IndependentActors, env_config: str | Path | Mapping[str, Any] | None, episodes: int, blue_target_mode: str, profile: str, seed: int = 1000, device: str = "cpu") -> list[dict[str, Any]]:
+    records = []; env = HeterogeneousMAVUAVAirCombatEnv(env_config, blue_target_mode=blue_target_mode, profile=profile)
     for episode in range(int(episodes)):
         observations, _ = env.reset(seed=seed + episode); done = False
         while not done:

@@ -28,6 +28,7 @@ TRAINERS = {"happo": HAPPOTrainer, "mappo": MAPPOTrainer}
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--algorithm", choices=("happo", "mappo"), required=True)
+    parser.add_argument("--profile", choices=("learnability", "main"), default="main")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--sample-steps", type=int, default=50_000)
     parser.add_argument("--eval-interval", type=int, default=10_000)
@@ -51,17 +52,18 @@ def resolve_device(requested: str) -> tuple[str, str | None]:
     return requested, None
 
 
-def trainer_config(algorithm: str, seed: int, device: str, num_envs: int) -> dict[str, Any]:
+def trainer_config(algorithm: str, seed: int, device: str, num_envs: int, profile: str) -> dict[str, Any]:
     with Path(TRAINER_CONFIGS[algorithm]).open("r", encoding="utf-8") as stream:
         config = yaml.safe_load(stream)
     config["training"]["seed"] = int(seed)
     config["training"]["device"] = device
     config["training"]["num_envs"] = int(num_envs)
+    config["training"]["environment_profile"] = profile
     return config
 
 
-def make_trainer(algorithm: str, seed: int, device: str, num_envs: int):
-    return TRAINERS[algorithm](ENV_CONFIG, trainer_config(algorithm, seed, device, num_envs))
+def make_trainer(algorithm: str, seed: int, device: str, num_envs: int, profile: str):
+    return TRAINERS[algorithm](ENV_CONFIG, trainer_config(algorithm, seed, device, num_envs, profile))
 
 
 def _read_csv(path: Path) -> list[dict[str, Any]]:
@@ -71,12 +73,12 @@ def _read_csv(path: Path) -> list[dict[str, Any]]:
         return list(csv.DictReader(stream))
 
 
-def run_benchmark(algorithm: str, seed: int, device: str, num_envs: int, sampled_steps: int) -> dict[str, Any]:
+def run_benchmark(algorithm: str, seed: int, device: str, num_envs: int, sampled_steps: int, profile: str) -> dict[str, Any]:
     if sampled_steps <= 0:
-        return {"sampled_steps": 0, "elapsed_seconds": 0.0, "environment_steps_per_second": 0.0, "estimated_50k_seconds": 0.0}
+        return {"environment_profile": profile, "sampled_steps": 0, "elapsed_seconds": 0.0, "environment_steps_per_second": 0.0, "estimated_50k_seconds": 0.0}
     if sampled_steps % num_envs:
         raise ValueError("benchmark steps must be divisible by num_envs")
-    trainer = make_trainer(algorithm, seed, device, num_envs)
+    trainer = make_trainer(algorithm, seed, device, num_envs, profile)
     vector_env_start_method = trainer.vector_env.start_method
     worker_pids = trainer.vector_env.worker_pids
     diagnostics = TrainingDiagnostics(max_observation_samples=10_000)
@@ -86,7 +88,7 @@ def run_benchmark(algorithm: str, seed: int, device: str, num_envs: int, sampled
     trainer.close()
     throughput = sampled_steps / elapsed
     return {
-        "algorithm": algorithm, "device": device, "num_envs": num_envs,
+        "algorithm": algorithm, "environment_profile": profile, "device": device, "num_envs": num_envs,
         "vector_env_start_method": vector_env_start_method, "worker_pids": worker_pids,
         "sampled_steps": sampled_steps, "elapsed_seconds": elapsed,
         "environment_steps_per_second": throughput,
@@ -99,7 +101,7 @@ def _numeric(row: dict[str, Any], key: str) -> float:
 
 
 def build_summary(
-    algorithm: str, seed: int, device: str, fallback: str | None, benchmark: dict[str, Any],
+    algorithm: str, seed: int, device: str, fallback: str | None, profile: str, benchmark: dict[str, Any],
     evaluation_rows: list[dict[str, Any]], action_rows: list[dict[str, Any]],
     observation_rows: list[dict[str, Any]], geometry_rows: list[dict[str, Any]],
     target_rows: list[dict[str, Any]], reward_rows: list[dict[str, Any]], sampled_steps: int,
@@ -129,7 +131,7 @@ def build_summary(
             "return_red_attack_kills_correlation": _numeric(selected[0], "return_red_attack_kills_correlation") if selected else 0.0,
         }
     return {
-        "algorithm": algorithm, "seed": seed, "device": device, "device_fallback_reason": fallback,
+        "algorithm": algorithm, "environment_profile": profile, "seed": seed, "device": device, "device_fallback_reason": fallback,
         "sampled_steps": sampled_steps, "sample_step_definition": "one transition from one environment; one vector step contributes num_envs sampled steps",
         "benchmark": benchmark, "final_evaluations": final_eval, "learning_trends_from_first_checkpoint": trends,
         "maximum_action_saturation_rate": max((_numeric(row, "saturation_rate") for row in final_actions), default=0.0),
@@ -150,17 +152,17 @@ def main() -> None:
     checkpoints = run_dir / "checkpoints"
     run_dir.mkdir(parents=True, exist_ok=True); checkpoints.mkdir(parents=True, exist_ok=True)
     if not args.skip_baselines:
-        baseline_rows = run_rule_baselines(output_root, args.baseline_episodes, ENV_CONFIG)
+        baseline_rows = run_rule_baselines(output_root, args.baseline_episodes, ENV_CONFIG, args.profile)
         if args.baselines_only:
             print({"rule_baselines": baseline_rows}, flush=True)
             return
-    benchmark = run_benchmark(args.algorithm, args.seed, device, args.num_envs, args.benchmark_steps)
+    benchmark = run_benchmark(args.algorithm, args.seed, device, args.num_envs, args.benchmark_steps, args.profile)
     write_json(run_dir / "benchmark.json", benchmark)
     print({"benchmark": benchmark, "device_fallback_reason": fallback}, flush=True)
     if args.benchmark_only:
         return
 
-    trainer = make_trainer(args.algorithm, args.seed, device, args.num_envs)
+    trainer = make_trainer(args.algorithm, args.seed, device, args.num_envs, args.profile)
     diagnostics = TrainingDiagnostics()
     sampled_steps = 0
     if args.resume:
@@ -189,7 +191,7 @@ def main() -> None:
         seeds = fixed_evaluation_seeds(count)
         policy = trainer.actor if args.algorithm == "mappo" else trainer.actors
         for blue_mode in ("nearest", "mav_priority"):
-            records = evaluate_policy(policy, args.algorithm, ENV_CONFIG, blue_mode, seeds, sampled_steps, device)
+            records = evaluate_policy(policy, args.algorithm, ENV_CONFIG, blue_mode, args.profile, seeds, sampled_steps, device)
             evaluation_rows.append(evaluation_summary(records, args.algorithm, args.seed, sampled_steps, blue_mode))
             geometry_rows.append(geometry_summary(records, args.algorithm, args.seed, sampled_steps, blue_mode))
             target_rows.append(target_concentration_summary(records, args.algorithm, args.seed, sampled_steps, blue_mode))
@@ -202,7 +204,7 @@ def main() -> None:
         write_csv(run_dir / "reward_diagnostics.csv", reward_rows)
         print({"algorithm": args.algorithm, "sampled_steps": sampled_steps, "checkpoint": str(checkpoint)}, flush=True)
 
-    summary = build_summary(args.algorithm, args.seed, device, fallback, benchmark, evaluation_rows, action_rows, observation_rows, geometry_rows, target_rows, reward_rows, sampled_steps)
+    summary = build_summary(args.algorithm, args.seed, device, fallback, args.profile, benchmark, evaluation_rows, action_rows, observation_rows, geometry_rows, target_rows, reward_rows, sampled_steps)
     write_json(run_dir / "summary.json", summary)
     trainer.close()
     print(summary, flush=True)

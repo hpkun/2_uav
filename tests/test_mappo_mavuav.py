@@ -1,8 +1,27 @@
 import numpy as np
+import pytest
 import torch
 from uav_combat.mappo import MAPPOTrainer
 from copy import deepcopy
 from uav_combat.mavuav import load_environment_config
+
+
+@pytest.mark.parametrize("profile", ["learnability", "main"])
+def test_mappo_trainer_propagates_environment_profile(profile):
+    trainer = MAPPOTrainer(config={"num_envs": 1, "rollout_steps": 1, "hidden_dim": 8, "environment_profile": profile})
+    assert trainer.config["environment_profile"] == profile
+    assert trainer.vector_env.get_env_states()[0]["profile"] == profile
+    trainer.close()
+
+
+def test_mappo_checkpoint_rejects_environment_profile_mismatch(tmp_path):
+    checkpoint = tmp_path / "mappo.pt"
+    source = MAPPOTrainer(config={"num_envs": 1, "rollout_steps": 1, "hidden_dim": 8, "environment_profile": "learnability"})
+    source.save(checkpoint); source.close()
+    target = MAPPOTrainer(config={"num_envs": 1, "rollout_steps": 1, "hidden_dim": 8, "environment_profile": "main"})
+    with pytest.raises(RuntimeError, match="environment profile"):
+        target.load(checkpoint)
+    target.close()
 
 
 def test_mappo_rollout_gae_updates_are_finite_and_change_parameters():

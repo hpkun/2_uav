@@ -231,6 +231,7 @@ def evaluate_policy(
     algorithm: str,
     env_config: str | Path | Mapping[str, Any] | None,
     blue_mode: str,
+    profile: str,
     seeds: Iterable[int],
     sampled_steps: int,
     device: str = "cpu",
@@ -240,7 +241,7 @@ def evaluate_policy(
     records: list[dict[str, Any]] = []
     combat_hold = None
     for episode_seed in seeds:
-        env = HeterogeneousMAVUAVAirCombatEnv(env_config, blue_target_mode=blue_mode)
+        env = HeterogeneousMAVUAVAirCombatEnv(env_config, blue_target_mode=blue_mode, profile=profile)
         observations, _ = env.reset(seed=int(episode_seed))
         combat_hold = int(env.config["combat"]["hold_steps"])
         rng = np.random.default_rng(int(episode_seed) + 1_000_000)
@@ -285,7 +286,7 @@ def evaluate_policy(
         summary = dict(info["episode_summary"])
         summary.update({
             "algorithm": algorithm, "sampled_steps": int(sampled_steps), "blue_mode": blue_mode,
-            "evaluation_seed": int(episode_seed), "action_mode": action_mode,
+            "evaluation_seed": int(episode_seed), "action_mode": action_mode, "environment_profile": profile,
             "situation_reward_sum": float(situation_sum), "event_reward_sum": float(event_sum),
             "terminal_reward_sum": float(terminal_sum), "safety_reward_sum": float(safety_sum),
             "minimum_cross_team_distance": float(min_cross), "minimum_friendly_red_distance": float(min_friendly),
@@ -306,7 +307,8 @@ def evaluation_summary(records: list[Mapping[str, Any]], algorithm: str, seed: i
         raise ValueError("evaluation records cannot be empty")
     n = len(records)
     return {
-        "sampled_steps": sampled_steps, "algorithm": algorithm, "seed": seed, "blue_mode": blue_mode, "episodes": n,
+        "sampled_steps": sampled_steps, "algorithm": algorithm, "seed": seed, "blue_mode": blue_mode,
+        "environment_profile": records[0]["environment_profile"], "episodes": n,
         "red_win_rate": sum(r["outcome"] == "red" for r in records) / n,
         "blue_win_rate": sum(r["outcome"] == "blue" for r in records) / n,
         "draw_rate": sum(r["outcome"] == "draw" for r in records) / n,
@@ -393,12 +395,18 @@ def write_json(path: str | Path, value: Any) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def run_rule_baselines(output_root: str | Path, episodes: int, env_config: str | Path | Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
+def run_rule_baselines(output_root: str | Path, episodes: int, env_config: str | Path | Mapping[str, Any] | None = None, profile: str = "main") -> list[dict[str, Any]]:
     """Evaluate zero/random Red against both Blue modes with fixed seeds."""
     directory = Path(output_root) / "rule_baselines"
     result_path = directory / "evaluations.csv"
     summary_path = directory / "summary.json"
     if result_path.exists() and summary_path.exists():
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        if summary.get("environment_profile") != profile:
+            raise RuntimeError(
+                f"incompatible cached rule baseline environment profile: {summary.get('environment_profile')!r} "
+                f"(expected {profile!r})"
+            )
         with result_path.open("r", encoding="utf-8", newline="") as stream:
             return list(csv.DictReader(stream))
     rows: list[dict[str, Any]] = []
@@ -406,13 +414,14 @@ def run_rule_baselines(output_root: str | Path, episodes: int, env_config: str |
     seeds = fixed_evaluation_seeds(episodes)
     for action_mode in ("zero", "random"):
         for blue_mode in ("nearest", "mav_priority"):
-            records = evaluate_policy(None, action_mode, env_config, blue_mode, seeds, 0, action_mode=action_mode)
+            records = evaluate_policy(None, action_mode, env_config, blue_mode, profile, seeds, 0, action_mode=action_mode)
             row = evaluation_summary(records, action_mode, 1, 0, blue_mode)
             row["baseline"] = action_mode
+            row["environment_profile"] = profile
             rows.append(row)
             episode_records[f"{action_mode}_{blue_mode}"] = records
     write_csv(result_path, rows)
-    write_json(summary_path, {"evaluation_seeds": seeds, "evaluations": rows, "episode_records": episode_records})
+    write_json(summary_path, {"environment_profile": profile, "evaluation_seeds": seeds, "evaluations": rows, "episode_records": episode_records})
     return rows
 
 
@@ -429,6 +438,7 @@ def save_calibration_checkpoint(path: str | Path, trainer: Any, algorithm: str, 
     payload: dict[str, Any] = {
         "format": "mavuav_learnability_calibration_v2", "algorithm": algorithm,
         "environment_version": ENVIRONMENT_VERSION,
+        "environment_profile": trainer.config["environment_profile"],
         "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM,
         "sampled_steps": int(sampled_steps), "trainer_config": trainer.config,
         "critic": trainer.critic.state_dict(), "critic_optimizer": trainer.critic_optimizer.state_dict(),
@@ -454,6 +464,7 @@ def load_calibration_checkpoint(path: str | Path, trainer: Any, algorithm: str) 
     expected = {
         "format": "mavuav_learnability_calibration_v2", "algorithm": algorithm,
         "environment_version": ENVIRONMENT_VERSION,
+        "environment_profile": trainer.config["environment_profile"],
         "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM,
     }
     mismatches = [f"{key}={payload.get(key)!r} (expected {value!r})" for key, value in expected.items() if payload.get(key) != value]

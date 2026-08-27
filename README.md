@@ -28,9 +28,11 @@ observations, rewards, terminated, truncated, info = env.step(np.zeros((3, 3)))
 state = env.global_state()
 ```
 
-The active environment contract is `heterogeneous_mavuav_3v2_v2`. Each Red observation is 55D, the centralized state is 67D, and the Red active mask is ordered `[MAV, UAV1, UAV2]`. Type is one-hot. Enemy geometry is visible through direct sensing or the reliable datalink and otherwise masked to zero.
+The active environment contract is `heterogeneous_mavuav_3v2_v2_1`. Each Red observation is 55D, the centralized state is 67D, and the Red active mask is ordered `[MAV, UAV1, UAV2]`. Type is one-hot. Enemy geometry is visible through direct sensing or the reliable datalink and otherwise masked to zero. Actor self x/y retain the 30 km tactical scale, while centralized-state x/y map the full +/-100 km battlefield bounds to `[-1,1]`.
 
 Reset uses the broader seeded `main` randomization profile by default. The old-difficulty `learnability` profile is available with `env.reset(seed=1, options={"profile": "learnability"})`. A single team penalty of -1 is applied at a decision boundary if any alive Red pair is closer than 100 m; it causes no collision or death.
+
+Formal training, benchmark and evaluation runs select either `main` or `learnability` explicitly and record `environment_profile` in benchmark, summary and checkpoint outputs. Situation shaping uses only alive Blue aircraft currently visible to the Red team; event and terminal rewards remain based on global mission outcomes.
 
 ## Baselines
 

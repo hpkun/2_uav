@@ -1,5 +1,8 @@
 from copy import deepcopy
+import argparse
+import csv
 import io
+import json
 from pathlib import Path
 
 import numpy as np
@@ -14,12 +17,13 @@ from uav_combat.calibration import (
 from uav_combat.mappo import MAPPOTrainer
 from uav_combat.mappo.buffer import RolloutBuffer
 from uav_combat.mavuav import HeterogeneousMAVUAVAirCombatEnv, load_environment_config
+from scripts import calibrate_mavuav_learnability as calibration_script
 
 
-def tiny_trainer(seed=1, device="cpu"):
+def tiny_trainer(seed=1, device="cpu", profile="main"):
     config = deepcopy(load_environment_config(None))
     config["simulation"]["max_decision_steps"] = 3
-    return MAPPOTrainer(config, {"num_envs": 1, "rollout_steps": 2, "ppo_epochs": 1, "minibatch_size": 2, "hidden_dim": 16, "seed": seed, "device": device})
+    return MAPPOTrainer(config, {"num_envs": 1, "rollout_steps": 2, "ppo_epochs": 1, "minibatch_size": 2, "hidden_dim": 16, "seed": seed, "device": device, "environment_profile": profile})
 
 
 def test_fixed_evaluation_seeds_are_identical_across_checkpoints():
@@ -118,8 +122,10 @@ def test_reward_diagnostic_decomposition_and_kill_trend():
 
 
 def test_zero_and_random_baseline_runner_writes_results(tmp_path: Path):
-    rows = run_rule_baselines(tmp_path, episodes=1)
+    config = deepcopy(load_environment_config(None)); config["simulation"]["max_decision_steps"] = 2
+    rows = run_rule_baselines(tmp_path, episodes=1, env_config=config, profile="learnability")
     assert {(row["baseline"], row["blue_mode"]) for row in rows} == {("zero", "nearest"), ("zero", "mav_priority"), ("random", "nearest"), ("random", "mav_priority")}
+    assert {row["environment_profile"] for row in rows} == {"learnability"}
     assert (tmp_path / "rule_baselines" / "evaluations.csv").exists()
     assert (tmp_path / "rule_baselines" / "summary.json").exists()
 
@@ -138,6 +144,56 @@ def test_calibration_checkpoint_restores_parameters_optimizer_and_rollout_state(
     assert all(torch.equal(a, b) for a, b in zip(expected, restored.actor.parameters()))
     assert np.array_equal(expected_observations, restored.observations)
     trainer.close(); restored.close()
+
+
+def test_calibration_checkpoint_rejects_environment_profile_mismatch(tmp_path: Path):
+    source = tiny_trainer(seed=10, profile="learnability")
+    checkpoint = tmp_path / "profile.pt"
+    save_calibration_checkpoint(checkpoint, source, "mappo", 0, TrainingDiagnostics())
+    source.close()
+    target = tiny_trainer(seed=11, profile="main")
+    with pytest.raises(RuntimeError, match="environment_profile"):
+        load_calibration_checkpoint(checkpoint, target, "mappo")
+    target.close()
+
+
+@pytest.mark.parametrize("profile", ["learnability", "main"])
+def test_calibration_profile_reaches_benchmark_training_evaluation_and_outputs(tmp_path: Path, monkeypatch, profile):
+    env_config = deepcopy(load_environment_config(None))
+    env_config["simulation"]["max_decision_steps"] = 2
+    trainer_config_path = tmp_path / "mappo.yaml"
+    trainer_config_path.write_text(
+        "training:\n  environment_profile: main\n  seed: 1\n  device: cpu\n  num_envs: 1\n"
+        "  rollout_steps: 1\n  gamma: 0.99\n  gae_lambda: 0.95\n  ppo_epochs: 1\n"
+        "  minibatch_size: 1\n  clip_coef: 0.2\n  actor_learning_rate: 0.0003\n"
+        "  critic_learning_rate: 0.001\n  entropy_coef: 0.01\n  value_loss_coef: 0.5\n"
+        "  max_grad_norm: 0.5\n  hidden_dim: 8\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(calibration_script, "ENV_CONFIG", env_config)
+    monkeypatch.setitem(calibration_script.TRAINER_CONFIGS, "mappo", str(trainer_config_path))
+    monkeypatch.setattr(calibration_script, "parse_args", lambda: argparse.Namespace(
+        algorithm="mappo", profile=profile, seed=1, sample_steps=2, eval_interval=1,
+        eval_episodes=1, final_eval_episodes=1, device="cpu", num_envs=1,
+        output_dir=str(tmp_path / profile), benchmark_steps=1, baseline_episodes=1,
+        resume=None, skip_baselines=True, baselines_only=False, benchmark_only=False,
+    ))
+    calibration_script.main()
+
+    run_dir = tmp_path / profile / "mappo_seed1"
+    benchmark = json.loads((run_dir / "benchmark.json").read_text(encoding="utf-8"))
+    summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+    checkpoints = [
+        torch.load(run_dir / "checkpoints" / f"checkpoint_{step:06d}.pt", map_location="cpu", weights_only=False)
+        for step in (1, 2)
+    ]
+    with (run_dir / "evaluations.csv").open(encoding="utf-8", newline="") as stream:
+        evaluations = list(csv.DictReader(stream))
+    assert benchmark["environment_profile"] == profile
+    assert summary["environment_profile"] == profile
+    assert {checkpoint["environment_profile"] for checkpoint in checkpoints} == {profile}
+    assert {row["environment_profile"] for row in evaluations} == {profile}
+    assert {int(row["sampled_steps"]) for row in evaluations} == {1, 2}
 
 
 def test_old_40d_calibration_checkpoint_is_rejected_clearly(tmp_path: Path):

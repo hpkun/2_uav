@@ -112,6 +112,28 @@ def test_observation_global_state_active_masks_and_finiteness():
     assert all(np.all(np.isfinite(value)) for value in observations.values()) and np.all(np.isfinite(e.global_state()))
 
 
+def test_global_state_xy_uses_battlefield_bounds_without_early_saturation():
+    e = env()
+    assert [e._global_xy_norm(value, "x") for value in (-100_000, 0, 100_000)] == [-1.0, 0.0, 1.0]
+    assert [e._global_xy_norm(value, "y") for value in (-100_000, 0, 100_000)] == [-1.0, 0.0, 1.0]
+    e.entities["Blue1"].state.x = 31_000.0
+    state_a = e.global_state().copy()
+    e.entities["Blue1"].state.x = 50_000.0
+    state_b = e.global_state().copy()
+    assert state_a[30] != state_b[30]
+    assert not np.array_equal(state_a, state_b)
+
+
+def test_actor_self_xy_normalization_remains_thirty_kilometres():
+    e = env()
+    assert e._self_xy_norm(30_000.0) == 1.0
+    assert e._self_xy_norm(50_000.0) == 1.0
+    e.entities["MAV"].state.x = 50_000.0
+    e.entities["MAV"].state.y = -50_000.0
+    observation = e._observations()["MAV"]
+    assert np.array_equal(observation[:2], [1.0, -1.0])
+
+
 def test_reward_component_formulas_and_weights():
     phi_m = np.deg2rad(30)
     assert np.isclose(bearing_reward(0), 1) and np.isclose(bearing_reward(phi_m), 0.7) and np.isclose(bearing_reward(np.pi), 0)
@@ -134,6 +156,31 @@ def test_multi_target_uses_best_and_fixed_denominator_after_uav_death():
     e.entities["UAV1"].state.alive = False
     expected = sum(max(situation_reward(e.entities[aid].state, e.entities[bid].state) for bid in e.blue_ids) for aid in ("MAV", "UAV2")) / 3
     assert np.isclose(e._team_situation_reward(), expected)
+
+
+def test_situation_reward_uses_only_team_visible_alive_blue():
+    e = env()
+    for index, aid in enumerate(e.red_ids):
+        e.entities[aid].state = AircraftState(0.0, index * 10.0, 5000.0, 300.0, 0.0, 0.0, True)
+    e.entities["Blue1"].state = AircraftState(20_000.0, 0.0, 5000.0, 300.0, 0.0, np.pi, True)
+    e.entities["Blue2"].state = AircraftState(25_000.0, 0.0, 5000.0, 300.0, 0.0, np.pi, True)
+    assert not any(e.team_visible(bid) for bid in BLUE_IDS)
+    assert e._team_situation_reward() == 0.0
+
+    e.entities["Blue1"].state.x = 10_000.0
+    assert e.team_visible("Blue1")
+    assert e._team_situation_reward() > 0.0
+
+    e.entities["Blue1"].state = AircraftState(-11_000.0, 0.0, 5000.0, 400.0, 0.0, 0.0, True)
+    e.entities["Blue2"].state = AircraftState(13_000.0, 0.0, 5000.0, 250.0, 0.0, 0.0, True)
+    assert e.team_visible("Blue1") and not e.team_visible("Blue2")
+    visible_only = sum(situation_reward(e.entities[aid].state, e.entities["Blue1"].state) for aid in e.red_ids) / 3.0
+    assert all(
+        situation_reward(e.entities[aid].state, e.entities["Blue2"].state)
+        > situation_reward(e.entities[aid].state, e.entities["Blue1"].state)
+        for aid in e.red_ids
+    )
+    assert np.isclose(e._team_situation_reward(), visible_only)
 
 
 def test_initial_randomization_is_seed_reproducible_and_optional():

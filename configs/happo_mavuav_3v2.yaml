@@ -1,4 +1,5 @@
 training:
+  environment_profile: main
   seed: 1
   device: cpu
   num_envs: 16

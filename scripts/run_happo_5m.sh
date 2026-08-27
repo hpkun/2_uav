@@ -30,6 +30,7 @@ eval_episodes="${EVAL_EPISODES:-50}"
 final_eval_episodes="${FINAL_EVAL_EPISODES:-100}"
 benchmark_steps="${BENCHMARK_STEPS:-2000}"
 device="${DEVICE:-cuda}"
+profile="${PROFILE:-main}"
 mode="${1:---background}"
 
 if [[ "$mode" == "--smoke-test" ]]; then
@@ -59,6 +60,10 @@ if [[ "$device" == "cuda" ]] && ! python -c "import torch, sys; sys.exit(0 if to
     echo "ERROR: DEVICE=cuda was requested, but PyTorch reports CUDA unavailable." >&2
     exit 2
 fi
+if [[ "$profile" != "learnability" && "$profile" != "main" ]]; then
+    echo "ERROR: PROFILE must be 'learnability' or 'main', got '$profile'." >&2
+    exit 2
+fi
 
 if [[ "$mode" == "--foreground" ]]; then
     run_root="${OUTPUT_ROOT:-/tmp/happo_seed${seed}_smoke_$(date +%Y%m%d_%H%M%S)}"
@@ -71,6 +76,7 @@ mkdir -p "$run_dir"
 training_command=(
     python -u scripts/calibrate_mavuav_learnability.py
     --algorithm happo
+    --profile "$profile"
     --seed "$seed"
     --sample-steps "$sample_steps"
     --eval-interval "$eval_interval"
@@ -86,6 +92,7 @@ training_command=(
 echo "Project root: $project_root"
 echo "Output root:  $run_root"
 echo "Mode:         $mode"
+echo "Profile:      $profile"
 
 if [[ "$mode" == "--foreground" ]]; then
     env CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \

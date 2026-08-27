@@ -16,7 +16,7 @@ from .networks import IndependentActors
 
 
 DEFAULTS = {
-    "seed": 1, "device": "cpu", "num_envs": 16, "rollout_steps": 128,
+    "environment_profile": "main", "seed": 1, "device": "cpu", "num_envs": 16, "rollout_steps": 128,
     "gamma": 0.99, "gae_lambda": 0.95, "ppo_epochs": 4, "minibatch_size": 256,
     "clip_coef": 0.2, "actor_learning_rate": 3e-4, "critic_learning_rate": 1e-3,
     "entropy_coef": 0.01, "value_loss_coef": 0.5, "max_grad_norm": 0.5,
@@ -34,10 +34,14 @@ class HAPPOTrainer:
         self.config = deepcopy(DEFAULTS)
         if config: self.config.update(dict(config.get("training", config)))
         c = self.config
+        if c["environment_profile"] not in ("learnability", "main"):
+            raise ValueError("environment_profile must be 'learnability' or 'main'")
         self.device = torch.device(c["device"])
         torch.manual_seed(int(c["seed"]))
         self.rng = np.random.default_rng(int(c["seed"]))
-        self.vector_env = MAVUAVVectorEnv(int(c["num_envs"]), env_config, seed=int(c["seed"]))
+        self.vector_env = MAVUAVVectorEnv(
+            int(c["num_envs"]), env_config, seed=int(c["seed"]), profile=c["environment_profile"],
+        )
         self.actors = IndependentActors(hidden_dim=int(c["hidden_dim"])).to(self.device)
         self.critic = CentralizedCritic(GLOBAL_STATE_DIM, int(c["hidden_dim"])).to(self.device)
         self.actor_optimizers = [torch.optim.Adam(actor.parameters(), lr=float(c["actor_learning_rate"])) for actor in self.actors.actors]
@@ -123,12 +127,17 @@ class HAPPOTrainer:
 
     def save(self, path: str | Path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        torch.save({"environment_version": ENVIRONMENT_VERSION, "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM, "actors": self.actors.state_dict(), "critic": self.critic.state_dict(), "config": self.config}, path)
+        torch.save({"environment_version": ENVIRONMENT_VERSION, "environment_profile": self.config["environment_profile"], "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM, "actors": self.actors.state_dict(), "critic": self.critic.state_dict(), "config": self.config}, path)
 
     def load(self, path: str | Path) -> None:
         data = torch.load(path, map_location=self.device, weights_only=False)
         if (data.get("environment_version"), data.get("observation_dim"), data.get("global_state_dim")) != (ENVIRONMENT_VERSION, OBS_DIM, GLOBAL_STATE_DIM):
             raise RuntimeError("incompatible HAPPO checkpoint environment contract")
+        if data.get("environment_profile") != self.config["environment_profile"]:
+            raise RuntimeError(
+                f"incompatible HAPPO checkpoint environment profile: {data.get('environment_profile')!r} "
+                f"(expected {self.config['environment_profile']!r})"
+            )
         self.actors.load_state_dict(data["actors"]); self.critic.load_state_dict(data["critic"])
 
     def close(self) -> None:

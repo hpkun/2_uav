@@ -14,10 +14,10 @@ This project deliberately combines sources and engineering choices; it is not a 
 
 ## C. Project multi-target extensions
 
-- Each Red agent uses the maximum situation score over currently alive Blue aircraft, with no assigned target.
+- Each Red agent uses the maximum situation score over currently Red-team-visible alive Blue aircraft, with no assigned target; no visible target contributes zero.
 - Team dense reward sums the three Red slots and always divides by three.
 - All cross-team attacker-target pairs maintain independent streaks and resolve kills synchronously.
-- Fixed-slot multi-target observation and centralized state, upgraded in environment contract `heterogeneous_mavuav_3v2_v2` to 55D/67D.
+- Fixed-slot multi-target observation and centralized state, retained as 55D/67D in environment contract `heterogeneous_mavuav_3v2_v2_1`.
 
 ## D. Project engineering parameters
 
@@ -30,8 +30,9 @@ This project deliberately combines sources and engineering choices; it is not a 
 - Instantaneous reliable Red datalink and masking of unseen enemy geometry.
 - One-hot type fields and the explicit 55D actor-observation layout.
 - The 67D centralized state extension containing streaks, Red kill history, actual Blue episode mode and time fraction.
-- Normalization scales: 30 km self x/y, 12 km relative x/y and distance, 10 km relative altitude, and 800 m/s relative velocity.
+- Actor normalization scales: 30 km self x/y, 12 km relative x/y and distance, 10 km relative altitude, and 800 m/s relative velocity. Centralized-state x/y instead map the full battlefield bounds linearly to `[-1,1]`.
 - Seeded `main` and `learnability` randomization profiles with team-level and slot-level offsets.
+- Explicit propagation and recording of the selected `main` or `learnability` profile across training, benchmark, evaluation and checkpoints.
 - The implementation choice of a once-per-step -1 team penalty below 100 m Red friendly distance, without collision physics.
 
 The sensor ranges, datalink assumptions, observation masking, one-hot encoding, normalization scales, randomization profiles and 100 m safety penalty are project engineering extensions. They are not claimed to be parameters reproduced verbatim from the cited papers.

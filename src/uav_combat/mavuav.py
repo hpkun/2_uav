@@ -23,7 +23,7 @@ TYPE_ONE_HOT = {
     "UAV": (0.0, 1.0, 0.0),
     "Blue": (0.0, 0.0, 1.0),
 }
-ENVIRONMENT_VERSION = "heterogeneous_mavuav_3v2_v2"
+ENVIRONMENT_VERSION = "heterogeneous_mavuav_3v2_v2_1"
 OBS_DIM = 55
 GLOBAL_STATE_DIM = 67
 CROSS_TEAM_ATTACK_PAIRS = tuple((red, blue) for red in RED_IDS for blue in BLUE_IDS) + tuple(
@@ -367,12 +367,16 @@ class HeterogeneousMAVUAVAirCombatEnv:
         return False, False, None
 
     def _team_situation_reward(self) -> float:
-        alive_blue = [self.entities[aid] for aid in BLUE_IDS if self.entities[aid].state.alive]
+        visible_alive_blue = [
+            self.entities[aid]
+            for aid in BLUE_IDS
+            if self.entities[aid].state.alive and self.team_visible(aid)
+        ]
         total = 0.0
         for aid in RED_IDS:
             own = self.entities[aid]
-            if own.state.alive and alive_blue:
-                total += max(situation_reward(own.state, target.state) for target in alive_blue)
+            if own.state.alive and visible_alive_blue:
+                total += max(situation_reward(own.state, target.state) for target in visible_alive_blue)
         return float(total / 3.0)
 
     def _episode_summary(self, outcome: str | None) -> dict[str, Any]:
@@ -389,6 +393,12 @@ class HeterogeneousMAVUAVAirCombatEnv:
 
     def _self_xy_norm(self, value: float) -> float:
         return float(np.clip(value / float(self.config["normalization"]["self_xy_scale"]), -1.0, 1.0))
+
+    def _global_xy_norm(self, value: float, axis: str) -> float:
+        if axis not in ("x", "y"):
+            raise ValueError(f"global XY axis must be 'x' or 'y', got {axis!r}")
+        lower, upper = self.config["battlefield"][axis]
+        return float(np.clip(2.0 * (value - lower) / (upper - lower) - 1.0, -1.0, 1.0))
 
     def _altitude_norm(self, value: float) -> float:
         lower, upper = self.config["battlefield"]["altitude"]
@@ -473,7 +483,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
         for aid in ENTITY_IDS:
             state = self.entities[aid].state
             values.extend([
-                self._self_xy_norm(state.x), self._self_xy_norm(state.y), self._altitude_norm(state.h),
+                self._global_xy_norm(state.x, "x"), self._global_xy_norm(state.y, "y"), self._altitude_norm(state.h),
                 float(np.clip(state.v / 400.0, 0.0, 1.0)), state.theta / np.pi, state.psi / np.pi,
                 float(state.alive), *TYPE_ONE_HOT[TYPE_BY_ID[aid]],
             ])

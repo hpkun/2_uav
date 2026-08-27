@@ -1,6 +1,6 @@
 # Environment specification
 
-The active contract is `heterogeneous_mavuav_3v2_v2`.
+The active contract is `heterogeneous_mavuav_3v2_v2_1`.
 
 ## Entities and task
 
@@ -33,7 +33,7 @@ One decision is 1 s. Red and Blue actions remain fixed for ten RK4 substeps of 0
 
 Nominal starts are MAV `(-4500,0,5000)`, UAV1 `(-4000,-800,5000)`, UAV2 `(-4000,800,5000)`, Blue1 `(4000,-600,5000)`, and Blue2 `(4000,600,5000)` metres. Red heads 0 degrees and Blue 180 degrees. Speeds are interval midpoints: 325, 225 and 325 m/s for MAV, UAV and Blue.
 
-Reset randomization is seeded and profile-based. `learnability` uses zero team translation, +/-200 m independent slot x/y jitter, +/-100 m altitude, +/-10 m/s speed and +/-3 degrees heading. Default `main` independently translates the whole Red and Blue formations by +/-1500 m in x/y, then adds +/-300 m slot x/y, +/-400 m altitude, +/-20 m/s speed and +/-10 degrees heading. The common team offset preserves formation structure; `reset(options={"profile": ...})` selects a profile. Randomization can be disabled for nominal tests.
+Reset randomization is seeded and profile-based. `learnability` uses zero team translation, +/-200 m independent slot x/y jitter, +/-100 m altitude, +/-10 m/s speed and +/-3 degrees heading. Default `main` independently translates the whole Red and Blue formations by +/-1500 m in x/y, then adds +/-300 m slot x/y, +/-400 m altitude, +/-20 m/s speed and +/-10 degrees heading. The common team offset preserves formation structure; `reset(options={"profile": ...})` selects a profile. Randomization can be disabled for nominal tests. Formal training, benchmark and evaluation entry points explicitly select `main` or `learnability`; outputs and checkpoints record `environment_profile`, and checkpoint loading rejects a mismatch.
 
 Valid altitude is 1-20 km; x and y are each +/-100 km. A Red UAV leaving the volume becomes inactive. A Blue leaving becomes escaped and is not a Red kill. MAV leaving is mission failure.
 
@@ -49,15 +49,15 @@ Each Red agent has a stable 55D observation. Self 11D is `[x,y,h,v,theta,psi,ali
 
 The critic receives a 67D state. Five entity blocks are `[x,y,h,v,theta,psi,alive,type_MAV,type_UAV,type_Blue]` (50D). They are followed by the normalized streaks for six Red-to-Blue pairs and six Blue-to-Red pairs in entity slot order (12D), Blue1/Blue2 `killed_by_red` flags (2D), actual episode-mode one-hot `[nearest,mav_priority]` (2D), and time fraction (1D). This includes the nonphysical state needed to determine transitions and termination. The active mask remains `[MAV,UAV1,UAV2]`; dead UAV actions are ignored and their actor samples are masked.
 
-Normalization is explicit: self x/y divide by 30,000 and clip to `[-1,1]`; altitude maps battlefield `[1000,20000]` to `[-1,1]`; speed divides by 400; theta/psi divide by pi. Relative x/y divide by 12,000, relative altitude by 10,000, relative velocity by 800, all clipped to `[-1,1]`. Distance divides by 12,000 and clips to `[0,1]`; ATA/AA divide by pi. Thus 1 km and 3 km are about 0.0833 and 0.25.
+Normalization is explicit: Actor self x/y divide by 30,000 and clip to `[-1,1]`. Centralized-state x/y use `2 * (value - lower) / (upper - lower) - 1` with the corresponding battlefield bounds, so `-100 km`, `0`, and `100 km` map to `-1`, `0`, and `1` without earlier saturation. Altitude maps battlefield `[1000,20000]` to `[-1,1]`; speed divides by 400; theta/psi divide by pi. Relative x/y divide by 12,000, relative altitude by 10,000, relative velocity by 800, all clipped to `[-1,1]`. Distance divides by 12,000 and clips to `[0,1]`; ATA/AA divide by pi. Thus 1 km and 3 km are about 0.0833 and 0.25.
 
 ## Attack and reward
 
 Every alive cross-team attacker-target pair is checked once per decision boundary. A kill requires distance 1000-3000 m, attacker target angle below 30 degrees and entering angle below 90 degrees for three consecutive decisions. Streaks are pair-specific and reset when geometry breaks. All kills reached on one boundary are collected before any death is applied.
 
-The situation reward uses the specified segmented bearing, entering-angle, distance, speed and height functions with weights `0.32, 0.43, 0.10, 0.10, 0.05`. Each alive Red takes its best score over alive Blue targets. Team situation is the sum over MAV/UAV1/UAV2 divided by the fixed denominator three.
+The situation reward uses the specified segmented bearing, entering-angle, distance, speed and height functions with weights `0.32, 0.43, 0.10, 0.10, 0.05`. Let `V` be the alive Blue aircraft for which `team_visible` is true. Each alive Red contributes its maximum situation score over `V`, or zero when `V` is empty. Team situation is the sum over the three fixed MAV/UAV1/UAV2 slots divided by three; dead Red slots contribute zero.
 
-Events are +50 per Blue attack kill, -10 per UAV loss, and -100 per MAV loss. Terminal reward is +100 for Red win, -100 for Blue win/Red failure and zero for timeout draw. If any alive Red pair is closer than 100 m at a decision boundary, one team safety reward of -1 is added, at most once per step. It does not cause damage or death. Total team reward is situation + event + terminal + safety, shared by all Red agents.
+Events are +50 per Blue attack kill, -10 per UAV loss, and -100 per MAV loss. Terminal reward is +100 for Red win, -100 for Blue win/Red failure and zero for timeout draw. These event and terminal terms remain global mission outcomes, independent of current Red visibility. If any alive Red pair is closer than 100 m at a decision boundary, one team safety reward of -1 is added, at most once per step. It does not cause damage or death. Total team reward is situation + event + terminal + safety, shared by all Red agents.
 
 ## Blue policy and termination
 

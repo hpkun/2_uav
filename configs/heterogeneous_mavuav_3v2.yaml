@@ -1,4 +1,4 @@
-environment_version: heterogeneous_mavuav_3v2_v2
+environment_version: heterogeneous_mavuav_3v2_v2_1
 simulation:
   decision_dt: 1.0       # s
   physics_dt: 0.1        # s
