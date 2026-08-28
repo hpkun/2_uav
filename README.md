@@ -1,49 +1,107 @@
-# MAV/UAV Heterogeneous 3v2 Air Combat
+# MAV/UAV 3v2 Air-Combat Research Environment
 
-A compact research environment for multi-agent reinforcement-learning experiments:
+本项目包含异构 `1 MAV + 2 UAV vs 2 Blue` 环境、vanilla HAPPO/MAPPO 实现，以及独立的评估和诊断工具。正式研究代码位于 `env/` 与 `algorithm/`，不需要安装当前项目 package。
 
-- Red: one armed, high-performance, high-value MAV and two armed, lower-performance, lower-value UAVs.
-- Blue: two homogeneous aircraft controlled by a fixed rule policy.
-- Red's three aircraft are trainable agents; Blue is never trained.
+## 环境准备
 
-The environment uses overload-controlled 3DOF point-mass dynamics. Each Red actor emits the normalized action `[ux, uy, uz]` in `[-1, 1]^3`; the environment maps it around the current trim overload to physical `[nx, ny, nz]`. One RL decision lasts 1 s and contains ten 0.1 s RK4 physics steps.
-
-Combat is a geometric persistent engagement: 1-3 km distance, attacker target angle below 30 degrees, entering angle below 90 degrees, held at three consecutive decision boundaries. MAV, UAV and Blue use the same rule. Red sensing is distance-only (MAV 12 km, UAV 8 km) with an instantaneous reliable team datalink; Blue continues to use true state. There are no missiles, communication actions, target-assignment actions, recurrent networks or attention modules.
-
-## Install and inspect
+在项目根目录安装运行依赖：
 
 ```bash
-pip install -e .
-python scripts/audit_mavuav_env.py --steps 1000
-pytest
+python -m pip install -r requirements.txt
 ```
 
-```python
-import numpy as np
-from uav_combat import HeterogeneousMAVUAVAirCombatEnv
+无需执行 `pip install -e .`。
 
-env = HeterogeneousMAVUAVAirCombatEnv()
-observations, info = env.reset(seed=1)
-observations, rewards, terminated, truncated, info = env.step(np.zeros((3, 3)))
-state = env.global_state()
-```
+## HAPPO 训练
 
-The active environment contract is `heterogeneous_mavuav_3v2_v2_1`. Each Red observation is 55D, the centralized state is 67D, and the Red active mask is ordered `[MAV, UAV1, UAV2]`. Type is one-hot. Enemy geometry is visible through direct sensing or the reliable datalink and otherwise masked to zero. Actor self x/y retain the 30 km tactical scale, while centralized-state x/y map the full +/-100 km battlefield bounds to `[-1,1]`.
-
-Reset uses the broader seeded `main` randomization profile by default. The old-difficulty `learnability` profile is available with `env.reset(seed=1, options={"profile": "learnability"})`. A single team penalty of -1 is applied at a decision boundary if any alive Red pair is closer than 100 m; it causes no collision or death.
-
-Formal training, benchmark and evaluation runs select either `main` or `learnability` explicitly and record `environment_profile` in benchmark, summary and checkpoint outputs. Situation shaping uses only alive Blue aircraft currently visible to the Red team; event and terminal rewards remain based on global mission outcomes.
-
-## Baselines
-
-- HAPPO: three independent feed-forward actors, sequential policy updates, one centralized critic.
-- MAPPO: one shared feed-forward actor conditioned by the observation type field, one centralized critic.
+短运行：
 
 ```bash
-python scripts/train_happo_mavuav.py --updates 10
-python scripts/train_mappo_mavuav.py --updates 10
-python scripts/evaluate_happo_mavuav.py outputs/happo_mavuav.pt
-python scripts/evaluate_mappo_mavuav.py outputs/mappo_mavuav.pt
+python algorithm/train_happo.py \
+    --steps 4096 \
+    --profile learnability \
+    --device cpu \
+    --num-envs 2
 ```
 
-Formal evaluation reports `nearest` and `mav_priority` Blue target modes separately. This project combines published ingredients with explicit engineering adaptations; it does not claim to reproduce any single paper's environment exactly. See [environment specification](docs/environment_spec.md) and [source provenance](docs/source_provenance.md).
+正式运行：
+
+```bash
+python algorithm/train_happo.py \
+    --steps 5000000 \
+    --profile main \
+    --seed 1 \
+    --device cuda \
+    --num-envs 16
+```
+
+默认每 1,000,000 sampled environment steps 保存 checkpoint，中间 evaluation 默认关闭。训练完成后才分别对 `nearest` 和 `mav_priority` 做 100 episodes deterministic evaluation，因此 checkpoint 保存频率不会触发额外评估。
+
+如需中间评估，显式传入例如：
+
+```bash
+python algorithm/train_happo.py --eval-interval 1000000
+```
+
+断点续训使用原 run folder，不创建新目录：
+
+```bash
+python algorithm/train_happo.py \
+    --steps 10000000 \
+    --profile main \
+    --seed 1 \
+    --device cuda \
+    --num-envs 16 \
+    --resume outputs/<run>/checkpoint_5000000.pt
+```
+
+长训练可由用户自行用 `nohup`、systemd、tmux 等系统方式放到后台；训练代码本身不绑定后台管理框架。
+
+## 独立评估
+
+```bash
+python algorithm/evaluate_happo.py \
+    outputs/<run>/checkpoint_final.pt \
+    --profile main \
+    --episodes 100 \
+    --blue-mode both
+```
+
+评估允许训练 profile 与 evaluation profile 不同，用于跨 profile 泛化检查；环境版本、55D observation 和 67D global state contract 仍会严格校验。
+
+## 输出结构
+
+`outputs/` 下每次训练只对应一个自包含 run folder：
+
+```text
+outputs/happo_main_seed1_5m_<timestamp>/
+├── run.log
+├── resolved_config.yaml
+├── training.csv
+├── evaluations.csv
+├── summary.json
+├── checkpoint_1000000.pt
+├── ...
+└── checkpoint_final.pt
+```
+
+不会再创建 `happo_seed1/` 或 `checkpoints/` 子目录。整个 run folder 可以直接复制到其他机器保存或分析。
+
+## 工具
+
+```bash
+python tools/audit_env.py --steps 1000 --num-envs 16
+python tools/benchmark_env.py --sample-steps 2000 --num-envs 16
+python tools/plot_trajectory.py outputs/<run>/checkpoint_final.pt \
+    --profile main --blue-mode nearest --seed 1000
+```
+
+轨迹图片默认直接写入 checkpoint 所在 run folder。诊断辅助函数集中在 `tools/diagnostics.py`，核心环境和 HAPPO trainer 不依赖 `tools/`。
+
+## 测试
+
+```bash
+python -m pytest -q
+```
+
+pytest 从项目根目录直接导入 `env.*` 和 `algorithm.*`，同样不要求安装当前项目 package。

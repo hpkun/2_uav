@@ -3,8 +3,8 @@ import os
 import numpy as np
 import pytest
 
-from uav_combat import MAVUAVVectorEnv
-from uav_combat.mavuav import load_environment_config
+from env import MAVUAVVectorEnv
+from env.mavuav import load_environment_config
 
 
 def short_config(max_steps=1):

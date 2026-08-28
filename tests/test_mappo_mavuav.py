@@ -1,9 +1,9 @@
 import numpy as np
 import pytest
 import torch
-from uav_combat.mappo import MAPPOTrainer
+from algorithm.mappo import MAPPOTrainer
 from copy import deepcopy
-from uav_combat.mavuav import load_environment_config
+from env.mavuav import load_environment_config
 
 
 @pytest.mark.parametrize("profile", ["learnability", "main"])

@@ -1,11 +1,11 @@
 from copy import deepcopy
 import numpy as np
 
-from uav_combat.blue_policy import BLUE_ACTION_CANDIDATES, BluePolicy
-from uav_combat.dynamics import integrate_interval, map_normalized_action
-from uav_combat.mavuav import BLUE_IDS, ENVIRONMENT_VERSION, HeterogeneousMAVUAVAirCombatEnv, load_environment_config
-from uav_combat.models import AircraftState
-from uav_combat.reward import (
+from env.blue_policy import BLUE_ACTION_CANDIDATES, BluePolicy
+from env.dynamics import integrate_interval, map_normalized_action
+from env.mavuav import BLUE_IDS, ENVIRONMENT_VERSION, HeterogeneousMAVUAVAirCombatEnv, load_environment_config
+from env.models import AircraftState
+from env.reward import (
     SITUATION_WEIGHTS, bearing_reward, distance_reward, entering_angle_reward,
     height_reward, situation_reward, speed_reward,
 )

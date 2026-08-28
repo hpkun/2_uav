@@ -1,9 +1,9 @@
 import numpy as np
 import pytest
 import torch
-from uav_combat.happo import HAPPOTrainer
+from algorithm.happo import HAPPOTrainer
 from copy import deepcopy
-from uav_combat.mavuav import load_environment_config
+from env.mavuav import load_environment_config
 
 
 @pytest.mark.parametrize("profile", ["learnability", "main"])
@@ -41,3 +41,46 @@ def test_happo_rollout_gae_sequential_updates_are_finite_and_change_parameters()
     assert any(not torch.equal(a, b) for a, b in zip(critic_before, trainer.critic.parameters()))
     assert np.all(np.isfinite(trainer.buffer.returns))
     trainer.collect_rollout(); trainer.update(); trainer.close()
+
+
+def test_happo_full_checkpoint_restores_optimizer_rng_and_vector_state(tmp_path):
+    env_config = deepcopy(load_environment_config(None))
+    env_config["simulation"]["max_decision_steps"] = 3
+    config = {
+        "num_envs": 1, "rollout_steps": 2, "ppo_epochs": 1, "minibatch_size": 2,
+        "hidden_dim": 16, "seed": 31, "environment_profile": "learnability",
+    }
+    source = HAPPOTrainer(env_config, config)
+    source.train_update()
+    checkpoint = tmp_path / "checkpoint_2.pt"
+    source.save_checkpoint(checkpoint)
+    expected_observations = source.observations.copy()
+    expected_states = source.global_states.copy()
+    expected_masks = source.active_masks.copy()
+    expected_reset_counts = source.vector_env.reset_counts.copy()
+    expected_actor_optimizer = source.actor_optimizers[0].state_dict()
+
+    restored = HAPPOTrainer(env_config, {**config, "seed": 999})
+    assert restored.load_checkpoint(checkpoint) == source.env_steps == 2
+    assert np.array_equal(restored.observations, expected_observations)
+    assert np.array_equal(restored.global_states, expected_states)
+    assert np.array_equal(restored.active_masks, expected_masks)
+    assert np.array_equal(restored.vector_env.reset_counts, expected_reset_counts)
+    assert restored.actor_optimizers[0].state_dict()["state"].keys() == expected_actor_optimizer["state"].keys()
+    assert restored.vector_env.get_env_states() == source.vector_env.get_env_states()
+    source.close(); restored.close()
+
+
+def test_happo_full_checkpoint_rejects_environment_configuration_change(tmp_path):
+    env_config = deepcopy(load_environment_config(None))
+    config = {"num_envs": 1, "rollout_steps": 1, "hidden_dim": 8, "environment_profile": "main"}
+    source = HAPPOTrainer(env_config, config)
+    checkpoint = tmp_path / "checkpoint.pt"
+    source.save_checkpoint(checkpoint)
+    source.close()
+    changed = deepcopy(env_config)
+    changed["simulation"]["max_decision_steps"] -= 1
+    target = HAPPOTrainer(changed, config)
+    with pytest.raises(RuntimeError, match="environment configuration"):
+        target.load_checkpoint(checkpoint)
+    target.close()

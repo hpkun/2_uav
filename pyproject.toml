@@ -8,14 +8,15 @@ version = "0.2.0"
 description = "MAV/UAV heterogeneous 3v2 multi-agent air-combat reinforcement-learning environment"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.24", "PyYAML>=6.0", "torch>=2.0"]
+dependencies = ["numpy>=1.24", "PyYAML>=6.0", "torch>=2.0", "matplotlib>=3.7"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["."]
+include = ["algorithm*", "env*", "tools*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["."]
