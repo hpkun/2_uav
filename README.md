@@ -32,10 +32,21 @@ python algorithm/train_happo.py \
     --profile main \
     --seed 1 \
     --device cuda \
-    --num-envs 16
+    --num-envs 16 \
+    --checkpoint-interval 1000000 \
+    --eval-interval 0 \
+    --log-interval 100000
 ```
 
-默认每 1,000,000 sampled environment steps 保存 checkpoint，中间 evaluation 默认关闭。训练完成后才分别对 `nearest` 和 `mav_priority` 做 100 episodes deterministic evaluation，因此 checkpoint 保存频率不会触发额外评估。
+默认每 1,000,000 sampled environment steps 跨过 checkpoint milestone 后保存 checkpoint，中间 evaluation 默认关闭。checkpoint 和 evaluation milestone 都只在完整 rollout/update 完成后检查，不会截断正常 rollout；只有为了精确到达最终 `--steps` 才允许最后一次 partial rollout。
+
+`--log-interval` 默认每约 100,000 sampled steps 输出一次训练进度。它只汇总训练期间已经完成的 episodes 和最近 HAPPO updates，不运行 evaluation，也不会改变 rollout horizon。stdout 与 `run.log` 内容一致，可实时查看：
+
+```bash
+tail -f outputs/<run>/run.log
+```
+
+训练完成后才分别对 `nearest` 和 `mav_priority` 做 final deterministic evaluation。checkpoint 保存频率和日志频率均不会触发额外评估。
 
 如需中间评估，显式传入例如：
 

@@ -23,6 +23,12 @@ DEFAULTS = {
     "hidden_dim": 128,
 }
 
+RESUME_CONFIG_FIELDS = (
+    "environment_profile", "seed", "num_envs", "rollout_steps", "gamma", "gae_lambda",
+    "ppo_epochs", "minibatch_size", "clip_coef", "actor_learning_rate",
+    "critic_learning_rate", "entropy_coef", "value_loss_coef", "max_grad_norm", "hidden_dim",
+)
+
 
 def preceding_factor_update(factor: torch.Tensor, old_log_prob: torch.Tensor, new_log_prob: torch.Tensor, active: torch.Tensor) -> torch.Tensor:
     ratio = torch.exp(new_log_prob - old_log_prob)
@@ -169,16 +175,16 @@ class HAPPOTrainer:
         actual = (data.get("environment_version"), data.get("observation_dim"), data.get("global_state_dim"))
         if actual != expected:
             raise RuntimeError("incompatible HAPPO checkpoint environment contract")
-        if data.get("environment_profile") != self.config["environment_profile"]:
-            raise RuntimeError(
-                f"incompatible HAPPO checkpoint environment profile: {data.get('environment_profile')!r} "
-                f"(expected {self.config['environment_profile']!r})"
-            )
-        if data.get("environment_config") != self.environment_config:
-            raise RuntimeError("resume requires the same resolved environment configuration as the checkpoint")
         saved_config = data.get("trainer_config", data.get("config", {}))
-        if int(saved_config.get("num_envs", self.config["num_envs"])) != int(self.config["num_envs"]):
-            raise RuntimeError("resume requires the same num_envs as the checkpoint")
+        for field in RESUME_CONFIG_FIELDS:
+            checkpoint_value = saved_config.get(field)
+            current_value = self.config.get(field)
+            if checkpoint_value != current_value:
+                raise RuntimeError(
+                    f"resume config mismatch: {field} checkpoint={checkpoint_value!r} current={current_value!r}"
+                )
+        if data.get("environment_config") != self.environment_config:
+            raise RuntimeError("resume environment config mismatch: resolved content differs from checkpoint")
         self.actors.load_state_dict(data["actors"])
         self.critic.load_state_dict(data["critic"])
         if "actor_optimizer_states" not in data or "rollout_state" not in data:

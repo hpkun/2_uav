@@ -12,6 +12,7 @@ import argparse
 import csv
 from datetime import datetime
 import json
+import time
 from typing import Any, Mapping
 
 import numpy as np
@@ -33,6 +34,52 @@ TRAINING_FIELDS = (
     "mean_blue_attack_kills", "mean_episode_length", "actor_0_loss", "actor_1_loss",
     "actor_2_loss", "critic_loss", "entropy",
 )
+LOSS_FIELDS = ("actor_0_loss", "actor_1_loss", "actor_2_loss", "critic_loss", "entropy")
+
+
+class MilestoneObserver:
+    """Observe thresholds without influencing rollout boundaries."""
+
+    def __init__(self, interval: int, current_step: int = 0) -> None:
+        self.interval = int(interval)
+        self.next_milestone = (
+            ((int(current_step) // self.interval) + 1) * self.interval if self.interval > 0 else None
+        )
+
+    def consume(self, sampled_steps: int) -> list[int]:
+        crossed: list[int] = []
+        while self.next_milestone is not None and self.next_milestone <= int(sampled_steps):
+            crossed.append(self.next_milestone)
+            self.next_milestone += self.interval
+        return crossed
+
+
+class ProgressWindow:
+    """Accumulate training-only metrics between human-readable log records."""
+
+    def __init__(self) -> None:
+        self.episodes: list[Mapping[str, Any]] = []
+        self.updates: list[Mapping[str, Any]] = []
+        self.sampled_steps = 0
+        self.training_seconds = 0.0
+
+    def add(
+        self,
+        episodes: list[Mapping[str, Any]],
+        update: Mapping[str, Any],
+        sampled_steps: int,
+        training_seconds: float,
+    ) -> None:
+        self.episodes.extend(episodes)
+        self.updates.append(update)
+        self.sampled_steps += int(sampled_steps)
+        self.training_seconds += float(training_seconds)
+
+    def clear(self) -> None:
+        self.episodes.clear()
+        self.updates.clear()
+        self.sampled_steps = 0
+        self.training_seconds = 0.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,10 +94,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-name")
     parser.add_argument("--checkpoint-interval", type=int, default=1_000_000)
     parser.add_argument("--eval-interval", type=int, default=0)
+    parser.add_argument("--log-interval", type=int, default=100_000)
     parser.add_argument("--eval-episodes", type=int, default=50)
     parser.add_argument("--final-eval-episodes", type=int, default=100)
     parser.add_argument("--resume", type=Path)
     return parser.parse_args()
+
+
+def planned_rollout_horizon(
+    current_steps: int,
+    target_steps: int,
+    configured_horizon: int,
+    num_envs: int,
+) -> int:
+    """Use a full rollout except for the one update that reaches total steps."""
+    remaining = int(target_steps) - int(current_steps)
+    if remaining <= 0:
+        raise ValueError("target steps must exceed current steps")
+    if remaining % int(num_envs):
+        raise ValueError("remaining sampled steps must be divisible by num_envs")
+    return min(int(configured_horizon), remaining // int(num_envs))
 
 
 def _device(requested: str) -> tuple[str, str | None]:
@@ -118,7 +181,14 @@ def _episode_metrics(records: list[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _evaluation_row(trainer: HAPPOTrainer, episodes: int, mode: str, profile: str, seed: int, device: str) -> dict[str, Any]:
+def _evaluation_row(
+    trainer: HAPPOTrainer,
+    episodes: int,
+    mode: str,
+    profile: str,
+    seed: int,
+    device: str,
+) -> dict[str, Any]:
     records = evaluate_actors(
         trainer.actors, trainer.environment_config, episodes, mode, profile, seed=1000, device=device,
     )
@@ -129,28 +199,6 @@ def _evaluation_row(trainer: HAPPOTrainer, episodes: int, mode: str, profile: st
     }
 
 
-def _train_to(trainer: HAPPOTrainer, target: int, training_path: Path, completed_episodes: int) -> int:
-    configured_horizon = int(trainer.config["rollout_steps"])
-    num_envs = int(trainer.config["num_envs"])
-    while trainer.env_steps < target:
-        vector_steps = min(configured_horizon, (target - trainer.env_steps) // num_envs)
-        trainer.buffer = RolloutBuffer(vector_steps, num_envs)
-        episodes = trainer.collect_rollout()
-        metrics = trainer.update()
-        completed_episodes += len(episodes)
-        row = {
-            "sampled_steps": trainer.env_steps,
-            "completed_episodes": completed_episodes,
-            **_episode_metrics(episodes),
-            "actor_0_loss": metrics["actor_0_loss"], "actor_1_loss": metrics["actor_1_loss"],
-            "actor_2_loss": metrics["actor_2_loss"], "critic_loss": metrics["critic_loss"],
-            "entropy": metrics["entropy"],
-        }
-        _append_csv(training_path, row, TRAINING_FIELDS)
-    trainer.buffer = RolloutBuffer(configured_horizon, num_envs)
-    return completed_episodes
-
-
 def _last_completed_episodes(path: Path) -> int:
     if not path.exists() or path.stat().st_size == 0:
         return 0
@@ -159,13 +207,131 @@ def _last_completed_episodes(path: Path) -> int:
     return int(float(rows[-1]["completed_episodes"])) if rows else 0
 
 
+def _duration(seconds: float | None) -> str:
+    if seconds is None or not np.isfinite(seconds):
+        return "n/a"
+    total = max(0, int(round(seconds)))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _interval_text(value: int) -> str:
+    return "disabled" if int(value) == 0 else f"{int(value):,}"
+
+
+def _progress_lines(
+    current_steps: int,
+    target_steps: int,
+    completed_episodes: int,
+    training_elapsed: float,
+    window: ProgressWindow,
+) -> str:
+    speed = window.sampled_steps / window.training_seconds if window.training_seconds > 0 else 0.0
+    eta = (target_steps - current_steps) / speed if speed > 0 else None
+    losses = {
+        field: float(np.mean([update[field] for update in window.updates]))
+        for field in LOSS_FIELDS
+    }
+    lines = [
+        f"[TRAIN] {current_steps:,} / {target_steps:,} ({100.0 * current_steps / target_steps:.1f}%)",
+        f"        elapsed {_duration(training_elapsed)} | speed {speed:.1f} steps/s | ETA {_duration(eta)}",
+        f"        episodes +{len(window.episodes)} / total {completed_episodes}",
+    ]
+    if window.episodes:
+        recent = _episode_metrics(window.episodes)
+        lines.extend([
+            f"        return {recent['mean_episode_return']:.2f} | "
+            f"W/B/D {recent['red_win_rate']:.1%} / {recent['blue_win_rate']:.1%} / {recent['draw_rate']:.1%}",
+            f"        MAV survival {recent['MAV_survival_rate']:.1%} | "
+            f"UAV survivors {recent['mean_UAV_survivors']:.2f}",
+            f"        Red kills {recent['mean_red_attack_kills']:.2f} | "
+            f"Blue kills {recent['mean_blue_attack_kills']:.2f} | "
+            f"ep length {recent['mean_episode_length']:.1f}",
+        ])
+    else:
+        lines.extend([
+            "        return n/a | W/B/D n/a",
+            "        MAV survival n/a | UAV survivors n/a",
+            "        Red kills n/a | Blue kills n/a | ep length n/a",
+        ])
+    lines.extend([
+        f"        actor loss [{losses['actor_0_loss']:.3f}, {losses['actor_1_loss']:.3f}, "
+        f"{losses['actor_2_loss']:.3f}]",
+        f"        critic loss {losses['critic_loss']:.3f} | entropy {losses['entropy']:.3f}",
+    ])
+    return "\n".join(lines)
+
+
+def _evaluation_lines(prefix: str, row: Mapping[str, Any]) -> str:
+    return "\n".join([
+        f"[{prefix}] step {int(row['sampled_steps']):,} | {row['blue_mode']}",
+        f"       win {row['red_win_rate']:.1%} | blue {row['blue_win_rate']:.1%} | "
+        f"draw {row['draw_rate']:.1%}",
+        f"       return {row['mean_episode_return']:.2f} | "
+        f"Red kills {row['mean_red_attack_kills']:.2f} | "
+        f"MAV survival {row['MAV_survival_rate']:.1%}",
+    ])
+
+
+def _initial_resolved(
+    args: argparse.Namespace,
+    env_config: Mapping[str, Any],
+    trainer: HAPPOTrainer,
+    device: str,
+    fallback: str | None,
+) -> dict[str, Any]:
+    return {
+        "environment": dict(env_config), "happo": dict(trainer.config), "profile": args.profile,
+        "seed": args.seed, "requested_device": args.device, "resolved_device": device,
+        "device_fallback_reason": fallback, "num_envs": args.num_envs, "total_steps": args.steps,
+        "checkpoint_interval": args.checkpoint_interval, "evaluation_interval": args.eval_interval,
+        "log_interval": args.log_interval, "evaluation_episodes": args.eval_episodes,
+        "final_evaluation_episodes": args.final_eval_episodes, "resume_history": [],
+    }
+
+
+def _write_resolved_config(
+    path: Path,
+    args: argparse.Namespace,
+    env_config: Mapping[str, Any],
+    trainer: HAPPOTrainer,
+    device: str,
+    fallback: str | None,
+    resumed_steps: int | None,
+) -> None:
+    if resumed_steps is None:
+        resolved = _initial_resolved(args, env_config, trainer, device, fallback)
+    else:
+        if path.exists():
+            with path.open(encoding="utf-8") as stream:
+                resolved = yaml.safe_load(stream) or {}
+        else:
+            resolved = _initial_resolved(args, env_config, trainer, device, fallback)
+        history = resolved.setdefault("resume_history", [])
+        history.append({
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "checkpoint": args.resume.expanduser().resolve().name,
+            "resumed_from_steps": int(resumed_steps),
+            "target_steps": int(args.steps),
+            "requested_device": args.device,
+            "resolved_device": device,
+            "checkpoint_interval": int(args.checkpoint_interval),
+            "evaluation_interval": int(args.eval_interval),
+            "log_interval": int(args.log_interval),
+        })
+    with path.open("w", encoding="utf-8") as stream:
+        yaml.safe_dump(resolved, stream, sort_keys=False, allow_unicode=True)
+
+
 def main() -> None:
     args = parse_args()
-    if args.steps <= 0 or args.num_envs <= 0 or args.checkpoint_interval < 0 or args.eval_interval < 0:
-        raise ValueError("steps and num-envs must be positive; intervals cannot be negative")
-    for name, value in (("steps", args.steps), ("checkpoint-interval", args.checkpoint_interval), ("eval-interval", args.eval_interval)):
-        if value and value % args.num_envs:
-            raise ValueError(f"{name} must be divisible by num-envs")
+    if args.steps <= 0 or args.num_envs <= 0:
+        raise ValueError("steps and num-envs must be positive")
+    if args.steps % args.num_envs:
+        raise ValueError("steps must be divisible by num-envs")
+    if min(args.checkpoint_interval, args.eval_interval, args.log_interval) < 0:
+        raise ValueError("checkpoint, evaluation and log intervals cannot be negative")
     if args.eval_episodes <= 0 or args.final_eval_episodes <= 0:
         raise ValueError("evaluation episode counts must be positive")
 
@@ -187,63 +353,131 @@ def main() -> None:
     })
     trainer = HAPPOTrainer(env_config, config)
     try:
-        resumed_from = None
+        resumed_steps: int | None = None
         if args.resume:
-            resumed_from = str(args.resume.expanduser().resolve())
-            trainer.load_checkpoint(args.resume.expanduser().resolve())
+            resumed_steps = trainer.load_checkpoint(args.resume.expanduser().resolve())
         if trainer.env_steps >= args.steps:
             raise ValueError(f"target steps {args.steps} must exceed current checkpoint steps {trainer.env_steps}")
-        resolved = {
-            "environment": env_config, "happo": trainer.config, "profile": args.profile, "seed": args.seed,
-            "requested_device": args.device, "resolved_device": device, "device_fallback_reason": fallback,
-            "num_envs": args.num_envs, "total_steps": args.steps,
-            "checkpoint_interval": args.checkpoint_interval, "evaluation_interval": args.eval_interval,
-            "evaluation_episodes": args.eval_episodes, "final_evaluation_episodes": args.final_eval_episodes,
-            "resume_from": resumed_from,
-        }
-        with (run_dir / "resolved_config.yaml").open("w", encoding="utf-8") as stream:
-            yaml.safe_dump(resolved, stream, sort_keys=False, allow_unicode=True)
-        log(f"Run folder: {run_dir}")
-        log(f"Training HAPPO from {trainer.env_steps} to {args.steps} sampled environment steps on {device}")
-        if fallback:
-            log(f"Device fallback: {fallback}")
+        _write_resolved_config(
+            run_dir / "resolved_config.yaml", args, env_config, trainer, device, fallback, resumed_steps,
+        )
 
-        boundaries = {args.steps}
-        if args.checkpoint_interval:
-            boundaries.update(range(((trainer.env_steps // args.checkpoint_interval) + 1) * args.checkpoint_interval, args.steps + 1, args.checkpoint_interval))
-        if args.eval_interval:
-            boundaries.update(range(((trainer.env_steps // args.eval_interval) + 1) * args.eval_interval, args.steps + 1, args.eval_interval))
+        separator = "=" * 60
+        start_lines = [
+            separator, "HAPPO TRAINING", f"Run: {run_dir.name}", f"Profile: {args.profile}",
+            f"Seed: {args.seed}", f"Device: {device}", f"Envs: {args.num_envs}",
+            f"Rollout: {trainer.config['rollout_steps']}", f"Target steps: {args.steps:,}",
+            f"Checkpoint interval: {_interval_text(args.checkpoint_interval)}",
+            f"Evaluation interval: {_interval_text(args.eval_interval)}",
+            f"Log interval: {_interval_text(args.log_interval)}",
+        ]
+        if resumed_steps is not None:
+            start_lines.extend([
+                f"Resume checkpoint: {args.resume.expanduser().resolve().name}",
+                f"Resume steps: {resumed_steps:,}", f"Target steps: {args.steps:,}",
+            ])
+        if fallback:
+            start_lines.append(f"Device fallback: {fallback}")
+        start_lines.append(separator)
+        log("\n".join(start_lines))
+
+        checkpoint_observer = MilestoneObserver(args.checkpoint_interval, trainer.env_steps)
+        evaluation_observer = MilestoneObserver(args.eval_interval, trainer.env_steps)
+        log_observer = MilestoneObserver(args.log_interval, trainer.env_steps)
         completed = _last_completed_episodes(run_dir / "training.csv")
         evaluation_fields: tuple[str, ...] | None = None
-        for target in sorted(boundary for boundary in boundaries if boundary > trainer.env_steps):
-            completed = _train_to(trainer, target, run_dir / "training.csv", completed)
-            if args.checkpoint_interval and target % args.checkpoint_interval == 0:
-                checkpoint = run_dir / f"checkpoint_{target}.pt"
-                trainer.save_checkpoint(checkpoint)
-                log(f"Saved checkpoint: {checkpoint.name}")
-            if args.eval_interval and target % args.eval_interval == 0 and target != args.steps:
-                for mode in ("nearest", "mav_priority"):
-                    row = _evaluation_row(trainer, args.eval_episodes, mode, args.profile, args.seed, device)
-                    evaluation_fields = evaluation_fields or tuple(row.keys())
-                    _append_csv(run_dir / "evaluations.csv", row, evaluation_fields)
-                log(f"Completed intermediate evaluation at {target} steps")
+        configured_horizon = int(trainer.config["rollout_steps"])
+        num_envs = int(trainer.config["num_envs"])
+        window = ProgressWindow()
+        training_elapsed = 0.0
 
+        while trainer.env_steps < args.steps:
+            horizon = planned_rollout_horizon(
+                trainer.env_steps, args.steps, configured_horizon, num_envs,
+            )
+            trainer.buffer = RolloutBuffer(horizon, num_envs)
+            before_steps = trainer.env_steps
+            update_started = time.perf_counter()
+            episodes = trainer.collect_rollout()
+            metrics = trainer.update()
+            update_elapsed = time.perf_counter() - update_started
+            sampled_this_update = trainer.env_steps - before_steps
+            training_elapsed += update_elapsed
+            completed += len(episodes)
+            window.add(episodes, metrics, sampled_this_update, update_elapsed)
+            row = {
+                "sampled_steps": trainer.env_steps, "completed_episodes": completed,
+                **_episode_metrics(episodes),
+                "actor_0_loss": metrics["actor_0_loss"], "actor_1_loss": metrics["actor_1_loss"],
+                "actor_2_loss": metrics["actor_2_loss"], "critic_loss": metrics["critic_loss"],
+                "entropy": metrics["entropy"],
+            }
+            _append_csv(run_dir / "training.csv", row, TRAINING_FIELDS)
+
+            crossed_logs = log_observer.consume(trainer.env_steps)
+            if crossed_logs:
+                log(_progress_lines(trainer.env_steps, args.steps, completed, training_elapsed, window))
+                window.clear()
+
+            crossed_checkpoints = checkpoint_observer.consume(trainer.env_steps)
+            if crossed_checkpoints:
+                checkpoint = run_dir / f"checkpoint_{trainer.env_steps}.pt"
+                trainer.save_checkpoint(checkpoint)
+                milestone_text = (
+                    f"{crossed_checkpoints[0]:,}" if len(crossed_checkpoints) == 1
+                    else f"{crossed_checkpoints[0]:,}..{crossed_checkpoints[-1]:,}"
+                )
+                log(
+                    f"[CKPT] milestone {milestone_text} crossed at step {trainer.env_steps:,} | "
+                    f"{checkpoint.name}"
+                )
+
+            crossed_evaluations = evaluation_observer.consume(trainer.env_steps)
+            if crossed_evaluations and trainer.env_steps < args.steps:
+                for mode in ("nearest", "mav_priority"):
+                    eval_row = _evaluation_row(
+                        trainer, args.eval_episodes, mode, args.profile, args.seed, device,
+                    )
+                    evaluation_fields = evaluation_fields or tuple(eval_row.keys())
+                    _append_csv(run_dir / "evaluations.csv", eval_row, evaluation_fields)
+                    log(_evaluation_lines("EVAL", eval_row))
+
+        trainer.buffer = RolloutBuffer(configured_horizon, num_envs)
+        if args.log_interval and window.updates:
+            log(_progress_lines(trainer.env_steps, args.steps, completed, training_elapsed, window))
+            window.clear()
+        log(f"[TRAIN] optimization finished at {trainer.env_steps:,} steps")
         trainer.save_checkpoint(run_dir / "checkpoint_final.pt")
+
+        final_evaluation_started = time.perf_counter()
         final_rows = []
         for mode in ("nearest", "mav_priority"):
-            row = _evaluation_row(trainer, args.final_eval_episodes, mode, args.profile, args.seed, device)
-            evaluation_fields = evaluation_fields or tuple(row.keys())
-            _append_csv(run_dir / "evaluations.csv", row, evaluation_fields)
-            final_rows.append(row)
+            eval_row = _evaluation_row(
+                trainer, args.final_eval_episodes, mode, args.profile, args.seed, device,
+            )
+            evaluation_fields = evaluation_fields or tuple(eval_row.keys())
+            _append_csv(run_dir / "evaluations.csv", eval_row, evaluation_fields)
+            final_rows.append(eval_row)
+            log(_evaluation_lines("FINAL EVAL", eval_row))
+        final_evaluation_elapsed = time.perf_counter() - final_evaluation_started
+
         summary = {
             "algorithm": "happo", "status": "complete", "sampled_steps": trainer.env_steps,
-            "training_profile": args.profile, "seed": args.seed, "device": device, "num_envs": args.num_envs,
-            "completed_episodes": completed, "final_evaluations": final_rows,
-            "checkpoint_final": "checkpoint_final.pt",
+            "training_profile": args.profile, "seed": args.seed, "device": device,
+            "num_envs": args.num_envs, "completed_episodes": completed,
+            "training_elapsed_seconds": training_elapsed,
+            "final_evaluation_elapsed_seconds": final_evaluation_elapsed,
+            "final_evaluations": final_rows, "checkpoint_final": "checkpoint_final.pt",
         }
         with (run_dir / "summary.json").open("w", encoding="utf-8") as stream:
             json.dump(summary, stream, indent=2, ensure_ascii=False)
-        log(f"Training complete at {trainer.env_steps} sampled environment steps")
+        log("\n".join([
+            separator, "TRAINING COMPLETE", f"Steps: {trainer.env_steps:,}",
+            f"Elapsed training time: {_duration(training_elapsed)}",
+            f"Final evaluation time: {_duration(final_evaluation_elapsed)}",
+            f"Completed episodes: {completed}", "Final checkpoint: checkpoint_final.pt",
+            f"Run folder: {run_dir}", separator,
+        ]))
     finally:
         trainer.close()
 

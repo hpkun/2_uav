@@ -60,7 +60,7 @@ def test_happo_full_checkpoint_restores_optimizer_rng_and_vector_state(tmp_path)
     expected_reset_counts = source.vector_env.reset_counts.copy()
     expected_actor_optimizer = source.actor_optimizers[0].state_dict()
 
-    restored = HAPPOTrainer(env_config, {**config, "seed": 999})
+    restored = HAPPOTrainer(env_config, config)
     assert restored.load_checkpoint(checkpoint) == source.env_steps == 2
     assert np.array_equal(restored.observations, expected_observations)
     assert np.array_equal(restored.global_states, expected_states)
@@ -69,6 +69,42 @@ def test_happo_full_checkpoint_restores_optimizer_rng_and_vector_state(tmp_path)
     assert restored.actor_optimizers[0].state_dict()["state"].keys() == expected_actor_optimizer["state"].keys()
     assert restored.vector_env.get_env_states() == source.vector_env.get_env_states()
     source.close(); restored.close()
+
+
+@pytest.mark.parametrize(
+    ("field", "changed_value"),
+    [("seed", 2), ("clip_coef", 0.1), ("rollout_steps", 3), ("num_envs", 2), ("environment_profile", "main")],
+)
+def test_happo_resume_rejects_training_config_mismatch(tmp_path, field, changed_value):
+    env_config = deepcopy(load_environment_config(None))
+    base = {
+        "num_envs": 1, "rollout_steps": 2, "ppo_epochs": 1, "minibatch_size": 2,
+        "hidden_dim": 16, "seed": 1, "environment_profile": "learnability",
+    }
+    source = HAPPOTrainer(env_config, base)
+    checkpoint = tmp_path / f"{field}.pt"
+    source.save_checkpoint(checkpoint)
+    source.close()
+    current = {**base, field: changed_value}
+    target = HAPPOTrainer(env_config, current)
+    with pytest.raises(RuntimeError, match=rf"resume config mismatch: {field}"):
+        target.load_checkpoint(checkpoint)
+    target.close()
+
+
+def test_happo_resume_allows_device_metadata_to_differ(tmp_path):
+    env_config = deepcopy(load_environment_config(None))
+    config = {"num_envs": 1, "rollout_steps": 1, "hidden_dim": 8, "seed": 1}
+    source = HAPPOTrainer(env_config, config)
+    checkpoint = tmp_path / "device.pt"
+    source.save_checkpoint(checkpoint)
+    source.close()
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    payload["trainer_config"]["device"] = "cuda:0"
+    torch.save(payload, checkpoint)
+    target = HAPPOTrainer(env_config, config)
+    assert target.load_checkpoint(checkpoint) == 0
+    target.close()
 
 
 def test_happo_full_checkpoint_rejects_environment_configuration_change(tmp_path):
@@ -81,6 +117,6 @@ def test_happo_full_checkpoint_rejects_environment_configuration_change(tmp_path
     changed = deepcopy(env_config)
     changed["simulation"]["max_decision_steps"] -= 1
     target = HAPPOTrainer(changed, config)
-    with pytest.raises(RuntimeError, match="environment configuration"):
+    with pytest.raises(RuntimeError, match="environment config mismatch"):
         target.load_checkpoint(checkpoint)
     target.close()
