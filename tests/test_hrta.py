@@ -1,0 +1,108 @@
+from __future__ import annotations
+
+import torch
+
+from algorithm.modules.hrta import HRTAActor, HRTAIndependentActors
+from env.mavuav import OBS_DIM
+
+
+def observations(batch: int = 4) -> torch.Tensor:
+    torch.manual_seed(2026)
+    values = torch.randn(batch, OBS_DIM) * 0.2
+    values[:, 7:10] = torch.tensor([1.0, 0.0, 0.0])
+    for start in (11, 22):
+        values[:, start + 7] = 1.0
+    for start in (33, 44):
+        values[:, start + 6] = 1.0
+        values[:, start + 7] = 1.0
+        values[:, start + 8] = 0.0
+    return values
+
+
+def test_hrta_actor_action_shape_range_and_finite_distribution_values():
+    actor = HRTAActor()
+    obs = observations(8)
+    actions, sampled_log_prob = actor.sample(obs)
+    evaluated_log_prob, entropy = actor.evaluate_actions(obs, actions)
+    assert actions.shape == (8, 3)
+    assert sampled_log_prob.shape == entropy.shape == (8,)
+    assert torch.all(actions >= -1.0) and torch.all(actions <= 1.0)
+    assert torch.isfinite(actions).all()
+    assert torch.isfinite(sampled_log_prob).all()
+    assert torch.isfinite(evaluated_log_prob).all()
+    assert torch.isfinite(entropy).all()
+    assert torch.allclose(sampled_log_prob, evaluated_log_prob, atol=2e-5, rtol=2e-5)
+
+
+def test_enemy_attention_two_visible_enemies_is_normalized():
+    attention = HRTAActor().attention_weights(observations(5))
+    assert attention.shape == (5, 2)
+    assert torch.allclose(attention.sum(dim=-1), torch.ones(5), atol=1e-6)
+    assert torch.all(attention >= 0.0)
+
+
+def test_invisible_blue1_is_masked_and_blue2_gets_full_attention():
+    obs = observations(3)
+    obs[:, 33 + 7] = 0.0
+    obs[:, 33 + 8] = 0.0
+    attention = HRTAActor().attention_weights(obs)
+    assert torch.equal(attention[:, 0], torch.zeros(3))
+    assert torch.equal(attention[:, 1], torch.ones(3))
+
+
+def test_dead_blue2_is_masked():
+    obs = observations(3)
+    obs[:, 44 + 6] = 0.0
+    attention = HRTAActor().attention_weights(obs)
+    assert torch.equal(attention[:, 0], torch.ones(3))
+    assert torch.equal(attention[:, 1], torch.zeros(3))
+
+
+def test_no_visible_blue_returns_zero_attention_and_finite_outputs():
+    obs = observations(4)
+    for start in (33, 44):
+        obs[:, start + 7] = 0.0
+        obs[:, start + 8] = 0.0
+    actor = HRTAActor()
+    features, diagnostics = actor.encode(obs)
+    actions, log_prob = actor.sample(obs)
+    assert torch.equal(diagnostics["enemy_attention"], torch.zeros(4, 2))
+    assert torch.isfinite(features).all()
+    assert torch.isfinite(actions).all()
+    assert torch.isfinite(log_prob).all()
+
+
+def test_friend_alive_mask_and_all_dead_case_are_numerically_safe():
+    obs = observations(2)
+    obs[:, 22 + 7] = 0.0
+    actor = HRTAActor()
+    features, diagnostics = actor.encode(obs)
+    assert torch.equal(diagnostics["friend_attention"][:, 0], torch.ones(2))
+    assert torch.equal(diagnostics["friend_attention"][:, 1], torch.zeros(2))
+    obs[:, 11 + 7] = 0.0
+    features_all_dead, diagnostics_all_dead = actor.encode(obs)
+    assert torch.equal(diagnostics_all_dead["friend_attention"], torch.zeros(2, 2))
+    assert torch.isfinite(features).all() and torch.isfinite(features_all_dead).all()
+
+
+def test_hrta_backward_produces_finite_gradients():
+    actor = HRTAActor()
+    obs = observations(6)
+    actions, log_prob = actor.sample(obs)
+    features, diagnostics = actor.encode(obs)
+    loss = actions.square().mean() + log_prob.square().mean() + features.square().mean()
+    loss = loss + diagnostics["enemy_attention"][:, 0].mean()
+    loss.backward()
+    gradients = [parameter.grad for parameter in actor.parameters()]
+    assert all(gradient is not None for gradient in gradients)
+    assert all(torch.isfinite(gradient).all() for gradient in gradients)
+
+
+def test_hrta_independent_actors_are_distinct_and_do_not_share_parameters():
+    actors = HRTAIndependentActors()
+    assert len(actors.actors) == 3
+    assert len({id(actor) for actor in actors.actors}) == 3
+    parameter_ids = [{id(parameter) for parameter in actor.parameters()} for actor in actors.actors]
+    assert parameter_ids[0].isdisjoint(parameter_ids[1])
+    assert parameter_ids[0].isdisjoint(parameter_ids[2])
+    assert parameter_ids[1].isdisjoint(parameter_ids[2])
