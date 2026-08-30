@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 import torch
 from algorithm.happo import HAPPOTrainer
+from algorithm.happo.trainer import _restore_cuda_rng_state
 from copy import deepcopy
 from env.mavuav import load_environment_config
 
@@ -69,6 +70,33 @@ def test_happo_full_checkpoint_restores_optimizer_rng_and_vector_state(tmp_path)
     assert restored.actor_optimizers[0].state_dict()["state"].keys() == expected_actor_optimizer["state"].keys()
     assert restored.vector_env.get_env_states() == source.vector_env.get_env_states()
     source.close(); restored.close()
+
+
+def test_cuda_rng_restore_passes_cpu_byte_tensors_without_regenerating_state(monkeypatch):
+    expected = [torch.tensor([1, 7, 19], dtype=torch.uint8), torch.tensor([2, 8, 23], dtype=torch.uint8)]
+
+    class DeviceState:
+        def __init__(self, value):
+            self.value = value
+
+        def detach(self):
+            return self
+
+        def cpu(self):
+            return self.value.clone()
+
+    captured = []
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "set_rng_state_all", lambda states: captured.extend(states))
+
+    _restore_cuda_rng_state([DeviceState(value) for value in expected])
+
+    assert len(captured) == len(expected)
+    for actual, original in zip(captured, expected):
+        assert isinstance(actual, torch.Tensor)
+        assert actual.dtype == torch.uint8
+        assert actual.device.type == "cpu"
+        assert torch.equal(actual, original)
 
 
 @pytest.mark.parametrize(

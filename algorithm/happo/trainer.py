@@ -37,6 +37,12 @@ def preceding_factor_update(factor: torch.Tensor, old_log_prob: torch.Tensor, ne
     return (factor * torch.where(active > 0.5, ratio, torch.ones_like(ratio))).detach()
 
 
+def _restore_cuda_rng_state(states: list[torch.Tensor] | None) -> None:
+    """Restore exact CUDA RNG bytes from CPU tensors required by PyTorch."""
+    if states is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all([state.detach().cpu() for state in states])
+
+
 class HAPPOTrainer:
     def __init__(self, env_config: str | Path | Mapping[str, Any] | None = None, config: Mapping[str, Any] | None = None) -> None:
         self.config = deepcopy(DEFAULTS)
@@ -239,8 +245,7 @@ class HAPPOTrainer:
         self.critic_optimizer.load_state_dict(data["critic_optimizer_state"])
         self.rng.bit_generator.state = deepcopy(data["trainer_numpy_rng"])
         torch.set_rng_state(data["torch_rng"].cpu())
-        if data.get("cuda_rng") is not None and torch.cuda.is_available():
-            torch.cuda.set_rng_state_all(data["cuda_rng"])
+        _restore_cuda_rng_state(data.get("cuda_rng"))
         rollout = data["rollout_state"]
         self.observations = np.asarray(rollout["observations"], dtype=np.float32)
         self.global_states = np.asarray(rollout["global_states"], dtype=np.float32)
