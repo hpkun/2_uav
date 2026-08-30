@@ -13,6 +13,7 @@ from algorithm.common.networks import CentralizedCritic
 from env.vector_env import MAVUAVVectorEnv
 from env.mavuav import ENVIRONMENT_VERSION, GLOBAL_STATE_DIM, OBS_DIM, load_environment_config
 from algorithm.modules.hrta import HRTAIndependentActors
+from algorithm.modules.structured_uniform import StructuredUniformIndependentActors
 from .networks import IndependentActors
 
 
@@ -66,8 +67,15 @@ class HAPPOTrainer:
                 fusion_hidden_dim=int(c["hrta_fusion_hidden_dim"]),
                 action_dim=3,
             ).to(self.device)
+        elif c["actor_variant"] == "structured_uniform":
+            self.actors = StructuredUniformIndependentActors(
+                entity_dim=int(c["hrta_entity_dim"]),
+                role_dim=int(c["hrta_role_dim"]),
+                fusion_hidden_dim=int(c["hrta_fusion_hidden_dim"]),
+                action_dim=3,
+            ).to(self.device)
         else:
-            raise ValueError("actor_variant must be 'vanilla' or 'hrta'")
+            raise ValueError("actor_variant must be 'vanilla', 'hrta' or 'structured_uniform'")
         self.critic = CentralizedCritic(GLOBAL_STATE_DIM, int(c["hidden_dim"])).to(self.device)
         self.actor_optimizers = [torch.optim.Adam(actor.parameters(), lr=float(c["actor_learning_rate"])) for actor in self.actors.actors]
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=float(c["critic_learning_rate"]))
@@ -78,7 +86,7 @@ class HAPPOTrainer:
 
     @property
     def actor_architecture(self) -> dict[str, int]:
-        if self.config["actor_variant"] == "hrta":
+        if self.config["actor_variant"] in ("hrta", "structured_uniform"):
             return {
                 "entity_dim": int(self.config["hrta_entity_dim"]),
                 "role_dim": int(self.config["hrta_role_dim"]),
@@ -100,7 +108,7 @@ class HAPPOTrainer:
                 f"incompatible actor architecture: checkpoint={checkpoint_variant!r} "
                 f"current={self.config['actor_variant']!r}"
             )
-        if checkpoint_variant == "hrta" and checkpoint_architecture != self.actor_architecture:
+        if checkpoint_variant in ("hrta", "structured_uniform") and checkpoint_architecture != self.actor_architecture:
             raise RuntimeError(
                 f"incompatible actor architecture: checkpoint={checkpoint_architecture!r} "
                 f"current={self.actor_architecture!r}"

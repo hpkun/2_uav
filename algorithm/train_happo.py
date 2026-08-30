@@ -37,6 +37,18 @@ TRAINING_FIELDS = (
 LOSS_FIELDS = ("actor_0_loss", "actor_1_loss", "actor_2_loss", "critic_loss", "entropy")
 
 
+def _algorithm_name(actor_variant: str) -> str:
+    names = {
+        "vanilla": "happo",
+        "hrta": "happo_hrta",
+        "structured_uniform": "happo_structured_uniform",
+    }
+    try:
+        return names[actor_variant]
+    except KeyError as error:
+        raise ValueError(f"unsupported actor_variant: {actor_variant!r}") from error
+
+
 class MilestoneObserver:
     """Observe thresholds without influencing rollout boundaries."""
 
@@ -138,7 +150,7 @@ def _new_run_dir(args: argparse.Namespace) -> Path:
         if args.output_name:
             raise ValueError("--output-name cannot be combined with --resume")
         return checkpoint.parent
-    algorithm = "happo_hrta" if args.actor_variant == "hrta" else "happo"
+    algorithm = _algorithm_name(args.actor_variant)
     name = args.output_name or (
         f"{algorithm}_{args.profile}_seed{args.seed}_{_step_label(args.steps)}_"
         f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -195,7 +207,7 @@ def _evaluation_row(
     )
     return {
         "sampled_steps": trainer.env_steps,
-        "algorithm": "happo_hrta" if trainer.config["actor_variant"] == "hrta" else "happo",
+        "algorithm": _algorithm_name(trainer.config["actor_variant"]),
         "seed": seed,
         "blue_mode": mode, "training_profile": trainer.config["environment_profile"],
         "evaluation_profile": profile, "episodes": episodes, **summarize_records(records),
@@ -286,7 +298,7 @@ def _initial_resolved(
 ) -> dict[str, Any]:
     return {
         "environment": dict(env_config), "happo": dict(trainer.config), "profile": args.profile,
-        "algorithm": "happo_hrta" if trainer.config["actor_variant"] == "hrta" else "happo",
+        "algorithm": _algorithm_name(trainer.config["actor_variant"]),
         "actor_variant": trainer.config["actor_variant"],
         "actor_architecture": trainer.actor_architecture,
         "actor_parameter_count_per_agent": trainer.actor_parameter_counts["per_agent"],
@@ -333,6 +345,7 @@ def _write_resolved_config(
 
 
 def main(actor_variant: str = "vanilla") -> None:
+    algorithm = _algorithm_name(actor_variant)
     args = parse_args()
     args.actor_variant = actor_variant
     if args.steps <= 0 or args.num_envs <= 0:
@@ -374,7 +387,7 @@ def main(actor_variant: str = "vanilla") -> None:
 
         separator = "=" * 60
         start_lines = [
-            separator, "HAPPO+HRTA TRAINING" if actor_variant == "hrta" else "HAPPO TRAINING",
+            separator, f"{algorithm.upper()} TRAINING",
             f"Run: {run_dir.name}", f"Profile: {args.profile}",
             f"Seed: {args.seed}", f"Device: {device}", f"Envs: {args.num_envs}",
             f"Rollout: {trainer.config['rollout_steps']}", f"Target steps: {args.steps:,}",
@@ -473,7 +486,7 @@ def main(actor_variant: str = "vanilla") -> None:
         final_evaluation_elapsed = time.perf_counter() - final_evaluation_started
 
         summary = {
-            "algorithm": "happo_hrta" if actor_variant == "hrta" else "happo",
+            "algorithm": algorithm,
             "actor_variant": actor_variant, "actor_architecture": trainer.actor_architecture,
             "actor_parameter_count_per_agent": trainer.actor_parameter_counts["per_agent"],
             "actor_parameter_count_total": trainer.actor_parameter_counts["total"],
