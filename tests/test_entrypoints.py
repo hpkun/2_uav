@@ -25,6 +25,8 @@ def _run(*arguments: str) -> subprocess.CompletedProcess[str]:
 def test_direct_happo_entrypoints_show_help_without_package_install():
     assert "--steps" in _run("algorithm/train_happo.py", "--help").stdout
     assert "--blue-mode" in _run("algorithm/evaluate_happo.py", "--help").stdout
+    assert "--steps" in _run("algorithm/train_happo_hrta.py", "--help").stdout
+    assert "--attention-output" in _run("algorithm/evaluate_happo_hrta.py", "--help").stdout
 
 
 def _simulated_schedule(total: int, interval: int) -> tuple[list[int], list[int]]:
@@ -76,6 +78,7 @@ def test_flat_training_and_cross_profile_evaluation_smoke():
         assert expected <= {path.name for path in run_dir.iterdir()}
         summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
         assert summary["sampled_steps"] == 2 and summary["status"] == "complete"
+        assert summary["algorithm"] == "happo" and summary["actor_variant"] == "vanilla"
         with (run_dir / "training.csv").open(encoding="utf-8", newline="") as stream:
             assert int(list(csv.DictReader(stream))[-1]["sampled_steps"]) == 2
         with (run_dir / "evaluations.csv").open(encoding="utf-8", newline="") as stream:

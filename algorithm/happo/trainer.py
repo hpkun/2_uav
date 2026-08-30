@@ -12,6 +12,7 @@ from algorithm.common.buffer import RolloutBuffer
 from algorithm.common.networks import CentralizedCritic
 from env.vector_env import MAVUAVVectorEnv
 from env.mavuav import ENVIRONMENT_VERSION, GLOBAL_STATE_DIM, OBS_DIM, load_environment_config
+from algorithm.modules.hrta import HRTAIndependentActors
 from .networks import IndependentActors
 
 
@@ -20,7 +21,8 @@ DEFAULTS = {
     "gamma": 0.99, "gae_lambda": 0.95, "ppo_epochs": 4, "minibatch_size": 256,
     "clip_coef": 0.2, "actor_learning_rate": 3e-4, "critic_learning_rate": 1e-3,
     "entropy_coef": 0.01, "value_loss_coef": 0.5, "max_grad_norm": 0.5,
-    "hidden_dim": 128,
+    "hidden_dim": 128, "actor_variant": "vanilla",
+    "hrta_entity_dim": 32, "hrta_role_dim": 16, "hrta_fusion_hidden_dim": 64,
 }
 
 RESUME_CONFIG_FIELDS = (
@@ -49,7 +51,17 @@ class HAPPOTrainer:
         self.vector_env = MAVUAVVectorEnv(
             int(c["num_envs"]), self.environment_config, seed=int(c["seed"]), profile=c["environment_profile"],
         )
-        self.actors = IndependentActors(hidden_dim=int(c["hidden_dim"])).to(self.device)
+        if c["actor_variant"] == "vanilla":
+            self.actors = IndependentActors(hidden_dim=int(c["hidden_dim"])).to(self.device)
+        elif c["actor_variant"] == "hrta":
+            self.actors = HRTAIndependentActors(
+                entity_dim=int(c["hrta_entity_dim"]),
+                role_dim=int(c["hrta_role_dim"]),
+                fusion_hidden_dim=int(c["hrta_fusion_hidden_dim"]),
+                action_dim=3,
+            ).to(self.device)
+        else:
+            raise ValueError("actor_variant must be 'vanilla' or 'hrta'")
         self.critic = CentralizedCritic(GLOBAL_STATE_DIM, int(c["hidden_dim"])).to(self.device)
         self.actor_optimizers = [torch.optim.Adam(actor.parameters(), lr=float(c["actor_learning_rate"])) for actor in self.actors.actors]
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=float(c["critic_learning_rate"]))
@@ -57,6 +69,36 @@ class HAPPOTrainer:
         self.observations, self.global_states, self.active_masks, _ = self.vector_env.reset()
         self.env_steps = 0
         self.completed_episodes: list[dict[str, Any]] = []
+
+    @property
+    def actor_architecture(self) -> dict[str, int]:
+        if self.config["actor_variant"] == "hrta":
+            return {
+                "entity_dim": int(self.config["hrta_entity_dim"]),
+                "role_dim": int(self.config["hrta_role_dim"]),
+                "fusion_hidden_dim": int(self.config["hrta_fusion_hidden_dim"]),
+                "action_dim": 3,
+            }
+        return {"hidden_dim": int(self.config["hidden_dim"]), "action_dim": 3}
+
+    @property
+    def actor_parameter_counts(self) -> dict[str, Any]:
+        per_agent = [sum(parameter.numel() for parameter in actor.parameters()) for actor in self.actors.actors]
+        return {"per_agent": per_agent, "total": sum(per_agent)}
+
+    def _validate_actor_architecture(self, data: Mapping[str, Any]) -> None:
+        checkpoint_variant = data.get("actor_variant", data.get("trainer_config", data.get("config", {})).get("actor_variant", "vanilla"))
+        checkpoint_architecture = data.get("actor_architecture")
+        if checkpoint_variant != self.config["actor_variant"]:
+            raise RuntimeError(
+                f"incompatible actor architecture: checkpoint={checkpoint_variant!r} "
+                f"current={self.config['actor_variant']!r}"
+            )
+        if checkpoint_variant == "hrta" and checkpoint_architecture != self.actor_architecture:
+            raise RuntimeError(
+                f"incompatible actor architecture: checkpoint={checkpoint_architecture!r} "
+                f"current={self.actor_architecture!r}"
+            )
 
     def collect_rollout(self) -> list[dict[str, Any]]:
         self.buffer.reset(); completed = []
@@ -134,7 +176,7 @@ class HAPPOTrainer:
 
     def save(self, path: str | Path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        torch.save({"environment_version": ENVIRONMENT_VERSION, "environment_profile": self.config["environment_profile"], "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM, "actors": self.actors.state_dict(), "critic": self.critic.state_dict(), "config": self.config}, path)
+        torch.save({"environment_version": ENVIRONMENT_VERSION, "environment_profile": self.config["environment_profile"], "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM, "actor_variant": self.config["actor_variant"], "actor_architecture": self.actor_architecture, "actors": self.actors.state_dict(), "critic": self.critic.state_dict(), "config": self.config}, path)
 
     def checkpoint_state(self) -> dict[str, Any]:
         """Return all state required for an exact continuation of training."""
@@ -145,6 +187,8 @@ class HAPPOTrainer:
             "environment_profile": self.config["environment_profile"],
             "observation_dim": OBS_DIM,
             "global_state_dim": GLOBAL_STATE_DIM,
+            "actor_variant": self.config["actor_variant"],
+            "actor_architecture": self.actor_architecture,
             "environment_config": deepcopy(self.environment_config),
             "trainer_config": deepcopy(self.config),
             "actors": self.actors.state_dict(),
@@ -175,6 +219,7 @@ class HAPPOTrainer:
         actual = (data.get("environment_version"), data.get("observation_dim"), data.get("global_state_dim"))
         if actual != expected:
             raise RuntimeError("incompatible HAPPO checkpoint environment contract")
+        self._validate_actor_architecture(data)
         saved_config = data.get("trainer_config", data.get("config", {}))
         for field in RESUME_CONFIG_FIELDS:
             checkpoint_value = saved_config.get(field)
@@ -212,6 +257,7 @@ class HAPPOTrainer:
         data = torch.load(path, map_location=self.device, weights_only=False)
         if (data.get("environment_version"), data.get("observation_dim"), data.get("global_state_dim")) != (ENVIRONMENT_VERSION, OBS_DIM, GLOBAL_STATE_DIM):
             raise RuntimeError("incompatible HAPPO checkpoint environment contract")
+        self._validate_actor_architecture(data)
         if data.get("environment_profile") != self.config["environment_profile"]:
             raise RuntimeError(
                 f"incompatible HAPPO checkpoint environment profile: {data.get('environment_profile')!r} "

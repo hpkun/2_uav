@@ -15,3 +15,7 @@ training:
   value_loss_coef: 0.5
   max_grad_norm: 0.5
   hidden_dim: 128
+  actor_variant: vanilla
+  hrta_entity_dim: 32
+  hrta_role_dim: 16
+  hrta_fusion_hidden_dim: 64

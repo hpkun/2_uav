@@ -138,8 +138,9 @@ def _new_run_dir(args: argparse.Namespace) -> Path:
         if args.output_name:
             raise ValueError("--output-name cannot be combined with --resume")
         return checkpoint.parent
+    algorithm = "happo_hrta" if args.actor_variant == "hrta" else "happo"
     name = args.output_name or (
-        f"happo_{args.profile}_seed{args.seed}_{_step_label(args.steps)}_"
+        f"{algorithm}_{args.profile}_seed{args.seed}_{_step_label(args.steps)}_"
         f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     )
     run_dir = OUTPUT_ROOT / name
@@ -193,7 +194,9 @@ def _evaluation_row(
         trainer.actors, trainer.environment_config, episodes, mode, profile, seed=1000, device=device,
     )
     return {
-        "sampled_steps": trainer.env_steps, "algorithm": "happo", "seed": seed,
+        "sampled_steps": trainer.env_steps,
+        "algorithm": "happo_hrta" if trainer.config["actor_variant"] == "hrta" else "happo",
+        "seed": seed,
         "blue_mode": mode, "training_profile": trainer.config["environment_profile"],
         "evaluation_profile": profile, "episodes": episodes, **summarize_records(records),
     }
@@ -283,6 +286,11 @@ def _initial_resolved(
 ) -> dict[str, Any]:
     return {
         "environment": dict(env_config), "happo": dict(trainer.config), "profile": args.profile,
+        "algorithm": "happo_hrta" if trainer.config["actor_variant"] == "hrta" else "happo",
+        "actor_variant": trainer.config["actor_variant"],
+        "actor_architecture": trainer.actor_architecture,
+        "actor_parameter_count_per_agent": trainer.actor_parameter_counts["per_agent"],
+        "actor_parameter_count_total": trainer.actor_parameter_counts["total"],
         "seed": args.seed, "requested_device": args.device, "resolved_device": device,
         "device_fallback_reason": fallback, "num_envs": args.num_envs, "total_steps": args.steps,
         "checkpoint_interval": args.checkpoint_interval, "evaluation_interval": args.eval_interval,
@@ -324,8 +332,9 @@ def _write_resolved_config(
         yaml.safe_dump(resolved, stream, sort_keys=False, allow_unicode=True)
 
 
-def main() -> None:
+def main(actor_variant: str = "vanilla") -> None:
     args = parse_args()
+    args.actor_variant = actor_variant
     if args.steps <= 0 or args.num_envs <= 0:
         raise ValueError("steps and num-envs must be positive")
     if args.steps % args.num_envs:
@@ -350,6 +359,7 @@ def main() -> None:
     env_config = load_environment_config(args.env_config.expanduser().resolve())
     config["training"].update({
         "environment_profile": args.profile, "seed": args.seed, "device": device, "num_envs": args.num_envs,
+        "actor_variant": actor_variant,
     })
     trainer = HAPPOTrainer(env_config, config)
     try:
@@ -364,7 +374,8 @@ def main() -> None:
 
         separator = "=" * 60
         start_lines = [
-            separator, "HAPPO TRAINING", f"Run: {run_dir.name}", f"Profile: {args.profile}",
+            separator, "HAPPO+HRTA TRAINING" if actor_variant == "hrta" else "HAPPO TRAINING",
+            f"Run: {run_dir.name}", f"Profile: {args.profile}",
             f"Seed: {args.seed}", f"Device: {device}", f"Envs: {args.num_envs}",
             f"Rollout: {trainer.config['rollout_steps']}", f"Target steps: {args.steps:,}",
             f"Checkpoint interval: {_interval_text(args.checkpoint_interval)}",
@@ -462,7 +473,11 @@ def main() -> None:
         final_evaluation_elapsed = time.perf_counter() - final_evaluation_started
 
         summary = {
-            "algorithm": "happo", "status": "complete", "sampled_steps": trainer.env_steps,
+            "algorithm": "happo_hrta" if actor_variant == "hrta" else "happo",
+            "actor_variant": actor_variant, "actor_architecture": trainer.actor_architecture,
+            "actor_parameter_count_per_agent": trainer.actor_parameter_counts["per_agent"],
+            "actor_parameter_count_total": trainer.actor_parameter_counts["total"],
+            "status": "complete", "sampled_steps": trainer.env_steps,
             "training_profile": args.profile, "seed": args.seed, "device": device,
             "num_envs": args.num_envs, "completed_episodes": completed,
             "training_elapsed_seconds": training_elapsed,

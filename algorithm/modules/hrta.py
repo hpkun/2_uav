@@ -92,6 +92,8 @@ class HRTAActor(nn.Module):
         self.observation_dim = int(observation_dim)
         self.action_dim = int(action_dim)
         self.entity_dim = int(entity_dim)
+        self.role_dim = int(role_dim)
+        self.fusion_hidden_dim = int(fusion_hidden_dim)
         self.self_encoder = SelfEncoder(entity_dim)
         self.friend_encoder = FriendEncoder(entity_dim)
         self.enemy_encoder = EnemyEncoder(entity_dim)
