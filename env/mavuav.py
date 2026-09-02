@@ -219,7 +219,8 @@ class HeterogeneousMAVUAVAirCombatEnv:
         self._red_attack_kills.clear()
         self._blue_attack_kills.clear()
         self._running = True
-        mode = self.blue_policy.reset(self.rng)
+        nearest_probability = options.get("nearest_probability")
+        mode = self.blue_policy.reset(self.rng, nearest_probability=nearest_probability)
         return self._observations(), {
             "outcome": None, "attack_events": [], "killed_ids": [], "death_causes": {},
             "active_masks": self.active_masks.copy(), "blue_target_mode": mode, "profile": self.profile,

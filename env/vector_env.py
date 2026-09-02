@@ -65,18 +65,25 @@ def _worker(
             command, payload = connection.recv()
             try:
                 if command == "reset":
-                    base_seed = payload
+                    base_seed, nearest_probability = payload
                     reset_count = 0
-                    observation, info = env.reset(seed=episode_seed())
+                    reset_options = None if nearest_probability is None else {
+                        "nearest_probability": nearest_probability,
+                    }
+                    observation, info = env.reset(seed=episode_seed(), options=reset_options)
                     result = (observation, env.global_state(), env.active_masks, info, reset_count)
                 elif command == "step":
-                    observation, reward, terminated, truncated, info = env.step(payload)
+                    actions, reset_nearest_probability = payload
+                    observation, reward, terminated, truncated, info = env.step(actions)
                     info = dict(info)
                     if terminated or truncated:
                         terminal_state = env.global_state().copy()
                         terminal_masks = env.active_masks.copy()
                         reset_count += 1
-                        observation, reset_info = env.reset(seed=episode_seed())
+                        reset_options = None if reset_nearest_probability is None else {
+                            "nearest_probability": reset_nearest_probability,
+                        }
+                        observation, reset_info = env.reset(seed=episode_seed(), options=reset_options)
                         info.update({
                             "terminal_global_state": terminal_state,
                             "terminal_active_masks": terminal_masks,
@@ -206,16 +213,28 @@ class MAVUAVVectorEnv:
     def _stack_observations(observations: list[dict[str, np.ndarray]]) -> np.ndarray:
         return np.asarray([[obs[aid] for aid in RED_IDS] for obs in observations], dtype=np.float32)
 
-    def reset(self, seed: int | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[dict[str, Any]]]:
+    def reset(
+        self,
+        seed: int | None = None,
+        nearest_probability: float | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[dict[str, Any]]]:
         if seed is not None:
             self.base_seed = int(seed)
         self.reset_counts.fill(0)
         if self.parallel:
-            results = self._send_all("reset", [self.base_seed] * self.num_envs)
+            results = self._send_all(
+                "reset", [(self.base_seed, nearest_probability)] * self.num_envs,
+            )
             observations, states, masks, infos, counts = zip(*results)
             self.reset_counts[:] = counts
         else:
-            local_results = [env.reset(seed=self._seed(index)) for index, env in enumerate(self.envs)]
+            reset_options = None if nearest_probability is None else {
+                "nearest_probability": nearest_probability,
+            }
+            local_results = [
+                env.reset(seed=self._seed(index), options=reset_options)
+                for index, env in enumerate(self.envs)
+            ]
             observations = [item[0] for item in local_results]
             states = [env.global_state() for env in self.envs]
             masks = [env.active_masks for env in self.envs]
@@ -225,13 +244,20 @@ class MAVUAVVectorEnv:
             np.asarray(masks, dtype=np.float32), list(infos),
         )
 
-    def step(self, actions: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[dict[str, Any]]]:
+    def step(
+        self,
+        actions: np.ndarray,
+        reset_nearest_probability: float | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[dict[str, Any]]]:
         values = np.asarray(actions, dtype=np.float64)
         expected = (self.num_envs, len(RED_IDS), 3)
         if values.shape != expected:
             raise ValueError(f"actions must have shape {expected}, got {values.shape}")
         if self.parallel:
-            results = self._send_all("step", [values[index] for index in range(self.num_envs)])
+            results = self._send_all(
+                "step",
+                [(values[index], reset_nearest_probability) for index in range(self.num_envs)],
+            )
             observations, states, rewards, terminated, truncated, masks, infos, counts = zip(*results)
             self.reset_counts[:] = counts
             return (
@@ -255,7 +281,10 @@ class MAVUAVVectorEnv:
                 terminal_state = env.global_state().copy()
                 terminal_masks = env.active_masks.copy()
                 self.reset_counts[index] += 1
-                observation, reset_info = env.reset(seed=self._seed(index))
+                reset_options = None if reset_nearest_probability is None else {
+                    "nearest_probability": reset_nearest_probability,
+                }
+                observation, reset_info = env.reset(seed=self._seed(index), options=reset_options)
                 info = dict(info)
                 info.update({
                     "terminal_global_state": terminal_state,

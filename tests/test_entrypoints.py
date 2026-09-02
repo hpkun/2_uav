@@ -9,7 +9,7 @@ import sys
 import uuid
 import yaml
 
-from algorithm.train_happo import MilestoneObserver, planned_rollout_horizon
+from algorithm.train_happo import MilestoneObserver, _append_csv, planned_rollout_horizon
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +27,9 @@ def test_direct_happo_entrypoints_show_help_without_package_install():
     assert "--blue-mode" in _run("algorithm/evaluate_happo.py", "--help").stdout
     assert "--steps" in _run("algorithm/train_happo_hrta.py", "--help").stdout
     assert "--attention-output" in _run("algorithm/evaluate_happo_hrta.py", "--help").stdout
+    assert "--steps" in _run("algorithm/train_happo_agp.py", "--help").stdout
+    assert "--steps" in _run("algorithm/train_happo_curriculum.py", "--help").stdout
+    assert "--steps" in _run("algorithm/train_happo_agp_curriculum.py", "--help").stdout
 
 
 def _simulated_schedule(total: int, interval: int) -> tuple[list[int], list[int]]:
@@ -53,6 +56,22 @@ def test_evaluation_and_log_milestones_do_not_truncate_rollouts():
 
 def test_checkpoint_frequency_does_not_change_update_horizons():
     assert _simulated_schedule(20, 3)[0] == _simulated_schedule(20, 100)[0] == [8, 16, 20]
+
+
+def test_csv_append_preserves_legacy_header_without_column_shift(tmp_path):
+    path = tmp_path / "legacy.csv"
+    _append_csv(path, {"sampled_steps": 1, "loss": 2.0}, ("sampled_steps", "loss"))
+    _append_csv(
+        path,
+        {"sampled_steps": 2, "loss": 3.0, "method_variant": "baseline"},
+        ("sampled_steps", "loss", "method_variant"),
+    )
+    with path.open(encoding="utf-8", newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    assert rows == [
+        {"sampled_steps": "1", "loss": "2.0"},
+        {"sampled_steps": "2", "loss": "3.0"},
+    ]
 
 
 def test_flat_training_and_cross_profile_evaluation_smoke():
@@ -106,5 +125,36 @@ def test_flat_training_and_cross_profile_evaluation_smoke():
         evaluation = json.loads((run_dir / "evaluation_final_summary.json").read_text(encoding="utf-8"))
         assert evaluation["training_profile"] == "learnability"
         assert evaluation["evaluation_profile"] == "main"
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+
+def test_combined_entrypoint_and_vanilla_evaluator_method_metadata_smoke():
+    output_name = f"pytest_happo_agp_curriculum_{uuid.uuid4().hex}"
+    run_dir = PROJECT_ROOT / "outputs" / output_name
+    try:
+        _run(
+            "algorithm/train_happo_agp_curriculum.py", "--steps", "1",
+            "--profile", "learnability", "--device", "cpu", "--num-envs", "1",
+            "--output-name", output_name, "--checkpoint-interval", "1",
+            "--eval-interval", "0", "--log-interval", "1", "--final-eval-episodes", "1",
+        )
+        checkpoint = run_dir / "checkpoint_final.pt"
+        summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+        assert summary["algorithm"] == "happo_agp_curriculum"
+        assert summary["actor_variant"] == "vanilla"
+        assert summary["method_variant"] == "agp_curriculum"
+        with (run_dir / "training.csv").open(encoding="utf-8", newline="") as stream:
+            row = list(csv.DictReader(stream))[-1]
+        assert row["method_variant"] == "agp_curriculum"
+        assert float(row["agp_shaping_mean_abs"]) >= 0.0
+
+        _run(
+            "algorithm/evaluate_happo.py", str(checkpoint), "--profile", "learnability",
+            "--episodes", "1", "--device", "cpu", "--blue-mode", "nearest",
+        )
+        evaluation = json.loads((run_dir / "evaluation_final_summary.json").read_text(encoding="utf-8"))
+        assert evaluation["method_variant"] == "agp_curriculum"
+        assert evaluation["results"][0]["method_variant"] == "agp_curriculum"
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)

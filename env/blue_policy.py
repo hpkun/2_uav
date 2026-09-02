@@ -26,8 +26,17 @@ class BluePolicy:
         self.physics_dt = float(physics_dt)
         self.substeps = int(round(float(decision_dt) / self.physics_dt))
 
-    def reset(self, rng: np.random.Generator) -> str:
-        self.episode_mode = str(rng.choice(("nearest", "mav_priority"))) if self.configured_mode == "mixed_episode" else self.configured_mode
+    def reset(self, rng: np.random.Generator, nearest_probability: float | None = None) -> str:
+        if nearest_probability is None:
+            # Preserve the exact baseline RNG call and seeded mode sequence.
+            self.episode_mode = str(rng.choice(("nearest", "mav_priority"))) if self.configured_mode == "mixed_episode" else self.configured_mode
+            return self.episode_mode
+        if self.configured_mode != "mixed_episode":
+            raise ValueError("nearest_probability is only valid for mixed_episode Blue mode")
+        probability = float(nearest_probability)
+        if not 0.0 <= probability <= 1.0:
+            raise ValueError("nearest_probability must lie in [0, 1]")
+        self.episode_mode = "nearest" if rng.random() < probability else "mav_priority"
         return self.episode_mode
 
     def select_target(self, blue: Aircraft, red: Mapping[str, Aircraft]) -> Aircraft | None:

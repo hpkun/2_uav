@@ -16,6 +16,14 @@ training:
   max_grad_norm: 0.5
   hidden_dim: 128
   actor_variant: vanilla
+  method_variant: baseline
+  agp_lambda: 0.5
+  curriculum_schedule:
+    - [0.00, 0.00]
+    - [0.25, 0.25]
+    - [0.50, 0.75]
+    - [0.75, 1.00]
+  curriculum_total_steps: null
   hrta_entity_dim: 32
   hrta_role_dim: 16
   hrta_fusion_hidden_dim: 64

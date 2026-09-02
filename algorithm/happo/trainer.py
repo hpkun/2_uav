@@ -15,6 +15,8 @@ from env.mavuav import ENVIRONMENT_VERSION, GLOBAL_STATE_DIM, OBS_DIM, load_envi
 from algorithm.modules.hrta import HRTAIndependentActors
 from algorithm.modules.structured_uniform import StructuredUniformIndependentActors
 from .networks import IndependentActors
+from .agp import apply_agp
+from .curriculum import DEFAULT_CURRICULUM_SCHEDULE, nearest_probability, normalized_schedule
 
 
 DEFAULTS = {
@@ -22,7 +24,9 @@ DEFAULTS = {
     "gamma": 0.99, "gae_lambda": 0.95, "ppo_epochs": 4, "minibatch_size": 256,
     "clip_coef": 0.2, "actor_learning_rate": 3e-4, "critic_learning_rate": 1e-3,
     "entropy_coef": 0.01, "value_loss_coef": 0.5, "max_grad_norm": 0.5,
-    "hidden_dim": 128, "actor_variant": "vanilla",
+    "hidden_dim": 128, "actor_variant": "vanilla", "method_variant": "baseline",
+    "agp_lambda": 0.5, "curriculum_schedule": DEFAULT_CURRICULUM_SCHEDULE,
+    "curriculum_total_steps": None,
     "hrta_entity_dim": 32, "hrta_role_dim": 16, "hrta_fusion_hidden_dim": 64,
 }
 
@@ -51,6 +55,20 @@ class HAPPOTrainer:
         c = self.config
         if c["environment_profile"] not in ("learnability", "main"):
             raise ValueError("environment_profile must be 'learnability' or 'main'")
+        if c["method_variant"] not in ("baseline", "agp", "curriculum", "agp_curriculum"):
+            raise ValueError("invalid method_variant")
+        if c["actor_variant"] != "vanilla" and c["method_variant"] != "baseline":
+            raise ValueError("AGP and curriculum methods require actor_variant='vanilla'")
+        self.agp_enabled = c["method_variant"] in ("agp", "agp_curriculum")
+        self.curriculum_enabled = c["method_variant"] in ("curriculum", "agp_curriculum")
+        self.curriculum_schedule = normalized_schedule(c.get("curriculum_schedule"))
+        self.curriculum_total_steps = c.get("curriculum_total_steps")
+        if self.curriculum_enabled and (
+            self.curriculum_total_steps is None or int(self.curriculum_total_steps) <= 0
+        ):
+            raise ValueError("curriculum methods require positive curriculum_total_steps")
+        if float(c["agp_lambda"]) < 0.0:
+            raise ValueError("agp_lambda cannot be negative")
         self.device = torch.device(c["device"])
         torch.manual_seed(int(c["seed"]))
         self.rng = np.random.default_rng(int(c["seed"]))
@@ -80,9 +98,39 @@ class HAPPOTrainer:
         self.actor_optimizers = [torch.optim.Adam(actor.parameters(), lr=float(c["actor_learning_rate"])) for actor in self.actors.actors]
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=float(c["critic_learning_rate"]))
         self.buffer = RolloutBuffer(int(c["rollout_steps"]), int(c["num_envs"]))
-        self.observations, self.global_states, self.active_masks, _ = self.vector_env.reset()
+        initial_probability = self._curriculum_probability(0)
+        self.observations, self.global_states, self.active_masks, reset_infos = self.vector_env.reset(
+            nearest_probability=initial_probability,
+        )
         self.env_steps = 0
         self.completed_episodes: list[dict[str, Any]] = []
+        self.current_blue_modes = [str(info["blue_target_mode"]) for info in reset_infos]
+        self.mode_transition_counts = {"nearest": 0, "mav_priority": 0}
+        self.mode_episode_counts = {"nearest": 0, "mav_priority": 0}
+        self.last_rollout_metrics = self._empty_rollout_metrics(initial_probability)
+
+    def _curriculum_probability(self, sampled_steps: int) -> float | None:
+        if not self.curriculum_enabled:
+            return None
+        return nearest_probability(
+            sampled_steps,
+            int(self.curriculum_total_steps),
+            self.curriculum_schedule,
+        )
+
+    def _empty_rollout_metrics(self, probability: float | None) -> dict[str, Any]:
+        return {
+            "method_variant": self.config["method_variant"],
+            "p_nearest": probability,
+            "agp_raw_mean": 0.0,
+            "agp_raw_mean_abs": 0.0,
+            "agp_shaping_mean": 0.0,
+            "agp_shaping_mean_abs": 0.0,
+            "transitions_nearest": int(self.mode_transition_counts.get("nearest", 0)) if hasattr(self, "mode_transition_counts") else 0,
+            "transitions_mav_priority": int(self.mode_transition_counts.get("mav_priority", 0)) if hasattr(self, "mode_transition_counts") else 0,
+            "episodes_nearest": int(self.mode_episode_counts.get("nearest", 0)) if hasattr(self, "mode_episode_counts") else 0,
+            "episodes_mav_priority": int(self.mode_episode_counts.get("mav_priority", 0)) if hasattr(self, "mode_episode_counts") else 0,
+        }
 
     @property
     def actor_architecture(self) -> dict[str, int]:
@@ -116,6 +164,9 @@ class HAPPOTrainer:
 
     def collect_rollout(self) -> list[dict[str, Any]]:
         self.buffer.reset(); completed = []
+        raw_terms: list[np.ndarray] = []
+        shaping_terms: list[np.ndarray] = []
+        update_probability = self._curriculum_probability(self.env_steps)
         for _ in range(self.buffer.horizon):
             actions, log_probs = [], []
             with torch.no_grad():
@@ -124,13 +175,55 @@ class HAPPOTrainer:
                     actions.append(action.cpu().numpy()); log_probs.append(log_prob.cpu().numpy())
                 values = self.critic(torch.as_tensor(self.global_states, device=self.device)).cpu().numpy()
             action_array = np.stack(actions, axis=1); log_prob_array = np.stack(log_probs, axis=1)
-            next_obs, next_states, rewards, terminated, truncated, next_masks, infos = self.vector_env.step(action_array)
-            self.buffer.insert(self.observations, self.global_states, action_array, log_prob_array, rewards, values, terminated, truncated, self.active_masks)
+            reset_probability = self._curriculum_probability(self.env_steps + self.buffer.num_envs)
+            transition_modes = tuple(self.current_blue_modes)
+            for mode in transition_modes:
+                self.mode_transition_counts[mode] += 1
+            next_obs, next_states, rewards, terminated, truncated, next_masks, infos = self.vector_env.step(
+                action_array, reset_nearest_probability=reset_probability,
+            )
+            done = np.logical_or(terminated, truncated)
+            if self.agp_enabled:
+                training_rewards, raw, shaping = apply_agp(
+                    rewards,
+                    self.observations,
+                    next_obs,
+                    done,
+                    float(self.environment_config["normalization"]["distance_scale"]),
+                    gamma=float(self.config["gamma"]),
+                    agp_lambda=float(self.config["agp_lambda"]),
+                )
+            else:
+                training_rewards = rewards
+                raw = np.zeros(self.buffer.num_envs, dtype=np.float64)
+                shaping = np.zeros(self.buffer.num_envs, dtype=np.float64)
+            raw_terms.append(raw)
+            shaping_terms.append(shaping)
+            self.buffer.insert(self.observations, self.global_states, action_array, log_prob_array, training_rewards, values, terminated, truncated, self.active_masks)
             completed.extend(info["episode_summary"] for info in infos if "episode_summary" in info)
+            for index, info in enumerate(infos):
+                if done[index]:
+                    self.mode_episode_counts[transition_modes[index]] += 1
+                if info.get("auto_reset"):
+                    self.current_blue_modes[index] = str(info["reset_info"]["blue_target_mode"])
             self.observations, self.global_states, self.active_masks = next_obs, next_states, next_masks
             self.env_steps += self.buffer.num_envs
         with torch.no_grad(): last_values = self.critic(torch.as_tensor(self.global_states, device=self.device)).cpu().numpy()
         self.buffer.compute_returns_and_advantages(last_values, float(self.config["gamma"]), float(self.config["gae_lambda"]))
+        raw_values = np.concatenate(raw_terms) if raw_terms else np.zeros(1)
+        shaping_values = np.concatenate(shaping_terms) if shaping_terms else np.zeros(1)
+        self.last_rollout_metrics = {
+            "method_variant": self.config["method_variant"],
+            "p_nearest": update_probability,
+            "agp_raw_mean": float(np.mean(raw_values)),
+            "agp_raw_mean_abs": float(np.mean(np.abs(raw_values))),
+            "agp_shaping_mean": float(np.mean(shaping_values)),
+            "agp_shaping_mean_abs": float(np.mean(np.abs(shaping_values))),
+            "transitions_nearest": int(self.mode_transition_counts["nearest"]),
+            "transitions_mav_priority": int(self.mode_transition_counts["mav_priority"]),
+            "episodes_nearest": int(self.mode_episode_counts["nearest"]),
+            "episodes_mav_priority": int(self.mode_episode_counts["mav_priority"]),
+        }
         self.completed_episodes.extend(completed)
         return completed
 
@@ -181,6 +274,7 @@ class HAPPOTrainer:
                 critic_losses.append(float(value_loss.item()))
         metrics: dict[str, Any] = {f"actor_{i}_loss": float(np.mean(actor_losses[i])) if actor_losses[i] else 0.0 for i in range(3)}
         metrics.update({"actor_loss": float(np.mean([v for rows in actor_losses for v in rows])), "critic_loss": float(np.mean(critic_losses)), "entropy": float(np.mean(entropies)), "agent_update_order": order})
+        metrics.update(self.last_rollout_metrics)
         if not all(np.isfinite(v) for v in metrics.values() if isinstance(v, float)): raise FloatingPointError("non-finite HAPPO update")
         return metrics
 
@@ -190,7 +284,7 @@ class HAPPOTrainer:
 
     def save(self, path: str | Path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        torch.save({"environment_version": ENVIRONMENT_VERSION, "environment_profile": self.config["environment_profile"], "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM, "actor_variant": self.config["actor_variant"], "actor_architecture": self.actor_architecture, "actors": self.actors.state_dict(), "critic": self.critic.state_dict(), "config": self.config}, path)
+        torch.save({"environment_version": ENVIRONMENT_VERSION, "environment_profile": self.config["environment_profile"], "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM, "actor_variant": self.config["actor_variant"], "method_variant": self.config["method_variant"], "actor_architecture": self.actor_architecture, "actors": self.actors.state_dict(), "critic": self.critic.state_dict(), "config": self.config}, path)
 
     def checkpoint_state(self) -> dict[str, Any]:
         """Return all state required for an exact continuation of training."""
@@ -202,6 +296,10 @@ class HAPPOTrainer:
             "observation_dim": OBS_DIM,
             "global_state_dim": GLOBAL_STATE_DIM,
             "actor_variant": self.config["actor_variant"],
+            "method_variant": self.config["method_variant"],
+            "agp_lambda": float(self.config["agp_lambda"]),
+            "curriculum_schedule": [list(item) for item in self.curriculum_schedule],
+            "curriculum_total_steps": self.curriculum_total_steps,
             "actor_architecture": self.actor_architecture,
             "environment_config": deepcopy(self.environment_config),
             "trainer_config": deepcopy(self.config),
@@ -219,6 +317,9 @@ class HAPPOTrainer:
                 "environment_states": self.vector_env.get_env_states(),
                 "vector_reset_counts": self.vector_env.reset_counts.copy(),
                 "vector_base_seed": self.vector_env.base_seed,
+                "current_blue_modes": list(self.current_blue_modes),
+                "mode_transition_counts": deepcopy(self.mode_transition_counts),
+                "mode_episode_counts": deepcopy(self.mode_episode_counts),
             },
         }
 
@@ -235,6 +336,23 @@ class HAPPOTrainer:
             raise RuntimeError("incompatible HAPPO checkpoint environment contract")
         self._validate_actor_architecture(data)
         saved_config = data.get("trainer_config", data.get("config", {}))
+        checkpoint_method = data.get("method_variant", saved_config.get("method_variant", "baseline"))
+        if checkpoint_method != self.config["method_variant"]:
+            raise RuntimeError(
+                f"resume method mismatch: checkpoint={checkpoint_method!r} "
+                f"current={self.config['method_variant']!r}"
+            )
+        if self.agp_enabled:
+            checkpoint_lambda = data.get("agp_lambda", saved_config.get("agp_lambda"))
+            if checkpoint_lambda is None or float(checkpoint_lambda) != float(self.config["agp_lambda"]):
+                raise RuntimeError("resume AGP lambda mismatch")
+        if self.curriculum_enabled:
+            checkpoint_schedule = data.get("curriculum_schedule", saved_config.get("curriculum_schedule"))
+            checkpoint_total = data.get("curriculum_total_steps", saved_config.get("curriculum_total_steps"))
+            if checkpoint_schedule is None or normalized_schedule(checkpoint_schedule) != self.curriculum_schedule:
+                raise RuntimeError("resume curriculum schedule mismatch")
+            if checkpoint_total is None or int(checkpoint_total) != int(self.curriculum_total_steps):
+                raise RuntimeError("resume curriculum total steps mismatch")
         for field in RESUME_CONFIG_FIELDS:
             checkpoint_value = saved_config.get(field)
             current_value = self.config.get(field)
@@ -263,7 +381,26 @@ class HAPPOTrainer:
             np.asarray(rollout["vector_reset_counts"], dtype=np.int64),
             rollout.get("vector_base_seed"),
         )
+        if "current_blue_modes" in rollout:
+            modes = [str(mode) for mode in rollout["current_blue_modes"]]
+        else:
+            modes = [str(state["blue_episode_mode"]) for state in rollout["environment_states"]]
+        if len(modes) != int(self.config["num_envs"]):
+            raise RuntimeError("checkpoint current_blue_modes shape mismatch")
+        self.current_blue_modes = modes
+        exposure_fields = ("mode_transition_counts", "mode_episode_counts")
+        if self.config["method_variant"] != "baseline" and any(field not in rollout for field in exposure_fields):
+            raise RuntimeError("method checkpoint is missing mode exposure state")
+        self.mode_transition_counts = {
+            mode: int(rollout.get("mode_transition_counts", {}).get(mode, 0))
+            for mode in ("nearest", "mav_priority")
+        }
+        self.mode_episode_counts = {
+            mode: int(rollout.get("mode_episode_counts", {}).get(mode, 0))
+            for mode in ("nearest", "mav_priority")
+        }
         self.env_steps = int(data["sampled_steps"])
+        self.last_rollout_metrics = self._empty_rollout_metrics(self._curriculum_probability(self.env_steps))
         return self.env_steps
 
     def load(self, path: str | Path) -> None:

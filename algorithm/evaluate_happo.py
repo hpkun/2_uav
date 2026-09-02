@@ -51,6 +51,9 @@ def main() -> None:
     actor_variant = payload.get("actor_variant", trainer_config.get("actor_variant", "vanilla"))
     if actor_variant != "vanilla":
         raise RuntimeError("incompatible actor architecture: vanilla evaluator requires a vanilla checkpoint")
+    method_variant = payload.get("method_variant", trainer_config.get("method_variant", "baseline"))
+    if method_variant not in ("baseline", "agp", "curriculum", "agp_curriculum"):
+        raise RuntimeError(f"unsupported HAPPO method_variant: {method_variant!r}")
     actors = IndependentActors(hidden_dim=int(trainer_config["hidden_dim"])).to(device)
     actors.load_state_dict(payload["actors"])
     actors.eval()
@@ -69,6 +72,7 @@ def main() -> None:
         )
         rows.append({
             "checkpoint": checkpoint.name, "sampled_steps": int(payload.get("sampled_steps", 0)),
+            "method_variant": method_variant,
             "blue_mode": mode, "training_profile": training_profile,
             "evaluation_profile": args.profile, "episodes": args.episodes,
             **summarize_records(records),
@@ -84,7 +88,8 @@ def main() -> None:
     with summary_path.open("w", encoding="utf-8") as stream:
         json.dump({
             "checkpoint": str(checkpoint), "training_profile": training_profile,
-            "evaluation_profile": args.profile, "device": device, "results": rows,
+            "evaluation_profile": args.profile, "method_variant": method_variant,
+            "device": device, "results": rows,
         }, stream, indent=2, ensure_ascii=False)
     print({"evaluation_csv": str(csv_path), "summary_json": str(summary_path), "results": rows}, flush=True)
 
