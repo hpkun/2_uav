@@ -41,7 +41,7 @@ Valid altitude is 1-20 km; x and y are each +/-100 km. A Red UAV leaving the vol
 
 MAV direct sensing range is 12,000 m and UAV direct sensing range is 8,000 m. For an alive Red `i` and alive Blue `j`, `direct_visible(i,j)` is exactly `distance(i,j) <= sensor_range(type_i)`. There is no FOV, noise, delay, probability or memory.
 
-`team_visible(j)` is true when any alive Red directly sees Blue `j`. For agent `i`, `datalink_visible(i,j) = team_visible(j) and not direct_visible(i,j)`. Direct or datalink visibility exposes the Blue geometry; otherwise its relative position, distance, ATA and AA are zero. The real alive bit remains present. Red teammate state is always available. Blue's fixed policy continues to use true Red state.
+`team_visible(j)` is true when any alive Red directly sees Blue `j`. For agent `i`, `datalink_visible(i,j) = team_visible(j) and not direct_visible(i,j)`. Direct or datalink visibility exposes the Blue geometry and relative motion; otherwise its relative position, distance, relative velocity, ATA and AA are zero. The real alive bit remains present. Red teammate state is always available. Blue's fixed policy continues to use true Red state.
 
 ## Observation and centralized state
 

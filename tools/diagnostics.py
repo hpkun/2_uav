@@ -41,7 +41,7 @@ OBSERVATION_GROUPS: dict[str, tuple[int, ...]] = {
     "friendly_distance": (14, 25),
     "friendly_relative_velocity": (15, 16, 17, 26, 27, 28),
     "friendly_alive_type": (18, 19, 20, 21, 29, 30, 31, 32),
-    "enemy_relative_position": (33, 34, 35, 44, 45, 46),
+    "enemy_relative_position": (33, 34, 35, 47, 48, 49),
     "enemy_distance": (36, 50), "enemy_relative_velocity": (37, 38, 39, 51, 52, 53),
     "enemy_ata": (40, 54), "enemy_aa": (41, 55), "enemy_alive": (42, 56),
     "enemy_visibility": (43, 44, 57, 58),

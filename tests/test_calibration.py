@@ -16,6 +16,7 @@ from tools.diagnostics import (
 from algorithm.mappo import MAPPOTrainer
 from algorithm.common.buffer import RolloutBuffer
 from env.mavuav import HeterogeneousMAVUAVAirCombatEnv, load_environment_config
+from tools.diagnostics import OBSERVATION_GROUPS
 
 
 def tiny_trainer(seed=1, device="cpu", profile="main"):
@@ -48,6 +49,11 @@ def test_observation_statistics_are_finite_and_cover_groups():
     assert len([row for row in rows if row["row_type"] == "feature"]) == OBS_DIM
     assert any(row["feature"] == "enemy_distance" for row in rows)
     assert all(np.isfinite(row[key]) for row in rows for key in ("mean", "std", "min", "max", "p01", "p99"))
+
+
+def test_v22_enemy_observation_groups_use_canonical_indices():
+    assert OBSERVATION_GROUPS["enemy_relative_position"] == (33, 34, 35, 47, 48, 49)
+    assert OBSERVATION_GROUPS["enemy_relative_velocity"] == (37, 38, 39, 51, 52, 53)
 
 
 def test_compact_diagnostics_preserve_statistics_without_raw_action_history():
