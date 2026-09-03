@@ -17,10 +17,10 @@ def observations(batch: int = 6) -> torch.Tensor:
     values = torch.randn(batch, OBS_DIM, generator=generator) * 0.2
     values[:, 7:10] = torch.tensor([1.0, 0.0, 0.0])
     values[:, (11 + 7, 22 + 7)] = 1.0
-    for start in (33, 44):
-        values[:, start + 6] = 1.0
-        values[:, start + 7] = 1.0
-        values[:, start + 8] = 0.0
+    for start in (33, 47):
+        values[:, start + 9] = 1.0
+        values[:, start + 10] = 1.0
+        values[:, start + 11] = 0.0
     return values
 
 
@@ -55,12 +55,12 @@ def test_structured_uniform_observation_masks_match_hrta_semantics():
     obs = observations(5)
     # Both eligible; Blue1 alive but invisible; Blue1 dead with stale visibility;
     # Blue1 direct-visible only; Blue1 datalink-visible only. Blue2 is disabled after row 0.
-    obs[1:, 44 + 6] = 0.0
-    obs[1, 33 + 7] = obs[1, 33 + 8] = 0.0
-    obs[2, 33 + 6] = 0.0
-    obs[2, 33 + 7] = 1.0
-    obs[3, 33 + 7], obs[3, 33 + 8] = 1.0, 0.0
-    obs[4, 33 + 7], obs[4, 33 + 8] = 0.0, 1.0
+    obs[1:, 47 + 9] = 0.0
+    obs[1, 33 + 10] = obs[1, 33 + 11] = 0.0
+    obs[2, 33 + 9] = 0.0
+    obs[2, 33 + 10] = 1.0
+    obs[3, 33 + 10], obs[3, 33 + 11] = 1.0, 0.0
+    obs[4, 33 + 10], obs[4, 33 + 11] = 0.0, 1.0
     obs[3, 11 + 7], obs[3, 22 + 7] = 1.0, 0.0
     obs[4, 11 + 7], obs[4, 22 + 7] = 0.0, 0.0
     features, diagnostics = StructuredUniformActor().encode(obs)
@@ -99,8 +99,8 @@ def _hrta_forced_uniform_distribution(actor: HRTAActor, obs: torch.Tensor) -> No
     friend_context, _ = masked_uniform_pool(friend_embeddings, friend_blocks[..., 7] > 0.5)
     enemy_embeddings = actor.enemy_encoder(enemy_blocks)
     enemy_mask = (
-        (enemy_blocks[..., 6] > 0.5)
-        & ((enemy_blocks[..., 7] > 0.5) | (enemy_blocks[..., 8] > 0.5))
+        (enemy_blocks[..., 9] > 0.5)
+        & ((enemy_blocks[..., 10] > 0.5) | (enemy_blocks[..., 11] > 0.5))
     )
     enemy_context, _ = masked_uniform_pool(enemy_embeddings, enemy_mask)
     features = torch.cat((self_embedding, role_embedding, friend_context, enemy_context), dim=-1)
@@ -118,12 +118,12 @@ def test_structured_uniform_matches_hrta_forced_uniform_intervention():
 
     obs = observations(6)
     # Rows cover two, first-only, second-only, zero, alive-invisible and dead-visible.
-    obs[1, 44 + 6] = 0.0
-    obs[2, 33 + 6] = 0.0
-    obs[3, (33 + 6, 44 + 6)] = 0.0
-    obs[4, 33 + 7] = obs[4, 33 + 8] = 0.0
-    obs[5, 33 + 6] = 0.0
-    obs[5, 33 + 7] = 1.0
+    obs[1, 47 + 9] = 0.0
+    obs[2, 33 + 9] = 0.0
+    obs[3, (33 + 9, 47 + 9)] = 0.0
+    obs[4, 33 + 10] = obs[4, 33 + 11] = 0.0
+    obs[5, 33 + 9] = 0.0
+    obs[5, 33 + 10] = 1.0
     obs[1, 22 + 7] = 0.0
     obs[2, 11 + 7] = 0.0
     obs[3, (11 + 7, 22 + 7)] = 0.0

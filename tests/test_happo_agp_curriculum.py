@@ -24,7 +24,7 @@ DISTANCE_SCALE = 12_000.0
 
 
 def _observations(*, red_alive: tuple[bool, bool, bool] = (True, True, True)) -> np.ndarray:
-    observations = np.zeros((1, 3, 55), dtype=np.float32)
+    observations = np.zeros((1, 3, 61), dtype=np.float32)
     for agent, alive in enumerate(red_alive):
         observations[0, agent, 6] = float(alive)
     return observations
@@ -45,12 +45,12 @@ def _set_blue(
 ) -> None:
     start = (33, 44)[blue]
     observations[0, red, start + 3] = distance / DISTANCE_SCALE
-    observations[0, red, start + 4] = ata / 180.0
-    observations[0, red, start + 5] = aa / 180.0
-    observations[0, red, start + 6] = float(alive)
-    observations[0, red, start + 7] = float(direct)
-    observations[0, red, start + 8] = float(datalink)
-    observations[0, red, start + 10] = float(killed)
+    observations[0, red, start + 7] = ata / 180.0
+    observations[0, red, start + 8] = aa / 180.0
+    observations[0, red, start + 9] = float(alive)
+    observations[0, red, start + 10] = float(direct)
+    observations[0, red, start + 11] = float(datalink)
+    observations[0, red, start + 13] = float(killed)
 
 
 def _short_config(max_steps: int = 1) -> dict:
@@ -107,9 +107,9 @@ def test_team_potential_observation_contract_visibility_liveness_and_fixed_norma
     dead_red = _observations(red_alive=(False, False, False))
     _set_blue(dead_red, 0, 0)
     assert team_potential_from_observations(dead_red, DISTANCE_SCALE)[0] == 0.0
-    assert team_potential_from_observations(np.zeros((2, 3, 55), dtype=np.float32), DISTANCE_SCALE).shape == (2,)
-    with pytest.raises(ValueError, match=r"\[B, 3, 55\]"):
-        team_potential_from_observations(np.zeros((3, 55), dtype=np.float32), DISTANCE_SCALE)
+    assert team_potential_from_observations(np.zeros((2, 3, 61), dtype=np.float32), DISTANCE_SCALE).shape == (2,)
+    with pytest.raises(ValueError, match=r"\[B, 3, 61\]"):
+        team_potential_from_observations(np.zeros((3, 61), dtype=np.float32), DISTANCE_SCALE)
 
 
 def test_agp_terminal_zeroes_auto_reset_successor_and_scale_is_exact():

@@ -1,4 +1,4 @@
-"""Heterogeneous Role-Target Attention actor for structured 55D observations.
+"""Heterogeneous Role-Target Attention actor for structured 61D observations.
 
 This optional module is intentionally independent from the vanilla HAPPO
 trainer.  It changes actor representation only and preserves the existing
@@ -18,13 +18,13 @@ from env.mavuav import OBS_DIM
 
 SELF_SLICE = slice(0, 11)
 FRIEND_SLICES = (slice(11, 22), slice(22, 33))
-ENEMY_SLICES = (slice(33, 44), slice(44, 55))
+ENEMY_SLICES = (slice(33, 47), slice(47, 61))
 
 SELF_TYPE_SLICE = slice(7, 10)
 FRIEND_ALIVE_INDEX = 7
-ENEMY_ALIVE_INDEX = 6
-ENEMY_DIRECT_VISIBLE_INDEX = 7
-ENEMY_DATALINK_VISIBLE_INDEX = 8
+ENEMY_ALIVE_INDEX = 9
+ENEMY_DIRECT_VISIBLE_INDEX = 10
+ENEMY_DATALINK_VISIBLE_INDEX = 11
 
 
 class _EntityEncoder(nn.Module):
@@ -48,7 +48,14 @@ class FriendEncoder(_EntityEncoder):
 
 
 class EnemyEncoder(_EntityEncoder):
-    """Shared encoder for both 11D Blue blocks."""
+    """Shared encoder for both 14D Blue blocks."""
+
+    def __init__(self, entity_dim: int) -> None:
+        nn.Module.__init__(self)
+        self.network = nn.Sequential(
+            nn.Linear(14, entity_dim), nn.Tanh(),
+            nn.Linear(entity_dim, entity_dim), nn.Tanh(),
+        )
 
 
 def _masked_single_head_attention(

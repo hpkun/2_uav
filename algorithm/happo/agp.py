@@ -5,15 +5,15 @@ import numpy as np
 
 
 SELF_ALIVE_INDEX = 6
-ENEMY_BLOCK_STARTS = (33, 44)
+ENEMY_BLOCK_STARTS = (33, 47)
 ENEMY_DISTANCE_OFFSET = 3
-ENEMY_ATA_OFFSET = 4
-ENEMY_AA_OFFSET = 5
-ENEMY_ALIVE_OFFSET = 6
-ENEMY_DIRECT_OFFSET = 7
-ENEMY_DATALINK_OFFSET = 8
-ENEMY_KILLED_OFFSET = 10
-EXPECTED_OBSERVATION_SHAPE = (3, 55)
+ENEMY_ATA_OFFSET = 7
+ENEMY_AA_OFFSET = 8
+ENEMY_ALIVE_OFFSET = 9
+ENEMY_DIRECT_OFFSET = 10
+ENEMY_DATALINK_OFFSET = 11
+ENEMY_KILLED_OFFSET = 13
+EXPECTED_OBSERVATION_SHAPE = (3, 61)
 
 
 def _sigmoid(value: np.ndarray | float) -> np.ndarray:
@@ -51,10 +51,10 @@ def pair_potential(
 
 
 def team_potential_from_observations(observations: np.ndarray, distance_scale: float) -> np.ndarray:
-    """Parse the stable [B, 3, 55] actor-observation contract into team potential."""
+    """Parse the stable [B, 3, 61] actor-observation contract into team potential."""
     values = np.asarray(observations, dtype=np.float64)
     if values.ndim != 3 or values.shape[1:] != EXPECTED_OBSERVATION_SHAPE:
-        raise ValueError(f"observations must have shape [B, 3, 55], got {values.shape}")
+        raise ValueError(f"observations must have shape [B, 3, 61], got {values.shape}")
     if not np.isfinite(values).all():
         raise ValueError("observations contain non-finite values")
     if float(distance_scale) <= 0.0:

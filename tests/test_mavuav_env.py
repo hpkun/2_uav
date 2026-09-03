@@ -3,6 +3,7 @@ import numpy as np
 
 from env.blue_policy import BLUE_ACTION_CANDIDATES, BluePolicy
 from env.dynamics import integrate_interval, map_normalized_action
+from env.geometry import compute_pairwise_geometry
 from env.mavuav import BLUE_IDS, ENVIRONMENT_VERSION, HeterogeneousMAVUAVAirCombatEnv, load_environment_config
 from env.models import AircraftState
 from env.reward import (
@@ -106,7 +107,7 @@ def test_blue_escape_does_not_count_as_red_kill():
 def test_observation_global_state_active_masks_and_finiteness():
     e = env(); e.entities["UAV1"].state.alive = False
     observations = e._observations()
-    assert all(value.shape == (55,) for value in observations.values())
+    assert all(value.shape == (61,) for value in observations.values())
     assert e.global_state().shape == (67,)
     assert np.array_equal(e.active_masks, [1, 0, 1])
     assert all(np.all(np.isfinite(value)) for value in observations.values()) and np.all(np.isfinite(e.global_state()))
@@ -199,15 +200,15 @@ def test_sensor_heterogeneity_and_reliable_datalink_masking():
     assert e.direct_visible("MAV", "Blue1")
     assert not e.direct_visible("UAV1", "Blue1")
     assert e.datalink_visible("UAV1", "Blue1")
-    uav_enemy = e._observations()["UAV1"][33:44]
-    assert uav_enemy[7] == 0.0 and uav_enemy[8] == 1.0
-    assert np.any(uav_enemy[:6] != 0.0)
+    uav_enemy = e._observations()["UAV1"][33:47]
+    assert uav_enemy[10] == 0.0 and uav_enemy[11] == 1.0
+    assert np.any(uav_enemy[:9] != 0.0)
     e.entities["Blue1"].state.x = 20_000.0
     e.entities["UAV2"].state.x = -20_000.0
     assert not e.team_visible("Blue1")
-    masked = e._observations()["UAV1"][33:44]
-    assert np.array_equal(masked[:6], np.zeros(6))
-    assert masked[6] == 1.0 and masked[7] == masked[8] == 0.0
+    masked = e._observations()["UAV1"][33:47]
+    assert np.array_equal(masked[:9], np.zeros(9))
+    assert masked[9] == 1.0 and masked[10] == masked[11] == 0.0
 
 
 def test_observation_one_hot_streak_time_and_distance_normalization():
@@ -222,7 +223,7 @@ def test_observation_one_hot_streak_time_and_distance_normalization():
     assert np.array_equal(observation[7:10], [1.0, 0.0, 0.0])
     assert np.isclose(observation[10], 15 / 75)
     assert np.isclose(observation[36], 1000 / 12000)
-    assert np.isclose(observation[42], 2 / 3)
+    assert np.isclose(observation[45], 2 / 3)
     e.entities["Blue1"].state.x = 3000.0
     assert np.isclose(e._observations()["MAV"][36], 3000 / 12000)
 
@@ -326,11 +327,34 @@ def test_red_win_requires_both_blue_attack_killed_and_mav_alive():
     e._red_attack_kills.add("Blue2"); assert e._termination()[2] == "red"
 
 
-def test_observation_shape_is_55():
-    assert all(x.shape == (55,) for x in env()._observations().values())
+def test_observation_shape_is_61():
+    assert all(x.shape == (61,) for x in env()._observations().values())
 
 
 def test_global_state_shape_is_67(): assert env().global_state().shape == (67,)
+
+
+def test_enemy_relative_velocity_uses_blue_minus_red_for_both_blues():
+    e = env()
+    e.entities["MAV"].state = AircraftState(0.0, 0.0, 5000.0, 200.0, 0.0, 0.0, True)
+    e.entities["Blue1"].state = AircraftState(2000.0, 0.0, 5000.0, 300.0, 0.0, 0.0, True)
+    e.entities["Blue2"].state = AircraftState(2500.0, 0.0, 5000.0, 250.0, 0.0, np.pi, True)
+    observation = e._observations()["MAV"]
+    scale = e.config["normalization"]["relative_velocity_scale"]
+    for blue_id, start in (("Blue1", 33), ("Blue2", 47)):
+        geometry = compute_pairwise_geometry(e.entities["MAV"].state, e.entities[blue_id].state)
+        expected = np.clip(geometry.relative_velocity / scale, -1.0, 1.0)
+        np.testing.assert_allclose(observation[start + 4:start + 7], expected)
+    assert observation[37] > 0.0
+
+
+def test_dead_or_invisible_enemy_masks_relative_velocity():
+    e = env()
+    e.entities["Blue1"].state.x = 20_000.0
+    e.entities["Blue2"].state.alive = False
+    observation = e._observations()["MAV"]
+    assert np.array_equal(observation[33:42], np.zeros(9))
+    assert np.array_equal(observation[47:56], np.zeros(9))
 
 
 def test_active_masks_after_uav_death():

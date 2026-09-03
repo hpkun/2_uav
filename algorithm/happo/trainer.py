@@ -333,7 +333,7 @@ class HAPPOTrainer:
         expected = (ENVIRONMENT_VERSION, OBS_DIM, GLOBAL_STATE_DIM)
         actual = (data.get("environment_version"), data.get("observation_dim"), data.get("global_state_dim"))
         if actual != expected:
-            raise RuntimeError("incompatible HAPPO checkpoint environment contract")
+            raise RuntimeError("incompatible checkpoint contract for HAPPO environment")
         self._validate_actor_architecture(data)
         saved_config = data.get("trainer_config", data.get("config", {}))
         checkpoint_method = data.get("method_variant", saved_config.get("method_variant", "baseline"))

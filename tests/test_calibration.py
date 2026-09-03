@@ -44,7 +44,8 @@ def test_observation_statistics_are_finite_and_cover_groups():
     buffer = RolloutBuffer(2, 1); buffer.observations[:] = np.linspace(-1, 1, buffer.observations.size).reshape(buffer.observations.shape)
     diagnostics = TrainingDiagnostics(); diagnostics.observe_rollout(buffer)
     rows = diagnostics.observation_rows("mappo", 1, 2)
-    assert len([row for row in rows if row["row_type"] == "feature"]) == 55
+    from env.mavuav import OBS_DIM
+    assert len([row for row in rows if row["row_type"] == "feature"]) == OBS_DIM
     assert any(row["feature"] == "enemy_distance" for row in rows)
     assert all(np.isfinite(row[key]) for row in rows for key in ("mean", "std", "min", "max", "p01", "p99"))
 
@@ -71,7 +72,7 @@ def test_legacy_diagnostics_are_compacted_when_loaded():
     actions = np.asarray([[[1.0, 0.0, -0.5], [0.5, 0.25, 0.0], [-1.0, 0.0, 0.5]]], dtype=np.float32)
     legacy = {
         "max_observation_samples": 1,
-        "observation_batches": [np.zeros((1, 55), dtype=np.float32)],
+        "observation_batches": [np.zeros((1, 61), dtype=np.float32)],
         "action_batches": [actions],
         "active_mask_batches": [np.ones((1, 3), dtype=np.float32)],
         "observation_sample_count": 1,
@@ -180,7 +181,7 @@ def test_cuda_calibration_checkpoint_restores_cpu_and_cuda_rng_state(tmp_path: P
     save_calibration_checkpoint(checkpoint, trainer, "mappo", 2, diagnostics)
     restored = tiny_trainer(seed=22, device="cuda")
     sampled_steps, _ = load_calibration_checkpoint(checkpoint, restored, "mappo")
-    assert sampled_steps == 2 and restored.observations.shape[-1] == 55 and restored.global_states.shape[-1] == 67
+    assert sampled_steps == 2 and restored.observations.shape[-1] == 61 and restored.global_states.shape[-1] == 67
     trainer.close(); restored.close()
 
 

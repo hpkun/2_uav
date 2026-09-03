@@ -31,8 +31,8 @@ OBSERVATION_FEATURES = (
     "self_type_MAV", "self_type_UAV", "self_type_Blue", "time_fraction",
     "friend1_dx", "friend1_dy", "friend1_dh", "friend1_distance", "friend1_dvx", "friend1_dvy", "friend1_dvh", "friend1_alive", "friend1_type_MAV", "friend1_type_UAV", "friend1_type_Blue",
     "friend2_dx", "friend2_dy", "friend2_dh", "friend2_distance", "friend2_dvx", "friend2_dvy", "friend2_dvh", "friend2_alive", "friend2_type_MAV", "friend2_type_UAV", "friend2_type_Blue",
-    "blue1_dx", "blue1_dy", "blue1_dh", "blue1_distance", "blue1_ata", "blue1_aa", "blue1_alive", "blue1_direct_visible", "blue1_datalink_visible", "blue1_own_attack_streak", "blue1_killed_by_red",
-    "blue2_dx", "blue2_dy", "blue2_dh", "blue2_distance", "blue2_ata", "blue2_aa", "blue2_alive", "blue2_direct_visible", "blue2_datalink_visible", "blue2_own_attack_streak", "blue2_killed_by_red",
+    "blue1_dx", "blue1_dy", "blue1_dh", "blue1_distance", "blue1_dvx", "blue1_dvy", "blue1_dvh", "blue1_ata", "blue1_aa", "blue1_alive", "blue1_direct_visible", "blue1_datalink_visible", "blue1_own_attack_streak", "blue1_killed_by_red",
+    "blue2_dx", "blue2_dy", "blue2_dh", "blue2_distance", "blue2_dvx", "blue2_dvy", "blue2_dvh", "blue2_ata", "blue2_aa", "blue2_alive", "blue2_direct_visible", "blue2_datalink_visible", "blue2_own_attack_streak", "blue2_killed_by_red",
 )
 OBSERVATION_GROUPS: dict[str, tuple[int, ...]] = {
     "self_position": (0, 1), "self_altitude": (2,), "self_speed": (3,),
@@ -42,9 +42,10 @@ OBSERVATION_GROUPS: dict[str, tuple[int, ...]] = {
     "friendly_relative_velocity": (15, 16, 17, 26, 27, 28),
     "friendly_alive_type": (18, 19, 20, 21, 29, 30, 31, 32),
     "enemy_relative_position": (33, 34, 35, 44, 45, 46),
-    "enemy_distance": (36, 47), "enemy_ata": (37, 48), "enemy_aa": (38, 49),
-    "enemy_alive": (39, 50), "enemy_visibility": (40, 41, 51, 52),
-    "enemy_own_attack_streak": (42, 53), "enemy_killed_by_red": (43, 54),
+    "enemy_distance": (36, 50), "enemy_relative_velocity": (37, 38, 39, 51, 52, 53),
+    "enemy_ata": (40, 54), "enemy_aa": (41, 55), "enemy_alive": (42, 56),
+    "enemy_visibility": (43, 44, 57, 58),
+    "enemy_own_attack_streak": (45, 59), "enemy_killed_by_red": (46, 60),
 }
 
 

@@ -1,6 +1,6 @@
 # Environment specification
 
-The active contract is `heterogeneous_mavuav_3v2_v2_1`.
+The active contract is `heterogeneous_mavuav_3v2_v2_2`.
 
 ## Entities and task
 
@@ -45,7 +45,9 @@ MAV direct sensing range is 12,000 m and UAV direct sensing range is 8,000 m. Fo
 
 ## Observation and centralized state
 
-Each Red agent has a stable 55D observation. Self 11D is `[x,y,h,v,theta,psi,alive,type_MAV,type_UAV,type_Blue,time_fraction]`. Two teammate blocks follow stable `RED_IDS` order while skipping self; each 11D block is `[dx,dy,dh,distance,dvx,dvy,dvh,alive,type_MAV,type_UAV,type_Blue]`. Blue1 and Blue2 each contribute `[dx,dy,dh,distance,ATA,AA,alive,direct_visible,datalink_visible,own_attack_streak,killed_by_red]`. Attack streak is divided by `hold_steps`; time is `step_count/75`.
+Each Red agent has a stable 61D observation. Self 11D is `[x,y,h,v,theta,psi,alive,type_MAV,type_UAV,type_Blue,time_fraction]`. Two teammate blocks follow stable `RED_IDS` order while skipping self; each 11D block is `[dx,dy,dh,distance,dvx,dvy,dvh,alive,type_MAV,type_UAV,type_Blue]`. Blue1 and Blue2 each contribute `[dx,dy,dh,distance,dvx,dvy,dvh,ATA,AA,alive,direct_visible,datalink_visible,own_attack_streak,killed_by_red]`. Attack streak is divided by `hold_steps`; time is `step_count/75`.
+
+The actor layout is `self[0:11]`, `friend1[11:22]`, `friend2[22:33]`, `Blue1[33:47]`, and `Blue2[47:61]`. Enemy relative velocity is `Blue_velocity - own_Red_velocity`, normalized by the existing `relative_velocity_scale`. For an invisible or dead Blue, the nine geometry/motion values through ATA/AA are zero while status flags retain their existing semantics. This v2.2 change exposes enemy relative velocity to test whether explicit relative-motion information improves learnability and seed robustness; it does not claim to solve the nearest task before retraining.
 
 The critic receives a 67D state. Five entity blocks are `[x,y,h,v,theta,psi,alive,type_MAV,type_UAV,type_Blue]` (50D). They are followed by the normalized streaks for six Red-to-Blue pairs and six Blue-to-Red pairs in entity slot order (12D), Blue1/Blue2 `killed_by_red` flags (2D), actual episode-mode one-hot `[nearest,mav_priority]` (2D), and time fraction (1D). This includes the nonphysical state needed to determine transitions and termination. The active mask remains `[MAV,UAV1,UAV2]`; dead UAV actions are ignored and their actor samples are masked.
 

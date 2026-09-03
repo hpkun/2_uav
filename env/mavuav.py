@@ -23,8 +23,8 @@ TYPE_ONE_HOT = {
     "UAV": (0.0, 1.0, 0.0),
     "Blue": (0.0, 0.0, 1.0),
 }
-ENVIRONMENT_VERSION = "heterogeneous_mavuav_3v2_v2_1"
-OBS_DIM = 55
+ENVIRONMENT_VERSION = "heterogeneous_mavuav_3v2_v2_2"
+OBS_DIM = 61
 GLOBAL_STATE_DIM = 67
 CROSS_TEAM_ATTACK_PAIRS = tuple((red, blue) for red in RED_IDS for blue in BLUE_IDS) + tuple(
     (blue, red) for blue in BLUE_IDS for red in RED_IDS
@@ -438,8 +438,8 @@ class HeterogeneousMAVUAVAirCombatEnv:
         for own_id in RED_IDS:
             own = self.entities[own_id]
             state = own.state
-            # Stable 55D contract: self 11D, two Red teammates 11D each,
-            # then Blue1/Blue2 enemy blocks 11D each.
+            # Stable 61D contract: self 11D, two Red teammates 11D each,
+            # then Blue1/Blue2 enemy blocks 14D each.
             values = [
                 self._self_xy_norm(state.x), self._self_xy_norm(state.y), self._altitude_norm(state.h),
                 float(np.clip(state.v / 400.0, 0.0, 1.0)), state.theta / np.pi, state.psi / np.pi,
@@ -463,10 +463,11 @@ class HeterogeneousMAVUAVAirCombatEnv:
                     geometry = compute_pairwise_geometry(state, blue.state)
                     enemy_geometry = [
                         *self._relative_position_values(geometry.relative_position), self._distance_norm(geometry.distance),
+                        *self._relative_velocity_values(geometry.relative_velocity),
                         geometry.ata / np.pi, geometry.aa / np.pi,
                     ]
                 else:
-                    enemy_geometry = [0.0] * 6
+                    enemy_geometry = [0.0] * 9
                 hold_steps = int(self.config["combat"]["hold_steps"])
                 streak = min(self._attack_streak.get((own_id, blue_id), 0), hold_steps) / hold_steps
                 values.extend([

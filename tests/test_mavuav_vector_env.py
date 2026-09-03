@@ -15,7 +15,7 @@ def short_config(max_steps=1):
 def test_vector_env_shapes_and_auto_reset():
     with MAVUAVVectorEnv(2, short_config(), seed=3, randomize=False) as env:
         observations, states, masks, infos = env.reset()
-        assert observations.shape == (2, 3, 55) and states.shape == (2, 67) and masks.shape == (2, 3) and len(infos) == 2
+        assert observations.shape == (2, 3, 61) and states.shape == (2, 67) and masks.shape == (2, 3) and len(infos) == 2
         observations, states, rewards, terminated, truncated, masks, infos = env.step(np.zeros((2, 3, 3)))
         assert rewards.shape == (2, 3) and terminated.shape == truncated.shape == (2,)
         assert truncated.all() and all(info["auto_reset"] and "episode_summary" in info for info in infos)
@@ -25,7 +25,7 @@ def test_vector_env_shapes_and_auto_reset():
 def test_vector_env_shapes():
     with MAVUAVVectorEnv(2, seed=3) as env:
         observations, states, masks, infos = env.reset()
-        assert observations.shape == (2, 3, 55) and states.shape == (2, 67) and masks.shape == (2, 3) and len(infos) == 2
+        assert observations.shape == (2, 3, 61) and states.shape == (2, 67) and masks.shape == (2, 3) and len(infos) == 2
 
 
 def test_vector_env_auto_reset():

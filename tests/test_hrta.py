@@ -12,10 +12,10 @@ def observations(batch: int = 4) -> torch.Tensor:
     values[:, 7:10] = torch.tensor([1.0, 0.0, 0.0])
     for start in (11, 22):
         values[:, start + 7] = 1.0
-    for start in (33, 44):
-        values[:, start + 6] = 1.0
-        values[:, start + 7] = 1.0
-        values[:, start + 8] = 0.0
+    for start in (33, 47):
+        values[:, start + 9] = 1.0
+        values[:, start + 10] = 1.0
+        values[:, start + 11] = 0.0
     return values
 
 
@@ -43,8 +43,8 @@ def test_enemy_attention_two_visible_enemies_is_normalized():
 
 def test_invisible_blue1_is_masked_and_blue2_gets_full_attention():
     obs = observations(3)
-    obs[:, 33 + 7] = 0.0
-    obs[:, 33 + 8] = 0.0
+    obs[:, 33 + 10] = 0.0
+    obs[:, 33 + 11] = 0.0
     attention = HRTAActor().attention_weights(obs)
     assert torch.equal(attention[:, 0], torch.zeros(3))
     assert torch.equal(attention[:, 1], torch.ones(3))
@@ -52,7 +52,7 @@ def test_invisible_blue1_is_masked_and_blue2_gets_full_attention():
 
 def test_dead_blue2_is_masked():
     obs = observations(3)
-    obs[:, 44 + 6] = 0.0
+    obs[:, 47 + 9] = 0.0
     attention = HRTAActor().attention_weights(obs)
     assert torch.equal(attention[:, 0], torch.ones(3))
     assert torch.equal(attention[:, 1], torch.zeros(3))
@@ -60,9 +60,9 @@ def test_dead_blue2_is_masked():
 
 def test_no_visible_blue_returns_zero_attention_and_finite_outputs():
     obs = observations(4)
-    for start in (33, 44):
-        obs[:, start + 7] = 0.0
-        obs[:, start + 8] = 0.0
+    for start in (33, 47):
+        obs[:, start + 10] = 0.0
+        obs[:, start + 11] = 0.0
     actor = HRTAActor()
     features, diagnostics = actor.encode(obs)
     actions, log_prob = actor.sample(obs)

@@ -78,7 +78,7 @@ python algorithm/evaluate_happo.py \
     --blue-mode both
 ```
 
-评估允许训练 profile 与 evaluation profile 不同，用于跨 profile 泛化检查；环境版本、55D observation 和 67D global state contract 仍会严格校验。
+评估允许训练 profile 与 evaluation profile 不同，用于跨 profile 泛化检查；环境版本、61D observation 和 67D global state contract 仍会严格校验。
 
 ## 输出结构
 

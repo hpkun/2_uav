@@ -17,7 +17,7 @@ This project deliberately combines sources and engineering choices; it is not a 
 - Each Red agent uses the maximum situation score over currently Red-team-visible alive Blue aircraft, with no assigned target; no visible target contributes zero.
 - Team dense reward sums the three Red slots and always divides by three.
 - All cross-team attacker-target pairs maintain independent streaks and resolve kills synchronously.
-- Fixed-slot multi-target observation and centralized state, retained as 55D/67D in environment contract `heterogeneous_mavuav_3v2_v2_1`.
+- Fixed-slot multi-target observation and centralized state, using the v2.2 environment contract at 61D/67D; each Blue block includes three Red-relative-velocity values.
 
 ## D. Project engineering parameters
 
@@ -28,7 +28,7 @@ This project deliberately combines sources and engineering choices; it is not a 
 - Synchronous Python vector environment with per-environment auto-reset.
 - Distance-only heterogeneous sensor ranges (MAV 12 km, UAV 8 km).
 - Instantaneous reliable Red datalink and masking of unseen enemy geometry.
-- One-hot type fields and the explicit 55D actor-observation layout.
+- One-hot type fields and the explicit 61D actor-observation layout in v2.2.
 - The 67D centralized state extension containing streaks, Red kill history, actual Blue episode mode and time fraction.
 - Actor normalization scales: 30 km self x/y, 12 km relative x/y and distance, 10 km relative altitude, and 800 m/s relative velocity. Centralized-state x/y instead map the full battlefield bounds linearly to `[-1,1]`.
 - Seeded `main` and `learnability` randomization profiles with team-level and slot-level offsets.

@@ -50,13 +50,13 @@ def evaluate_actors(actors: Any, env_config: str | Path | Mapping[str, Any] | No
                             "friend_attention_friend2": float(friend[1]),
                             "enemy_attention_Blue1": float(enemy[0]),
                             "enemy_attention_Blue2": float(enemy[1]),
-                            "Blue1_alive": int(observation[33 + 6] > 0.5),
-                            "Blue2_alive": int(observation[44 + 6] > 0.5),
+                            "Blue1_alive": int(observation[33 + 9] > 0.5),
+                            "Blue2_alive": int(observation[47 + 9] > 0.5),
                             "Blue1_direct_or_datalink_visible": int(
-                                observation[33 + 7] > 0.5 or observation[33 + 8] > 0.5
+                                observation[33 + 10] > 0.5 or observation[33 + 11] > 0.5
                             ),
                             "Blue2_direct_or_datalink_visible": int(
-                                observation[44 + 7] > 0.5 or observation[44 + 8] > 0.5
+                                observation[47 + 10] > 0.5 or observation[47 + 11] > 0.5
                             ),
                         })
                     action, _ = actor.sample(actor_observation, deterministic=True)

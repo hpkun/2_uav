@@ -4,7 +4,7 @@ import torch
 from algorithm.happo import HAPPOTrainer
 from algorithm.happo.trainer import _restore_cuda_rng_state
 from copy import deepcopy
-from env.mavuav import load_environment_config
+from env.mavuav import ENVIRONMENT_VERSION, GLOBAL_STATE_DIM, OBS_DIM, load_environment_config
 
 
 @pytest.mark.parametrize("profile", ["learnability", "main"])
@@ -13,6 +13,31 @@ def test_happo_trainer_propagates_environment_profile(profile):
     assert trainer.config["environment_profile"] == profile
     assert trainer.vector_env.get_env_states()[0]["profile"] == profile
     trainer.close()
+
+
+def test_v22_observation_contract_and_vanilla_parameter_count():
+    trainer = HAPPOTrainer(config={"num_envs": 1, "rollout_steps": 1, "hidden_dim": 128})
+    assert ENVIRONMENT_VERSION == "heterogeneous_mavuav_3v2_v2_2"
+    assert OBS_DIM == 61 and GLOBAL_STATE_DIM == 67
+    assert all(actor.network[0].in_features == 61 for actor in trainer.actors.actors)
+    assert all(sum(parameter.numel() for parameter in actor.parameters()) == 24838 for actor in trainer.actors.actors)
+    assert sum(sum(parameter.numel() for parameter in actor.parameters()) for actor in trainer.actors.actors) == 74514
+    trainer.close()
+
+
+def test_happo_rejects_legacy_v21_55d_checkpoint(tmp_path):
+    source = HAPPOTrainer(config={"num_envs": 1, "rollout_steps": 1, "hidden_dim": 8})
+    checkpoint = tmp_path / "legacy.pt"
+    source.save_checkpoint(checkpoint)
+    source.close()
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    payload["environment_version"] = "heterogeneous_mavuav_3v2_v2_1"
+    payload["observation_dim"] = 55
+    torch.save(payload, checkpoint)
+    target = HAPPOTrainer(config={"num_envs": 1, "rollout_steps": 1, "hidden_dim": 8})
+    with pytest.raises(RuntimeError, match="incompatible checkpoint contract"):
+        target.load_checkpoint(checkpoint)
+    target.close()
 
 
 def test_happo_checkpoint_rejects_environment_profile_mismatch(tmp_path):
@@ -31,7 +56,7 @@ def test_happo_rollout_gae_sequential_updates_are_finite_and_change_parameters()
     before = [[p.detach().clone() for p in actor.parameters()] for actor in trainer.actors.actors]
     critic_before = [p.detach().clone() for p in trainer.critic.parameters()]
     assert len(trainer.actors.actors) == 3 and len({id(actor) for actor in trainer.actors.actors}) == 3
-    assert all(actor.network[0].in_features == 55 for actor in trainer.actors.actors)
+    assert all(actor.network[0].in_features == 61 for actor in trainer.actors.actors)
     assert trainer.critic.network[0].in_features == 67
     completed = trainer.collect_rollout()
     assert completed and all(record["episode_length"] <= 3 for record in completed)
