@@ -109,6 +109,17 @@ python tools/plot_trajectory.py outputs/<run>/checkpoint_final.pt \
 
 轨迹图片默认直接写入 checkpoint 所在 run folder。诊断辅助函数集中在 `tools/diagnostics.py`，核心环境和 HAPPO trainer 不依赖 `tools/`。
 
+完整 combat replay（建议使用与正式评估 `1000+episode` 隔离的定性种子）：
+
+```bash
+python tools/record_combat_episode.py --checkpoint outputs/<run>/checkpoint_final.pt \
+    --profile main --blue-mode nearest --seed 424242 --output-dir outputs/visualization/example
+python tools/render_combat_episode.py --input-dir outputs/visualization/example
+python tools/render_combat_episode_interactive.py --input-dir outputs/visualization/example
+```
+
+前者只记录真实 decision-boundary 状态；后两者分别生成固定视角 MP4/preview 和可离线双击打开的交互 3D HTML。原有 `plot_trajectory.py` 静态 PNG 用法保持不变。详见 `docs/combat_episode_visualization.md`。
+
 ## 测试
 
 ```bash

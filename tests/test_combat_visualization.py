@@ -1,0 +1,148 @@
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+from pathlib import Path
+
+import numpy as np
+import pytest
+import torch
+
+from algorithm.happo.networks import IndependentActors
+from algorithm.modules.hrta import HRTAIndependentActors
+from algorithm.modules.structured_uniform import StructuredUniformIndependentActors
+from env.mavuav import ENTITY_IDS, ENVIRONMENT_VERSION, GLOBAL_STATE_DIM, OBS_DIM, load_environment_config
+from tools.combat_visualization import (HETERO_COMBAT_TRACE_SCHEMA_VERSION, interpolate_trace_for_visualization,
+                                        shortest_angle_interpolate, validate_raw_trace)
+from tools.record_combat_episode import _event_rows, record_episode
+from tools.render_combat_episode import render_episode
+from tools.render_combat_episode_interactive import APP_JS, render_interactive
+from tools.replay_policy import infer_method_display_name, load_replay_actors
+
+
+def synthetic_trace(frames: int = 3):
+    kin = np.zeros((frames, 5, 6), dtype=np.float64)
+    for f in range(frames):
+        for i in range(5): kin[f, i] = [f*1000+i*100, i*200, 5000+f*100, 200+i*20, .1*f, np.deg2rad(179 if f == 0 else -179)]
+    alive = np.ones((frames, 5), dtype=bool); alive[-1, 3] = False
+    n = frames - 1
+    return {"kinematics":kin,"alive":alive,"steps":np.arange(frames),"time_s":np.arange(frames,dtype=float),
+            "red_actions":np.zeros((n,3,3),np.float32),"team_reward":np.zeros(n),"team_situation":np.zeros(n),
+            "event_reward":np.zeros(n),"terminal_reward":np.zeros(n),
+            "minimum_friendly_red_distance":np.full(n,500.),"red_safe_distance_violation":np.zeros(n,bool)}
+
+
+def synthetic_metadata():
+    config=load_environment_config(None)
+    return {"trace_schema_version":1,"decision_dt":1.,"algorithm":"HAPPO","evaluation_profile":"main",
+            "blue_target_mode":"nearest","entity_types":{"MAV":"MAV","UAV1":"UAV","UAV2":"UAV","Blue1":"Blue","Blue2":"Blue"},
+            "entity_teams":{x:("red" if i<3 else "blue") for i,x in enumerate(ENTITY_IDS)},
+            "aircraft_specs":config["aircraft_specs"],"battlefield":config["battlefield"],
+            "events":[{"trace_frame":2,"time_s":2.,"type":"attack","attacker":"MAV","target":"Blue1"},
+                      {"trace_frame":2,"time_s":2.,"type":"attack","attacker":"UAV1","target":"Blue1"},
+                      {"trace_frame":2,"time_s":2.,"type":"death","entity":"Blue1","cause":"red_attack"}],
+            "outcome":"red","mav_survived":True,"red_uav_survivors":2,"blue_survivors":1,
+            "red_attack_kills":1,"blue_attack_kills":0,"episode_return":12.5,"episode_length":2}
+
+
+def write_trace(path: Path):
+    path.mkdir(); np.savez_compressed(path/"episode_trace.npz",**synthetic_trace())
+    (path/"metadata.json").write_text(json.dumps(synthetic_metadata()),encoding="utf-8")
+
+
+def test_schema_entity_order_altitude_positive_up_and_shapes():
+    assert ENTITY_IDS == ("MAV","UAV1","UAV2","Blue1","Blue2")
+    trace=synthetic_trace();validate_raw_trace(trace)
+    assert trace["kinematics"].shape==(3,5,6) and trace["alive"].shape==(3,5)
+    assert trace["steps"][0]==0 and trace["kinematics"][0,0,2]==5000
+
+
+def test_shortest_angle_and_interpolation_no_future_leakage():
+    mid=shortest_angle_interpolate(np.deg2rad(179),np.deg2rad(-179),.5)
+    assert abs(abs(np.rad2deg(mid))-180)<1e-6
+    trace=synthetic_trace(2);trace["alive"][1,0]=False
+    visual=interpolate_trace_for_visualization(trace,1.,.25)
+    assert np.allclose(visual["kinematics"][2,0,:4],(trace["kinematics"][0,0,:4]+trace["kinematics"][1,0,:4])/2)
+    assert visual["kinematics"][2,0,2]>0 # h stays positive-up, never -h
+    assert visual["alive"][:-1,0].all() and not visual["alive"][-1,0]
+    assert visual["raw_step"].tolist()==[0,0,0,0,1]
+
+
+def test_event_mapping_keeps_attack_pairs_and_boundary_safety():
+    info={"attack_events":[{"attacker":"MAV","target":"Blue1"},{"attacker":"UAV1","target":"Blue1"}],
+          "killed_ids":["Blue1","UAV2"],"death_causes":{"Blue1":"red_attack","UAV2":"boundary"},
+          "red_safe_distance_violation":True,"minimum_friendly_red_distance":83.}
+    events=_event_rows(info,4,4.)
+    assert all(e["trace_frame"]==4 for e in events)
+    assert [(e["attacker"],e["target"]) for e in events if e["type"]=="attack"]==[("MAV","Blue1"),("UAV1","Blue1")]
+    assert not any("killer" in e for e in events)
+    assert {e.get("cause") for e in events} >= {"red_attack","boundary"}
+    assert any(e["type"]=="red_separation_warning" for e in events)
+
+
+@pytest.mark.parametrize("variant",["vanilla","hrta","structured_uniform"])
+def test_policy_loader_variants(tmp_path,variant):
+    architecture={"entity_dim":32,"role_dim":8,"fusion_hidden_dim":64,"action_dim":3}
+    if variant=="vanilla": actors=IndependentActors(hidden_dim=16);config={"hidden_dim":16,"actor_variant":"vanilla"};arch=None
+    elif variant=="hrta": actors=HRTAIndependentActors(**architecture);config={"actor_variant":"hrta"};arch=architecture
+    else: actors=StructuredUniformIndependentActors(**architecture);config={"actor_variant":"structured_uniform"};arch=architecture
+    payload={"environment_version":ENVIRONMENT_VERSION,"observation_dim":OBS_DIM,"global_state_dim":GLOBAL_STATE_DIM,
+             "actor_variant":variant,"method_variant":"baseline","actor_architecture":arch,"trainer_config":config,"actors":actors.state_dict()}
+    path=tmp_path/f"{variant}.pt";torch.save(payload,path);loaded=load_replay_actors(path)
+    assert loaded.actor_variant==variant and loaded.actors.training is False
+    assert set(loaded.actors.state_dict())==set(actors.state_dict())
+
+
+def test_policy_loader_rejects_contract_and_unknown(tmp_path):
+    base={"environment_version":"old","observation_dim":OBS_DIM,"global_state_dim":GLOBAL_STATE_DIM,"actors":{}}
+    p=tmp_path/"bad.pt";torch.save(base,p)
+    with pytest.raises(RuntimeError,match="environment contract"):load_replay_actors(p)
+    base.update(environment_version=ENVIRONMENT_VERSION,actor_variant="mystery",trainer_config={}) ;torch.save(base,p)
+    with pytest.raises(RuntimeError,match="unsupported actor architecture for replay"):load_replay_actors(p)
+
+
+def test_method_names():
+    assert infer_method_display_name("vanilla","baseline")=="HAPPO"
+    assert infer_method_display_name("vanilla","agp_curriculum")=="HAPPO-AGP-Curriculum"
+    assert infer_method_display_name("hrta")=="HAPPO-HRTA"
+    assert infer_method_display_name("structured_uniform")=="HAPPO-Structured-Uniform"
+
+
+def test_deterministic_short_recording(tmp_path):
+    torch.manual_seed(7);actors=IndependentActors(hidden_dim=16)
+    payload={"environment_version":ENVIRONMENT_VERSION,"observation_dim":OBS_DIM,"global_state_dim":GLOBAL_STATE_DIM,
+             "actor_variant":"vanilla","method_variant":"baseline","trainer_config":{"hidden_dim":16},
+             "environment_profile":"learnability","actors":actors.state_dict()}
+    ckpt=tmp_path/"model.pt";torch.save(payload,ckpt);adapter=load_replay_actors(ckpt)
+    cfg=load_environment_config(None);cfg["simulation"]["max_decision_steps"]=2
+    m1=record_episode(adapter,ckpt,tmp_path/"a",profile="learnability",blue_mode="nearest",seed=424242,env_config=cfg)
+    m2=record_episode(adapter,ckpt,tmp_path/"b",profile="learnability",blue_mode="nearest",seed=424242,env_config=cfg)
+    with np.load(tmp_path/"a"/"episode_trace.npz") as a,np.load(tmp_path/"b"/"episode_trace.npz") as b:
+        for key in ("red_actions","kinematics","alive"): assert np.array_equal(a[key],b[key])
+        assert a["kinematics"].shape[0]==m1["episode_length"]+1
+    assert m1["events"]==m2["events"] and m1["outcome"]==m2["outcome"]
+    assert m1["episode_role"]=="qualitative_visualization_only" and not m1["used_for_quantitative_metrics"]
+
+
+def test_preview_and_standalone_html(tmp_path):
+    d=tmp_path/"episode";write_trace(d)
+    result=render_episode(d,preview=d/"preview.png",mp4=False)
+    assert Path(result["preview"]).stat().st_size>1000
+    out=render_interactive(d)
+    html=out.read_text(encoding="utf-8")
+    assert out.stat().st_size>1_000_000 and "cdn.plot.ly" not in html and "scatter3d" in html
+    for token in ("Play","Pause","Previous Frame","Next Frame","Restart","slider","speed","Trail","Headings","Labels","Death markers","Attack lines","Reset Camera","Episode View","Full Battlefield","uirevision","Plotly.newPlot","Plotly.restyle"):
+        assert token in html
+    assert "NaN" not in html and "// APP_JS_START" in html and "// APP_JS_END" in html
+    node=shutil.which("node")
+    if node:
+        js=html.split("// APP_JS_START",1)[1].split("// APP_JS_END",1)[0]
+        path=tmp_path/"application.js";path.write_text("// APP_JS_START"+js,encoding="utf-8")
+        subprocess.run([node,"--check",str(path)],check=True,capture_output=True,text=True)
+
+
+def test_app_js_uses_time_based_event_visibility():
+    assert "t-Number(e.time_s)>=-1e-9" in APP_JS
+    assert "Number(e.time_s) <= t + 1e-9" in APP_JS
+    assert "uirevision" in APP_JS and "currentFrame === n-1" in APP_JS
