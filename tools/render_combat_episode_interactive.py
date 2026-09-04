@@ -89,17 +89,32 @@ async function renderFrame(frameIndex) {
   const ax=[],ay=[],az=[];
   if(options('showAttacks').checked) for(const e of P.events) if(e.type==='attack' && t-Number(e.time_s)>=-1e-9 && t-Number(e.time_s)<=.8+1e-9) { const f=e.trace_frame,a=P.raw_kinematics[f][ids.indexOf(e.attacker)],b=P.raw_kinematics[f][ids.indexOf(e.target)]; ax.push(a[0]/1000,b[0]/1000,null);ay.push(a[1]/1000,b[1]/1000,null);az.push(a[2]/1000,b[2]/1000,null); }
   await Plotly.restyle(graph,{x:[ax],y:[ay],z:[az],visible:options('showAttacks').checked},[idx.attacks]);
-  if(!cameraInteracting) updatePanels(f);
+  return true;
+}
+async function runCombatMutationScheduler() {
+  if(renderBusy)return;
+  renderBusy=true;let failed=false;
+  try {
+    while(true) {
+      if(cameraInteracting)break;
+      if(!renderPending && renderedFrame===logicalFrame)break;
+      renderPending=false;
+      const target=logicalFrame, completed=await renderFrame(target);
+      if(completed)renderedFrame=target;else renderPending=true;
+    }
+  } catch(error) {
+    console.error(error);renderPending=true;failed=true;
+  } finally {
+    renderBusy=false;
+    if(!failed && !cameraInteracting && (renderPending || renderedFrame!==logicalFrame)) {
+      queueMicrotask(runCombatMutationScheduler);
+    }
+  }
 }
 function requestRender() {
   renderPending=true;
-  if(cameraInteracting || renderBusy) return;
-  renderPending=false;renderBusy=true;
-  const target=logicalFrame;
-  renderFrame(target).then(()=>{renderedFrame=target;}).catch(error=>{console.error(error);}).finally(()=>{
-    renderBusy=false;
-    if(!cameraInteracting && (renderPending || renderedFrame!==logicalFrame)) requestRender();
-  });
+  if(cameraInteracting || renderBusy)return;
+  runCombatMutationScheduler();
 }
 function logicalVisualTime(now) {
   if(!playing) return Math.min(P.time_s[n-1],playAnchorVisualTime);
@@ -140,7 +155,7 @@ function beginCameraInteraction() {
 function endCameraInteraction() {
   if(!cameraInteracting || pointerActive || wheelActive)return;
   cameraInteracting=false;
-  if(renderedFrame!==logicalFrame) {updatePanels(logicalFrame);requestRender();}
+  if(renderedFrame!==logicalFrame) {updatePanels(logicalFrame);renderPending=true;requestRender();}
   else renderPending=false;
 }
 async function setView(name,ranges,showGround){
@@ -166,7 +181,7 @@ async function init(){
   data.push({type:'mesh3d',name:'Ground reference',showlegend:false,hoverinfo:'skip',x:[P.episode_ranges.x[0],P.episode_ranges.x[1],P.episode_ranges.x[1],P.episode_ranges.x[0]],y:[P.episode_ranges.y[0],P.episode_ranges.y[0],P.episode_ranges.y[1],P.episode_ranges.y[1]],z:[0,0,0,0],i:[0,0],j:[1,2],k:[2,3],color:'#8d99a6',opacity:.07,flatshading:true});
   const layout={paper_bgcolor:'#f5f7fa',plot_bgcolor:'#fff',margin:{l:0,r:0,t:35,b:0},legend:{x:.01,y:.99,bgcolor:'rgba(255,255,255,.8)'},uirevision:'combat-camera-v1',scene:{xaxis:{title:'X / km',range:P.episode_ranges.x,autorange:false},yaxis:{title:'Y / km',range:P.episode_ranges.y,autorange:false},zaxis:{title:'Altitude / km',range:P.episode_ranges.z,autorange:false},aspectmode:'cube',dragmode:'orbit',camera:P.default_camera}};
   await Plotly.newPlot(graph,data,layout,{responsive:true,displaylogo:false,scrollZoom:true});
-  await renderFrame(0);renderedFrame=0;loading.style.display='none';
+  if(await renderFrame(0))renderedFrame=0;updatePanels(0);loading.style.display='none';
  } catch(error) { console.error(error);loading.className='error';loading.innerHTML=`<b>Interactive replay initialization failed</b><br>${esc(error.message)}<br>Check browser WebGL support.`; }
 }
 options('play').onclick=play;options('pause').onclick=pause;options('restart').onclick=()=>setFrame(0);

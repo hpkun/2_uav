@@ -14,10 +14,10 @@ ENTITY_IDS = ("MAV", "UAV1", "UAV2", "Blue1", "Blue2")
 FEATURES = ("x", "y", "h", "v", "theta", "psi")
 STYLES = {
     "MAV": {"color": "#c5163a", "marker": "diamond", "mpl_marker": "D", "width": 3.0, "dash": "solid"},
-    "UAV1": {"color": "#f28e2b", "marker": "circle", "mpl_marker": "o", "width": 2.0, "dash": "solid"},
-    "UAV2": {"color": "#b5a000", "marker": "circle", "mpl_marker": "o", "width": 2.0, "dash": "solid"},
+    "UAV1": {"color": "#c5163a", "marker": "circle", "mpl_marker": "o", "width": 2.0, "dash": "solid"},
+    "UAV2": {"color": "#c5163a", "marker": "circle", "mpl_marker": "o", "width": 2.0, "dash": "solid"},
     "Blue1": {"color": "#4169e1", "marker": "triangle-up", "mpl_marker": "^", "width": 2.0, "dash": "dash"},
-    "Blue2": {"color": "#00a6c7", "marker": "triangle-up", "mpl_marker": "^", "width": 2.0, "dash": "dash"},
+    "Blue2": {"color": "#4169e1", "marker": "triangle-up", "mpl_marker": "^", "width": 2.0, "dash": "dash"},
 }
 
 

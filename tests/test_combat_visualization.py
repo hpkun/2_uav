@@ -13,7 +13,7 @@ from algorithm.happo.networks import IndependentActors
 from algorithm.modules.hrta import HRTAIndependentActors
 from algorithm.modules.structured_uniform import StructuredUniformIndependentActors
 from env.mavuav import ENTITY_IDS, ENVIRONMENT_VERSION, GLOBAL_STATE_DIM, OBS_DIM, load_environment_config
-from tools.combat_visualization import (HETERO_COMBAT_TRACE_SCHEMA_VERSION, episode_cube_ranges,
+from tools.combat_visualization import (HETERO_COMBAT_TRACE_SCHEMA_VERSION, STYLES, episode_cube_ranges,
                                         interpolate_trace_for_visualization,
                                         shortest_angle_interpolate, validate_raw_trace)
 from tools.record_combat_episode import _event_rows, record_episode
@@ -57,6 +57,8 @@ def test_schema_entity_order_altitude_positive_up_and_shapes():
     trace=synthetic_trace();validate_raw_trace(trace)
     assert trace["kinematics"].shape==(3,5,6) and trace["alive"].shape==(3,5)
     assert trace["steps"][0]==0 and trace["kinematics"][0,0,2]==5000
+    assert {STYLES[x]["color"] for x in ("MAV","UAV1","UAV2")} == {"#c5163a"}
+    assert {STYLES[x]["color"] for x in ("Blue1","Blue2")} == {"#4169e1"}
 
 
 def test_shortest_angle_and_interpolation_no_future_leakage():
@@ -161,6 +163,7 @@ def test_preview_and_standalone_html(tmp_path):
     assert out.stat().st_size>1_000_000 and "<script src=" not in html.lower() and "scatter3d" in html
     for token in ("Play","Pause","Previous Frame","Next Frame","Restart","slider","speed","Trail","Headings","Labels","Death markers","Attack lines","Reset Camera","Episode View","Full Battlefield","uirevision","Plotly.newPlot","Plotly.restyle"):
         assert token in html
+    assert "Adjusting camera" not in html and "temporarily hidden" not in html
     payload_text=html.split("<script>const PAYLOAD=",1)[1].split(";</script>",1)[0]
     payload=json.loads(payload_text)
     spans=[payload["episode_ranges"][axis][1]-payload["episode_ranges"][axis][0] for axis in ("x","y","z")]
@@ -191,17 +194,23 @@ def test_app_js_decouples_logical_playback_rendering_and_camera_interaction(tmp_
                   "endCameraInteraction", "pointerdown", "pointerup", "pointercancel", "wheelEndTimer"):
         assert token in APP_JS
     assert "update().then(()=>" not in APP_JS and "setTimeout(tick" not in APP_JS
+    assert "renderEpoch" not in APP_JS and "hidePending" not in APP_JS
+    assert "hideDynamicCombatTraces" not in APP_JS and "dynamicTraceIndices" not in APP_JS
+    assert "cameraOverlay" not in APP_JS
+    scheduler_body=APP_JS.split("async function runCombatMutationScheduler() {",1)[1].split("function requestRender()",1)[0]
+    assert "const target=logicalFrame, completed=await renderFrame(target)" in scheduler_body
+    assert "if(completed)renderedFrame=target;else renderPending=true" in scheduler_body
+    assert "if(cameraInteracting)break" in scheduler_body
     request_body=APP_JS.split("function requestRender() {",1)[1].split("function logicalVisualTime",1)[0]
-    assert "if(cameraInteracting || renderBusy) return" in request_body
+    assert "if(cameraInteracting || renderBusy)return" in request_body and "renderFrame(" not in request_body
     begin_body=APP_JS.split("function beginCameraInteraction() {",1)[1].split("function endCameraInteraction()",1)[0]
     end_body=APP_JS.split("function endCameraInteraction() {",1)[1].split("async function setView",1)[0]
     assert "Plotly." not in begin_body and "Plotly." not in end_body
-    assert "renderedFrame!==logicalFrame" in end_body and "requestRender()" in end_body
-    assert "hideDynamicCombatTraces" not in APP_JS and "dynamicTraceIndices" not in APP_JS
+    assert "cameraInteracting=true" in begin_body
+    assert "cameraInteracting=false" in end_body and "renderedFrame!==logicalFrame" in end_body
     assert "if(!cameraInteracting)updatePanels(logicalFrame)" in APP_JS
     assert APP_JS.count("await Plotly.restyle(graph") == 6  # 5 render batches + one ground-view update
     assert "dragmode:'orbit'" in APP_JS and "scrollZoom:true" in APP_JS
-    assert "cameraOverlay" not in APP_JS
 
     node=shutil.which("node")
     if node:
