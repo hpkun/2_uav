@@ -80,6 +80,17 @@ python algorithm/evaluate_happo.py \
 
 评估允许训练 profile 与 evaluation profile 不同，用于跨 profile 泛化检查；环境版本、61D observation 和 67D global state contract 仍会严格校验。
 
+## R-HAPPO 基线
+
+R-HAPPO 使用三个独立 GRU Actor，并保持现有 67D centralized MLP Critic 与环境语义不变。训练和独立评估入口为：
+
+```bash
+python algorithm/train_happo_recurrent.py --steps 5000000 --profile main --seed 1 --device cuda --num-envs 16
+python algorithm/evaluate_happo_recurrent.py outputs/<run>/checkpoint_final.pt --profile main --episodes 100 --blue-mode both --device cuda
+```
+
+其 recurrent mask、TBPTT、短尾 chunk 和 checkpoint continuation 语义见 `docs/recurrent_happo_spec.md`。
+
 ## 输出结构
 
 `outputs/` 下每次训练只对应一个自包含 run folder：

@@ -69,3 +69,43 @@ def evaluate_actors(actors: Any, env_config: str | Path | Mapping[str, Any] | No
                 row["outcome"] = info["episode_summary"]["outcome"]
         records.append(info["episode_summary"])
     return records
+
+
+def evaluate_recurrent_actors(
+    actors: Any,
+    env_config: str | Path | Mapping[str, Any] | None,
+    episodes: int,
+    blue_target_mode: str,
+    profile: str,
+    seed: int = 1000,
+    device: str = "cpu",
+) -> list[dict[str, Any]]:
+    """Deterministically evaluate recurrent actors with episode-safe hidden masks."""
+    records: list[dict[str, Any]] = []
+    env = HeterogeneousMAVUAVAirCombatEnv(
+        env_config, blue_target_mode=blue_target_mode, profile=profile,
+    )
+    for episode in range(int(episodes)):
+        observations, _ = env.reset(seed=seed + episode)
+        hidden = [actor.initial_hidden(1, device=device) for actor in actors.actors]
+        recurrent_masks = torch.zeros((3, 1), device=device)
+        done = False
+        while not done:
+            actions: list[np.ndarray] = []
+            next_hidden: list[torch.Tensor] = []
+            with torch.no_grad():
+                for index, aid in enumerate(env.red_ids):
+                    action, _, actor_hidden = actors.actors[index].sample_step(
+                        torch.as_tensor(observations[aid], device=device).unsqueeze(0),
+                        hidden[index], recurrent_masks[index], deterministic=True,
+                    )
+                    actions.append(action.squeeze(0).cpu().numpy())
+                    next_hidden.append(actor_hidden)
+            observations, _, terminated, truncated, info = env.step(np.asarray(actions))
+            done = terminated or truncated
+            if not done:
+                active = torch.as_tensor(info["active_masks"], device=device)
+                recurrent_masks = active[:, None]
+                hidden = [state * recurrent_masks[index] for index, state in enumerate(next_hidden)]
+        records.append(info["episode_summary"])
+    return records

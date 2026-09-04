@@ -19,9 +19,8 @@ import numpy as np
 import torch
 import yaml
 
-from algorithm.common import RolloutBuffer
 from algorithm.happo import HAPPOTrainer
-from algorithm.happo.evaluation import evaluate_actors, summarize_records
+from algorithm.happo.evaluation import evaluate_actors, evaluate_recurrent_actors, summarize_records
 from env.mavuav import load_environment_config
 
 
@@ -56,6 +55,7 @@ def _algorithm_name(actor_variant: str, method_variant: str = "baseline") -> str
         "vanilla": "happo",
         "hrta": "happo_hrta",
         "structured_uniform": "happo_structured_uniform",
+        "recurrent": "happo_recurrent",
     }
     try:
         return names[actor_variant]
@@ -220,7 +220,8 @@ def _evaluation_row(
     seed: int,
     device: str,
 ) -> dict[str, Any]:
-    records = evaluate_actors(
+    evaluator = evaluate_recurrent_actors if trainer.is_recurrent else evaluate_actors
+    records = evaluator(
         trainer.actors, trainer.environment_config, episodes, mode, profile, seed=1000, device=device,
     )
     return {
@@ -442,7 +443,7 @@ def main(actor_variant: str = "vanilla", method_variant: str = "baseline") -> No
             horizon = planned_rollout_horizon(
                 trainer.env_steps, args.steps, configured_horizon, num_envs,
             )
-            trainer.buffer = RolloutBuffer(horizon, num_envs)
+            trainer.buffer = trainer.make_buffer(horizon)
             before_steps = trainer.env_steps
             update_started = time.perf_counter()
             episodes = trainer.collect_rollout()
@@ -490,7 +491,7 @@ def main(actor_variant: str = "vanilla", method_variant: str = "baseline") -> No
                     _append_csv(run_dir / "evaluations.csv", eval_row, evaluation_fields)
                     log(_evaluation_lines("EVAL", eval_row))
 
-        trainer.buffer = RolloutBuffer(configured_horizon, num_envs)
+        trainer.buffer = trainer.make_buffer(configured_horizon)
         if args.log_interval and window.updates:
             log(_progress_lines(trainer.env_steps, args.steps, completed, training_elapsed, window))
             window.clear()
