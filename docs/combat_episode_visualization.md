@@ -18,8 +18,9 @@ loader 严格检查 environment version、61D observation 和 67D global state�
 - vanilla：从 `trainer_config/config.hidden_dim` 构造 `IndependentActors`，恢复 `payload["actors"]`；baseline、AGP、curriculum 和 AGP-curriculum 只影响方法显示名，不改变推理动作。
 - HRTA：必须有精确的 `actor_architecture` 四字段，构造 `HRTAIndependentActors`。
 - Structured Uniform：同样严格验证四字段并构造 `StructuredUniformIndependentActors`。
+- R-HAPPO recurrent：仅接受 `actor_variant=recurrent` 与 `method_variant=baseline`，严格验证 `observation_dim/encoder_dim/recurrent_hidden_dim/head_dim/action_dim` 五字段并构造 `RecurrentIndependentActors`。
 
-每个 decision 按 `MAV, UAV1, UAV2` 顺序读取 observation，并对对应 actor 调用 `sample(..., deterministic=True)`。Blue 动作仍完全由 `env.blue_policy` 在 `env.step` 内生成。
+每个 decision 按 `MAV, UAV1, UAV2` 顺序读取 observation。前馈 variant 继续调用 `sample(..., deterministic=True)`；R-HAPPO 与正式 recurrent evaluator 使用相同的 `sample_step(..., deterministic=True)` hidden lifecycle：每个独立录像 episode 从 zero hidden 和 zero recurrent mask 开始，Red agent 死亡时只清对应 hidden，Blue 死亡不清理任何 Red hidden，episode 结束时统一清零。checkpoint 中用于训练续跑的 `rollout_state.actor_hidden_states` 不会被录像恢复。Blue 动作仍完全由 `env.blue_policy` 在 `env.step` 内生成。
 
 ## Trace 合同
 
@@ -60,4 +61,4 @@ conda run -n uav python tools/render_combat_episode_interactive.py `
 
 播放时可以持续 rotate、orbit、pan 或滚轮 zoom。Logical replay 使用 `performance.now()`、真实 `time_s` 和 `requestAnimationFrame` 独立推进，不等待 Plotly 绘制完成。camera manipulation 期间不显示额外提示，也不隐藏或重新创建飞机、轨迹、heading、death marker 和 attack line；当前完整 combat snapshot 始终可见，新 combat render 暂停进入 scheduler。松开 pointer 或滚轮停止约 200 ms 后，仅在 logical frame 已推进时重建一次最新状态，并通过 `uirevision` 保留新的 camera 角度；暂停状态下移动视角不会触发 combat refresh。红方 MAV/UAV 统一使用红色，蓝方无人机统一使用蓝色，机型身份继续由 marker、线宽、虚实线和标签区分。这一显示策略不改变 episode 数据、事件或时间语义。
 
-MAV 使用深红菱形和更粗实线，UAV1/UAV2 使用橙/金圆形，Blue 使用蓝/青三角与虚线。坐标显示 km，hover 速度保留 m/s，并从 config 元数据读取允许速度和过载范围。顶部显示 evaluation profile 与 Blue policy；右侧显示 Current State、最多五条已发生 Recent Events，Result 只在最后一帧出现。真实 attack line 在事件发生后 0.8 s display time 内可见，拖动 slider 返回该区间时会重现。
+MAV 使用深红菱形和更粗实线，UAV1/UAV2 使用同阵营红色圆形，Blue1/Blue2 使用同阵营蓝色三角与虚线。坐标显示 km，hover 速度保留 m/s，并从 config 元数据读取允许速度和过载范围。顶部显示 evaluation profile 与 Blue policy；右侧显示 Current State、最多五条已发生 Recent Events，Result 只在最后一帧出现。真实 attack line 在事件发生后 0.8 s display time 内可见，拖动 slider 返回该区间时会重现。

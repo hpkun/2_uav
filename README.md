@@ -131,6 +131,8 @@ python tools/render_combat_episode_interactive.py --input-dir outputs/visualizat
 
 前者只记录真实 decision-boundary 状态；后两者分别生成固定视角 MP4/preview 和可离线双击打开的交互 3D HTML。原有 `plot_trajectory.py` 静态 PNG 用法保持不变。详见 `docs/combat_episode_visualization.md`。
 
+Combat replay loader 支持 vanilla HAPPO、HRTA、Structured Uniform 和 baseline R-HAPPO recurrent checkpoint。R-HAPPO 录像从独立 episode 的 zero hidden/zero mask 开始，使用 deterministic `sample_step`，仅按 Red `active_masks` 做 agent-level hidden reset；它仍是定性可视化，不替代正式 recurrent evaluation。
+
 ## 测试
 
 ```bash

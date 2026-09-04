@@ -48,6 +48,7 @@ def record_episode(
     output_dir.mkdir(parents=True, exist_ok=True)
     env = HeterogeneousMAVUAVAirCombatEnv(env_config, seed=seed, blue_target_mode=blue_mode, profile=profile)
     observations, reset_info = env.reset(seed=seed)
+    adapter.reset_episode()
     states, alive = _snapshot(env)
     frames, alive_frames = [states], [alive]
     actions: list[np.ndarray] = []
@@ -66,6 +67,7 @@ def record_episode(
         frame = env.step_count
         events.extend(_event_rows(final_info, frame, frame * env.decision_dt))
         done = bool(terminated or truncated)
+        adapter.after_step(final_info["active_masks"], done)
     summary = final_info["episode_summary"]
     arrays = {
         "kinematics": np.asarray(frames, dtype=np.float64),

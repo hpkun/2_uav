@@ -10,6 +10,8 @@ import pytest
 import torch
 
 from algorithm.happo.networks import IndependentActors
+from algorithm.happo.evaluation import evaluate_recurrent_actors
+from algorithm.happo.recurrent import RecurrentIndependentActors
 from algorithm.modules.hrta import HRTAIndependentActors
 from algorithm.modules.structured_uniform import StructuredUniformIndependentActors
 from env.mavuav import ENTITY_IDS, ENVIRONMENT_VERSION, GLOBAL_STATE_DIM, OBS_DIM, load_environment_config
@@ -50,6 +52,22 @@ def synthetic_metadata():
 def write_trace(path: Path):
     path.mkdir(); np.savez_compressed(path/"episode_trace.npz",**synthetic_trace())
     (path/"metadata.json").write_text(json.dumps(synthetic_metadata()),encoding="utf-8")
+
+
+def recurrent_checkpoint(path: Path, *, hidden_dim: int = 12, recurrent_hidden_dim: int = 9):
+    architecture={"observation_dim":OBS_DIM,"encoder_dim":hidden_dim,
+                  "recurrent_hidden_dim":recurrent_hidden_dim,"head_dim":hidden_dim,"action_dim":3}
+    actors=RecurrentIndependentActors(hidden_dim=hidden_dim,recurrent_hidden_dim=recurrent_hidden_dim)
+    payload={"environment_version":ENVIRONMENT_VERSION,"observation_dim":OBS_DIM,
+             "global_state_dim":GLOBAL_STATE_DIM,"actor_variant":"recurrent",
+             "method_variant":"baseline","actor_architecture":architecture,
+             "trainer_config":{"actor_variant":"recurrent","method_variant":"baseline",
+                               "hidden_dim":hidden_dim,"recurrent_hidden_dim":recurrent_hidden_dim},
+             "environment_profile":"learnability","actors":actors.state_dict(),
+             "rollout_state":{"actor_hidden_states":np.ones((1,3,recurrent_hidden_dim),np.float32),
+                              "actor_recurrent_masks":np.ones((1,3),np.float32)}}
+    torch.save(payload,path)
+    return actors,payload
 
 
 def test_schema_entity_order_altitude_positive_up_and_shapes():
@@ -123,6 +141,64 @@ def test_policy_loader_variants(tmp_path,variant):
     assert set(loaded.actors.state_dict())==set(actors.state_dict())
 
 
+def test_recurrent_policy_loader_contract_and_method_name(tmp_path):
+    path=tmp_path/"recurrent.pt";actors,payload=recurrent_checkpoint(path)
+    loaded=load_replay_actors(path)
+    assert loaded.actor_variant=="recurrent" and loaded.method_variant=="baseline"
+    assert loaded.method_display_name=="R-HAPPO" and loaded.actor_architecture==payload["actor_architecture"]
+    assert isinstance(loaded.actors,RecurrentIndependentActors) and loaded.actors.training is False
+    assert set(loaded.actors.state_dict())==set(actors.state_dict())
+    assert loaded.hidden_states is None and loaded.recurrent_masks is None
+
+
+def test_recurrent_policy_loader_rejects_invalid_contracts(tmp_path):
+    path=tmp_path/"recurrent.pt";_,base=recurrent_checkpoint(path)
+    cases=[]
+    nonbaseline={**base,"method_variant":"agp"};cases.append((nonbaseline,"only method_variant='baseline'"))
+    missing={**base};missing.pop("actor_architecture");cases.append((missing,"architecture metadata"))
+    extra={**base,"actor_architecture":{**base["actor_architecture"],"extra":1}};cases.append((extra,"architecture metadata"))
+    wrong_obs={**base,"actor_architecture":{**base["actor_architecture"],"observation_dim":OBS_DIM+1}};cases.append((wrong_obs,"architecture dimensions"))
+    wrong_head={**base,"actor_architecture":{**base["actor_architecture"],"head_dim":13}};cases.append((wrong_head,"encoder_dim must equal head_dim"))
+    wrong_action={**base,"actor_architecture":{**base["actor_architecture"],"action_dim":2}};cases.append((wrong_action,"architecture dimensions"))
+    wrong_hidden={**base,"trainer_config":{**base["trainer_config"],"recurrent_hidden_dim":10}};cases.append((wrong_hidden,"recurrent_hidden_dim mismatch"))
+    for index,(payload,message) in enumerate(cases):
+        invalid=tmp_path/f"invalid_{index}.pt";torch.save(payload,invalid)
+        with pytest.raises(RuntimeError,match=message):load_replay_actors(invalid)
+
+
+def test_recurrent_adapter_history_reset_and_agent_masks(tmp_path):
+    torch.manual_seed(23);path=tmp_path/"recurrent.pt";recurrent_checkpoint(path)
+    adapter=load_replay_actors(path);adapter.reset_episode()
+    obs0={aid:np.linspace(-.2,.2,OBS_DIM,dtype=np.float32)+index*.01
+          for index,aid in enumerate(("MAV","UAV1","UAV2"))}
+    obs1={aid:value+.05 for aid,value in obs0.items()}
+    first=adapter.actions(obs0)
+    first_next=[state.clone() for state in adapter.next_hidden_states]
+    assert all(torch.count_nonzero(state)>0 for state in first_next)
+    adapter.after_step([1,1,1],False)
+    assert all(torch.equal(state,first_next[index]) for index,state in enumerate(adapter.hidden_states))
+    second=adapter.actions(obs1)
+    manual=[]
+    with torch.no_grad():
+        for index,aid in enumerate(("MAV","UAV1","UAV2")):
+            action,_,_=adapter.actors.actors[index].sample_step(
+                torch.as_tensor(obs1[aid]).unsqueeze(0),first_next[index],torch.ones(1),deterministic=True)
+            manual.append(action.squeeze(0).numpy())
+    assert np.allclose(second,np.asarray(manual))
+    adapter.after_step([1,0,1],False)
+    assert torch.count_nonzero(adapter.hidden_states[1])==0 and adapter.recurrent_masks[:,0].tolist()==[1,0,1]
+    assert torch.count_nonzero(adapter.hidden_states[0])>0 and torch.count_nonzero(adapter.hidden_states[2])>0
+    adapter.actions(obs1);blue_death_next=[state.clone() for state in adapter.next_hidden_states]
+    adapter.after_step([1,1,1],False)
+    assert all(torch.equal(state,blue_death_next[index]) for index,state in enumerate(adapter.hidden_states))
+    assert adapter.recurrent_masks[:,0].tolist()==[1,1,1]
+    adapter.actions(obs1);adapter.after_step([1,1,1],True)
+    assert all(torch.count_nonzero(state)==0 for state in adapter.hidden_states)
+    assert torch.count_nonzero(adapter.recurrent_masks)==0
+    reset_first=adapter.actions(obs0)
+    assert np.array_equal(first,reset_first)
+
+
 def test_policy_loader_rejects_contract_and_unknown(tmp_path):
     base={"environment_version":"old","observation_dim":OBS_DIM,"global_state_dim":GLOBAL_STATE_DIM,"actors":{}}
     p=tmp_path/"bad.pt";torch.save(base,p)
@@ -136,6 +212,7 @@ def test_method_names():
     assert infer_method_display_name("vanilla","agp_curriculum")=="HAPPO-AGP-Curriculum"
     assert infer_method_display_name("hrta")=="HAPPO-HRTA"
     assert infer_method_display_name("structured_uniform")=="HAPPO-Structured-Uniform"
+    assert infer_method_display_name("recurrent")=="R-HAPPO"
 
 
 def test_deterministic_short_recording(tmp_path):
@@ -152,6 +229,23 @@ def test_deterministic_short_recording(tmp_path):
         assert a["kinematics"].shape[0]==m1["episode_length"]+1
     assert m1["events"]==m2["events"] and m1["outcome"]==m2["outcome"]
     assert m1["episode_role"]=="qualitative_visualization_only" and not m1["used_for_quantitative_metrics"]
+
+
+def test_recurrent_recording_matches_evaluator_and_repeats(tmp_path):
+    torch.manual_seed(29);checkpoint=tmp_path/"recurrent.pt";_,payload=recurrent_checkpoint(checkpoint)
+    adapter=load_replay_actors(checkpoint)
+    cfg=load_environment_config(None);cfg["simulation"]["max_decision_steps"]=2
+    m1=record_episode(adapter,checkpoint,tmp_path/"a",profile="learnability",blue_mode="nearest",
+                      seed=424242,env_config=cfg)
+    m2=record_episode(adapter,checkpoint,tmp_path/"b",profile="learnability",blue_mode="nearest",
+                      seed=424242,env_config=cfg)
+    records=evaluate_recurrent_actors(adapter.actors,cfg,1,"nearest","learnability",seed=424242,device="cpu")
+    with np.load(tmp_path/"a"/"episode_trace.npz") as a,np.load(tmp_path/"b"/"episode_trace.npz") as b:
+        for key in ("red_actions","kinematics","alive"):assert np.array_equal(a[key],b[key])
+    assert m1["events"]==m2["events"] and m1["outcome"]==m2["outcome"]
+    assert all(m1[key]==value for key,value in records[0].items())
+    assert m1["algorithm"]=="R-HAPPO" and m1["actor_variant"]=="recurrent"
+    assert m1["actor_architecture"]==payload["actor_architecture"]
 
 
 def test_preview_and_standalone_html(tmp_path):
