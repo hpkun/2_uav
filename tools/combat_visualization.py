@@ -8,6 +8,8 @@ from typing import Any
 import numpy as np
 
 HETERO_COMBAT_TRACE_SCHEMA_VERSION = 1
+MIN_HORIZONTAL_SPAN_KM = 10.0
+CUBE_SPAN_ROUNDING_KM = 0.5
 ENTITY_IDS = ("MAV", "UAV1", "UAV2", "Blue1", "Blue2")
 FEATURES = ("x", "y", "h", "v", "theta", "psi")
 STYLES = {
@@ -91,14 +93,42 @@ def death_records(trace: dict[str, np.ndarray], metadata: dict[str, Any]) -> lis
     return records
 
 
-def episode_ranges(kinematics: np.ndarray, alive: np.ndarray) -> dict[str, list[float]]:
-    positions = kinematics[:, :, :3] / 1000.0
-    ranges: dict[str, list[float]] = {}
-    for axis, minimum_span in zip(range(3), (10.0, 10.0, 2.0)):
-        values = positions[:, :, axis][alive]
-        lo, hi = float(values.min()), float(values.max())
-        span = max(hi - lo, minimum_span)
-        center = (lo + hi) / 2.0
-        ranges[("x", "y", "z")[axis]] = [center - span * 0.625, center + span * 0.625]
-    return ranges
+def episode_cube_ranges(
+    kinematics: np.ndarray, alive: np.ndarray | None = None,
+) -> dict[str, list[float] | float]:
+    """Return one fixed, numerically cubic view for an entire episode.
 
+    ``alive`` is retained for call-site compatibility but deliberately does not
+    filter positions: finite post-death/death-boundary locations must also fit.
+    Raw coordinates remain untouched; this helper only selects axis ranges in km.
+    """
+    values = np.asarray(kinematics, dtype=np.float64)
+    if values.ndim != 3 or values.shape[1:] != (5, 6):
+        raise ValueError("kinematics must have shape [F,5,6]")
+    positions = values[:, :, :3] / 1000.0
+    positions = positions[np.all(np.isfinite(positions), axis=-1)]
+    if not len(positions):
+        raise ValueError("kinematics contains no finite XYZ positions")
+
+    x_min, y_min = positions[:, :2].min(axis=0)
+    x_max, y_max = positions[:, :2].max(axis=0)
+    max_altitude = float(positions[:, 2].max())  # h is positive-up altitude.
+    required_x = max(MIN_HORIZONTAL_SPAN_KM, float(x_max - x_min) * 1.25)
+    required_y = max(MIN_HORIZONTAL_SPAN_KM, float(y_max - y_min) * 1.25)
+    vertical_headroom = max(1.0, max_altitude * 0.10)
+    required_z = max_altitude + vertical_headroom
+    required = max(required_x, required_y, required_z, MIN_HORIZONTAL_SPAN_KM)
+    cube_span = float(np.ceil(required / CUBE_SPAN_ROUNDING_KM) * CUBE_SPAN_ROUNDING_KM)
+    center_x = float((x_min + x_max) / 2.0)
+    center_y = float((y_min + y_max) / 2.0)
+    half = cube_span / 2.0
+    return {
+        "x": [center_x - half, center_x + half],
+        "y": [center_y - half, center_y + half],
+        "z": [0.0, cube_span],
+        "span": cube_span,
+    }
+
+
+# Compatibility name for downstream analysis code; semantics are now cubic.
+episode_ranges = episode_cube_ranges

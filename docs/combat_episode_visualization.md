@@ -38,7 +38,7 @@ NPZ 中没有 pickle object array。可变长 attack、death、boundary、blue e
 ```powershell
 conda run -n uav python tools/render_combat_episode.py `
   --input-dir outputs/visualization/example --visual-dt 0.1 --fps 20 `
-  --trail-seconds 10 --elev 24 --azim -55
+  --trail-seconds 10 --elev 27 --azim -55
 ```
 
 生成 `preview.png` 和 `episode.mp4`。`--preview-only` 不需要 ffmpeg；完整 MP4 需要系统已有 ffmpeg，工具不会自动安装。可用 `--no-heading` 关闭朝向。固定 MP4 camera 不支持鼠标操作。
@@ -51,5 +51,9 @@ conda run -n uav python tools/render_combat_episode_interactive.py `
 ```
 
 生成 `episode_interactive.html`，Plotly JS 和 episode payload 均内嵌，不使用 CDN 或服务器。双击即可播放；支持 Play/Pause、前后帧、Restart、display-time slider、0.25–4x speed、Full/5/10/20 s trail、heading/label/death/attack 开关、Episode View、Full Battlefield 和 Reset Camera。Plotly 提供鼠标 rotate/zoom/pan，`uirevision` 使播放和开关操作保持用户 camera。
+
+默认 Episode View 是一次性根据整场 finite raw 轨迹计算的固定立方体。水平范围保留 25% 总余量且至少 10 km；顶部保留至少 1 km 或最高高度 10% 的余量；最终统一 span 向上取整至 0.5 km。X、Y、Altitude 三轴数值 span 完全相等，Z 固定为 `[0, cube_span]`，Plotly 使用 `aspectmode='cube'`，Matplotlib 使用 `set_box_aspect((1,1,1))`。播放、slider、trail、事件和死亡均不会重新计算 world ranges；camera 仍可自由旋转、缩放和平移。
+
+`z=0 km` 的浅灰平面只是 ground reference，用来表达飞机真实离地高度。环境合法最低高度仍是 config 中的 1 km，ground plane 不是环境边界。Full Battlefield 保留 config 的 `X/Y=[-100,100] km` 与 `Altitude=[1,20] km` 作为诊断视图，切换视图和 Reset Camera 互不绑定。
 
 MAV 使用深红菱形和更粗实线，UAV1/UAV2 使用橙/金圆形，Blue 使用蓝/青三角与虚线。坐标显示 km，hover 速度保留 m/s，并从 config 元数据读取允许速度和过载范围。顶部显示 evaluation profile 与 Blue policy；右侧显示 Current State、最多五条已发生 Recent Events，Result 只在最后一帧出现。真实 attack line 在事件发生后 0.8 s display time 内可见，拖动 slider 返回该区间时会重现。

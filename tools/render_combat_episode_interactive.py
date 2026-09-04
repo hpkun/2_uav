@@ -12,7 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from plotly.offline import get_plotlyjs
 
-from tools.combat_visualization import (ENTITY_IDS, STYLES, death_records, episode_ranges,
+from tools.combat_visualization import (ENTITY_IDS, STYLES, death_records, episode_cube_ranges,
                                         interpolate_trace_for_visualization, load_trace)
 
 APP_JS = r"""
@@ -20,9 +20,9 @@ APP_JS = r"""
 'use strict';
 const P = PAYLOAD;
 const ids = P.entity_ids, n = P.time_s.length;
-let currentFrame = 0, playing = false, timer = null, speed = 1, trailSeconds = -1;
+let currentFrame = 0, playing = false, timer = null, speed = 1, trailSeconds = -1, currentView = 'episode';
 const graph = document.getElementById('graph'), loading = document.getElementById('loading');
-const idx = {trajectory: [], current: [], heading: [], deaths: 15, attacks: 16};
+const idx = {trajectory: [], current: [], heading: [], deaths: 15, attacks: 16, ground: 17};
 for (let i=0;i<5;i++) { idx.trajectory.push(i); idx.current.push(5+i); idx.heading.push(10+i); }
 const options = id => document.getElementById(id);
 function esc(x) { return String(x).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
@@ -71,7 +71,17 @@ function pause(){ playing=false;if(timer){clearTimeout(timer);timer=null;} }
 function tick(){ if(!playing)return;if(currentFrame>=n-1){pause();return;}currentFrame++;update().then(()=>{timer=setTimeout(tick,Math.max(10,P.visual_dt*1000/speed));}); }
 function play(){ if(currentFrame>=n-1)return;pause();playing=true;tick(); }
 function setFrame(f){ pause();currentFrame=Math.max(0,Math.min(n-1,Number(f)));return update(); }
-function setView(ranges){ return Plotly.relayout(graph,{'scene.xaxis.range':ranges.x,'scene.yaxis.range':ranges.y,'scene.zaxis.range':ranges.z}); }
+async function setView(name,ranges,showGround){
+  currentView=name;
+  await Plotly.restyle(graph,{visible:showGround,x:[[ranges.x[0],ranges.x[1],ranges.x[1],ranges.x[0]]],y:[[ranges.y[0],ranges.y[0],ranges.y[1],ranges.y[1]]],z:[[0,0,0,0]]},[idx.ground]);
+  return Plotly.relayout(graph,{
+    'scene.xaxis.autorange':false,'scene.yaxis.autorange':false,'scene.zaxis.autorange':false,
+    'scene.xaxis.range':ranges.x,'scene.yaxis.range':ranges.y,'scene.zaxis.range':ranges.z,
+    'scene.aspectmode':'cube'
+  });
+}
+function setEpisodeView(){return setView('episode',P.episode_ranges,true);}
+function setFullBattlefieldView(){return setView('full',P.full_ranges,false);}
 async function init(){
  try {
   if(typeof Plotly==='undefined') throw new Error('Embedded Plotly library is unavailable.');
@@ -81,7 +91,8 @@ async function init(){
   for(let i=0;i<5;i++) data.push({type:'scatter3d',mode:'lines',showlegend:false,x:[],y:[],z:[],hoverinfo:'skip',line:{color:P.styles[ids[i]].color,width:4}});
   data.push({type:'scatter3d',mode:'markers',name:'Loss',x:[],y:[],z:[],hoverinfo:'text',marker:{symbol:'x',size:8,color:'#222'}});
   data.push({type:'scatter3d',mode:'lines',name:'Attack',x:[],y:[],z:[],hoverinfo:'skip',line:{color:'#ed3b3b',width:7}});
-  const layout={paper_bgcolor:'#f5f7fa',plot_bgcolor:'#fff',margin:{l:0,r:0,t:35,b:0},legend:{x:.01,y:.99,bgcolor:'rgba(255,255,255,.8)'},uirevision:'combat-camera-v1',scene:{xaxis:{title:'X / km',range:P.episode_ranges.x},yaxis:{title:'Y / km',range:P.episode_ranges.y},zaxis:{title:'Altitude / km',range:P.episode_ranges.z},aspectmode:'data',camera:P.default_camera}};
+  data.push({type:'mesh3d',name:'Ground reference',showlegend:false,hoverinfo:'skip',x:[P.episode_ranges.x[0],P.episode_ranges.x[1],P.episode_ranges.x[1],P.episode_ranges.x[0]],y:[P.episode_ranges.y[0],P.episode_ranges.y[0],P.episode_ranges.y[1],P.episode_ranges.y[1]],z:[0,0,0,0],i:[0,0],j:[1,2],k:[2,3],color:'#8d99a6',opacity:.07,flatshading:true});
+  const layout={paper_bgcolor:'#f5f7fa',plot_bgcolor:'#fff',margin:{l:0,r:0,t:35,b:0},legend:{x:.01,y:.99,bgcolor:'rgba(255,255,255,.8)'},uirevision:'combat-camera-v1',scene:{xaxis:{title:'X / km',range:P.episode_ranges.x,autorange:false},yaxis:{title:'Y / km',range:P.episode_ranges.y,autorange:false},zaxis:{title:'Altitude / km',range:P.episode_ranges.z,autorange:false},aspectmode:'cube',camera:P.default_camera}};
   await Plotly.newPlot(graph,data,layout,{responsive:true,displaylogo:false,scrollZoom:true});
   await update(); loading.style.display='none';
  } catch(error) { console.error(error);loading.className='error';loading.innerHTML=`<b>Interactive replay initialization failed</b><br>${esc(error.message)}<br>Check browser WebGL support.`; }
@@ -89,7 +100,7 @@ async function init(){
 options('play').onclick=play;options('pause').onclick=pause;options('prev').onclick=()=>setFrame(currentFrame-1);options('next').onclick=()=>setFrame(currentFrame+1);options('restart').onclick=()=>setFrame(0);
 options('slider').oninput=e=>setFrame(e.target.value);options('speed').onchange=e=>{speed=Number(e.target.value);if(playing){clearTimeout(timer);timer=setTimeout(tick,10);}};options('trail').onchange=e=>{trailSeconds=Number(e.target.value);update();};
 for(const id of ['showHeadings','showLabels','showDeaths','showAttacks']) options(id).onchange=update;
-options('resetCamera').onclick=()=>Plotly.relayout(graph,{'scene.camera':P.default_camera});options('episodeView').onclick=()=>setView(P.episode_ranges);options('fullView').onclick=()=>setView(P.full_ranges);
+options('resetCamera').onclick=()=>Plotly.relayout(graph,{'scene.camera':P.default_camera});options('episodeView').onclick=setEpisodeView;options('fullView').onclick=setFullBattlefieldView;
 init();
 // APP_JS_END
 """
@@ -117,9 +128,9 @@ def render_interactive(input_dir: Path, output: Path | None = None, *, visual_dt
                "raw_kinematics":trace["kinematics"].tolist(),"alive":visual["alive"].tolist(),
                "time_s":visual["time_s"].tolist(),"raw_step":visual["raw_step"].tolist(),"visual_dt":visual_dt,
                "events":meta.get("events",[]),"deaths":death_records(trace,meta),
-               "episode_ranges":episode_ranges(trace["kinematics"],trace["alive"]),
+               "episode_ranges":episode_cube_ranges(trace["kinematics"],trace["alive"]),
                "full_ranges":{"x":[x/1000 for x in field["x"]],"y":[x/1000 for x in field["y"]],"z":[x/1000 for x in field["altitude"]]},
-               "default_camera":{"eye":{"x":1.55,"y":-1.65,"z":1.1},"up":{"x":0,"y":0,"z":1}}}
+               "default_camera":{"eye":{"x":1.50,"y":-1.60,"z":1.25},"up":{"x":0,"y":0,"z":1}}}
     outcome={"red":"RED WIN","blue":"BLUE WIN","draw":"DRAW"}.get(meta["outcome"],str(meta["outcome"]).upper())
     body=(f"{'MAV SURVIVED' if meta['mav_survived'] else 'MAV LOST'}<br>UAV Survivors {meta['red_uav_survivors']}/2<br>"
           f"Blue Survivors {meta['blue_survivors']}/2<br>Red Attack Kills {meta['red_attack_kills']}<br>Blue Attack Kills {meta['blue_attack_kills']}<br>"

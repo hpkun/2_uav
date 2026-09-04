@@ -16,14 +16,14 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FFMpegWriter, FuncAnimation
 import numpy as np
 
-from tools.combat_visualization import (ENTITY_IDS, STYLES, death_records,
+from tools.combat_visualization import (ENTITY_IDS, STYLES, death_records, episode_cube_ranges,
                                         interpolate_trace_for_visualization, load_trace)
 
 
 def render_episode(
     input_dir: Path, output: Path | None = None, preview: Path | None = None, *,
     visual_dt: float = 0.1, fps: int = 20, trail_seconds: float = 10.0,
-    elev: float = 24.0, azim: float = -55.0, show_heading: bool = True,
+    elev: float = 27.0, azim: float = -55.0, show_heading: bool = True,
     overwrite: bool = False, preview_fraction: float = 0.6, mp4: bool = True,
 ) -> dict[str, str | None]:
     trace, metadata = load_trace(input_dir)
@@ -38,17 +38,17 @@ def render_episode(
 
     xyz = visual["kinematics"][:, :, :3] / 1000.0
     alive = visual["alive"]
-    finite = xyz[alive]
-    mins, maxs = finite.min(axis=0), finite.max(axis=0)
-    spans = np.maximum(maxs - mins, [10.0, 10.0, 2.0]); centers = (mins + maxs) / 2
+    ranges = episode_cube_ranges(trace["kinematics"], trace["alive"])
     fig = plt.figure(figsize=(12.8, 7.2), facecolor="#f7f8fa")
     ax = fig.add_subplot(111, projection="3d", facecolor="#fbfcfe")
-    ax.set_xlim(centers[0] - spans[0] * .625, centers[0] + spans[0] * .625)
-    ax.set_ylim(centers[1] - spans[1] * .625, centers[1] + spans[1] * .625)
-    ax.set_zlim(centers[2] - spans[2] * .625, centers[2] + spans[2] * .625)
+    ax.set_xlim(*ranges["x"]); ax.set_ylim(*ranges["y"]); ax.set_zlim(*ranges["z"])
+    ax.set_box_aspect((1, 1, 1))
     ax.set(xlabel="X / km", ylabel="Y / km", zlabel="Altitude / km")
     ax.view_init(elev=elev, azim=azim)
     ax.grid(True, alpha=.25)
+    ground_x, ground_y = np.meshgrid(ranges["x"], ranges["y"])
+    ax.plot_surface(ground_x, ground_y, np.zeros_like(ground_x), color="#8d99a6",
+                    alpha=.07, shade=False, linewidth=0)
     title = ax.set_title("")
     lines = []; points = []; labels = []; headings = []
     for i, aid in enumerate(ENTITY_IDS):
@@ -119,7 +119,7 @@ def main() -> None:
     parser.add_argument("--input-dir", type=Path, required=True); parser.add_argument("--output", type=Path)
     parser.add_argument("--preview", type=Path); parser.add_argument("--visual-dt", type=float, default=.1)
     parser.add_argument("--fps", type=int, default=20); parser.add_argument("--trail-seconds", type=float, default=10.)
-    parser.add_argument("--elev", type=float, default=24.); parser.add_argument("--azim", type=float, default=-55.)
+    parser.add_argument("--elev", type=float, default=27.); parser.add_argument("--azim", type=float, default=-55.)
     parser.add_argument("--no-heading", action="store_true"); parser.add_argument("--preview-only", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()

@@ -13,7 +13,8 @@ from algorithm.happo.networks import IndependentActors
 from algorithm.modules.hrta import HRTAIndependentActors
 from algorithm.modules.structured_uniform import StructuredUniformIndependentActors
 from env.mavuav import ENTITY_IDS, ENVIRONMENT_VERSION, GLOBAL_STATE_DIM, OBS_DIM, load_environment_config
-from tools.combat_visualization import (HETERO_COMBAT_TRACE_SCHEMA_VERSION, interpolate_trace_for_visualization,
+from tools.combat_visualization import (HETERO_COMBAT_TRACE_SCHEMA_VERSION, episode_cube_ranges,
+                                        interpolate_trace_for_visualization,
                                         shortest_angle_interpolate, validate_raw_trace)
 from tools.record_combat_episode import _event_rows, record_episode
 from tools.render_combat_episode import render_episode
@@ -67,6 +68,32 @@ def test_shortest_angle_and_interpolation_no_future_leakage():
     assert visual["kinematics"][2,0,2]>0 # h stays positive-up, never -h
     assert visual["alive"][:-1,0].all() and not visual["alive"][-1,0]
     assert visual["raw_step"].tolist()==[0,0,0,0,1]
+
+
+def test_episode_cube_ranges_are_equal_grounded_and_contain_all_finite_positions():
+    trace=synthetic_trace(2);kin=trace["kinematics"]
+    kin[0,:,0]=np.linspace(-4000,4000,5);kin[1,:,0]=np.linspace(-4000,4000,5)
+    kin[0,:,1]=np.linspace(-3000,5000,5);kin[1,:,1]=np.linspace(-3000,5000,5)
+    kin[0,:,2]=np.linspace(4000,6000,5);kin[1,:,2]=np.linspace(6000,8000,5)
+    trace["alive"][1,4]=False
+    ranges=episode_cube_ranges(kin,trace["alive"])
+    spans=[ranges[axis][1]-ranges[axis][0] for axis in ("x","y","z")]
+    assert ranges["z"][0]==0.0 and np.allclose(spans,spans[0])
+    assert np.isclose(ranges["span"],spans[0]) and ranges["span"]==10.0
+    positions=kin[:,:,:3]/1000
+    assert positions[:,:,0].min()>ranges["x"][0] and positions[:,:,0].max()<ranges["x"][1]
+    assert positions[:,:,1].min()>ranges["y"][0] and positions[:,:,1].max()<ranges["y"][1]
+    assert positions[:,:,2].min()>=ranges["z"][0] and positions[:,:,2].max()<ranges["z"][1]
+    assert ranges["z"][1]-positions[:,:,2].max()>=1.0
+
+
+def test_episode_cube_uses_finite_dead_positions_and_never_offsets_altitude():
+    trace=synthetic_trace(2);trace["alive"][1,3]=False
+    trace["kinematics"][1,3,:3]=[9000,7000,8500]
+    ranges=episode_cube_ranges(trace["kinematics"],trace["alive"])
+    assert ranges["x"][1]>9.0 and ranges["y"][1]>7.0
+    assert ranges["z"]==[0.0,ranges["span"]]
+    assert trace["kinematics"][1,3,2]==8500
 
 
 def test_event_mapping_keeps_attack_pairs_and_boundary_safety():
@@ -135,7 +162,9 @@ def test_preview_and_standalone_html(tmp_path):
     for token in ("Play","Pause","Previous Frame","Next Frame","Restart","slider","speed","Trail","Headings","Labels","Death markers","Attack lines","Reset Camera","Episode View","Full Battlefield","uirevision","Plotly.newPlot","Plotly.restyle"):
         assert token in html
     payload_text=html.split("<script>const PAYLOAD=",1)[1].split(";</script>",1)[0]
-    json.loads(payload_text)
+    payload=json.loads(payload_text)
+    spans=[payload["episode_ranges"][axis][1]-payload["episode_ranges"][axis][0] for axis in ("x","y","z")]
+    assert payload["episode_ranges"]["z"][0]==0.0 and np.allclose(spans,spans[0])
     assert "NaN" not in payload_text and "// APP_JS_START" in html and "// APP_JS_END" in html
     node=shutil.which("node")
     if node:
@@ -148,3 +177,9 @@ def test_app_js_uses_time_based_event_visibility():
     assert "t-Number(e.time_s)>=-1e-9" in APP_JS
     assert "Number(e.time_s) <= t + 1e-9" in APP_JS
     assert "uirevision" in APP_JS and "currentFrame === n-1" in APP_JS
+    assert APP_JS.count("'scene.xaxis.autorange':false")==1
+    assert "aspectmode:'cube'" in APP_JS and "type:'mesh3d'" in APP_JS
+    update_body=APP_JS.split("async function update() {",1)[1].split("function pause()",1)[0]
+    assert "scene.xaxis.range" not in update_body and "Plotly.relayout" not in update_body
+    assert "setEpisodeView" in APP_JS and "setFullBattlefieldView" in APP_JS
+    assert "options('resetCamera').onclick=()=>Plotly.relayout(graph,{'scene.camera':P.default_camera})" in APP_JS
