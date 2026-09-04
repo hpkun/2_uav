@@ -131,10 +131,12 @@ def test_preview_and_standalone_html(tmp_path):
     assert Path(result["preview"]).stat().st_size>1000
     out=render_interactive(d)
     html=out.read_text(encoding="utf-8")
-    assert out.stat().st_size>1_000_000 and "cdn.plot.ly" not in html and "scatter3d" in html
+    assert out.stat().st_size>1_000_000 and "<script src=" not in html.lower() and "scatter3d" in html
     for token in ("Play","Pause","Previous Frame","Next Frame","Restart","slider","speed","Trail","Headings","Labels","Death markers","Attack lines","Reset Camera","Episode View","Full Battlefield","uirevision","Plotly.newPlot","Plotly.restyle"):
         assert token in html
-    assert "NaN" not in html and "// APP_JS_START" in html and "// APP_JS_END" in html
+    payload_text=html.split("<script>const PAYLOAD=",1)[1].split(";</script>",1)[0]
+    json.loads(payload_text)
+    assert "NaN" not in payload_text and "// APP_JS_START" in html and "// APP_JS_END" in html
     node=shutil.which("node")
     if node:
         js=html.split("// APP_JS_START",1)[1].split("// APP_JS_END",1)[0]
