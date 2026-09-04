@@ -56,4 +56,8 @@ conda run -n uav python tools/render_combat_episode_interactive.py `
 
 `z=0 km` 的浅灰平面只是 ground reference，用来表达飞机真实离地高度。环境合法最低高度仍是 config 中的 1 km，ground plane 不是环境边界。Full Battlefield 保留 config 的 `X/Y=[-100,100] km` 与 `Altitude=[1,20] km` 作为诊断视图，切换视图和 Reset Camera 互不绑定。
 
+### Live camera interaction
+
+播放时可以持续 rotate、orbit、pan 或滚轮 zoom。Logical replay 使用 `performance.now()`、真实 `time_s` 和 `requestAnimationFrame` 独立推进，不等待 Plotly 绘制完成。camera manipulation 期间不发起新的 combat trace restyle，也不隐藏或改写当前可见的飞机、轨迹、heading、death marker、attack line、时间和状态面板；整个 combat snapshot 冻结在交互开始前，只有 camera 由 Plotly 原生交互更新。松开 pointer 或滚轮停止约 200 ms 后，播放状态下只同步一次最新 logical frame，不补画跳过的中间帧，并保留新的 camera 角度；暂停状态下若 logical frame 未变化则完全不触发 combat refresh。这只是降低 WebGL 竞争的显示策略，不改变 episode 数据、事件或时间语义。
+
 MAV 使用深红菱形和更粗实线，UAV1/UAV2 使用橙/金圆形，Blue 使用蓝/青三角与虚线。坐标显示 km，hover 速度保留 m/s，并从 config 元数据读取允许速度和过载范围。顶部显示 evaluation profile 与 Blue policy；右侧显示 Current State、最多五条已发生 Recent Events，Result 只在最后一帧出现。真实 attack line 在事件发生后 0.8 s display time 内可见，拖动 slider 返回该区间时会重现。

@@ -176,10 +176,38 @@ def test_preview_and_standalone_html(tmp_path):
 def test_app_js_uses_time_based_event_visibility():
     assert "t-Number(e.time_s)>=-1e-9" in APP_JS
     assert "Number(e.time_s) <= t + 1e-9" in APP_JS
-    assert "uirevision" in APP_JS and "currentFrame === n-1" in APP_JS
+    assert "uirevision" in APP_JS and "frame === n-1" in APP_JS
     assert APP_JS.count("'scene.xaxis.autorange':false")==1
     assert "aspectmode:'cube'" in APP_JS and "type:'mesh3d'" in APP_JS
-    update_body=APP_JS.split("async function update() {",1)[1].split("function pause()",1)[0]
-    assert "scene.xaxis.range" not in update_body and "Plotly.relayout" not in update_body
+    render_body=APP_JS.split("async function renderFrame(frameIndex) {",1)[1].split("function requestRender()",1)[0]
+    assert "scene.xaxis.range" not in render_body and "Plotly.relayout" not in render_body
     assert "setEpisodeView" in APP_JS and "setFullBattlefieldView" in APP_JS
     assert "options('resetCamera').onclick=()=>Plotly.relayout(graph,{'scene.camera':P.default_camera})" in APP_JS
+
+
+def test_app_js_decouples_logical_playback_rendering_and_camera_interaction(tmp_path):
+    for token in ("logicalFrame", "renderedFrame", "cameraInteracting", "renderBusy", "renderPending",
+                  "requestAnimationFrame", "frameAtOrBeforeTime", "beginCameraInteraction",
+                  "endCameraInteraction", "pointerdown", "pointerup", "pointercancel", "wheelEndTimer"):
+        assert token in APP_JS
+    assert "update().then(()=>" not in APP_JS and "setTimeout(tick" not in APP_JS
+    request_body=APP_JS.split("function requestRender() {",1)[1].split("function logicalVisualTime",1)[0]
+    assert "if(cameraInteracting || renderBusy) return" in request_body
+    begin_body=APP_JS.split("function beginCameraInteraction() {",1)[1].split("function endCameraInteraction()",1)[0]
+    end_body=APP_JS.split("function endCameraInteraction() {",1)[1].split("async function setView",1)[0]
+    assert "Plotly." not in begin_body and "Plotly." not in end_body
+    assert "renderedFrame!==logicalFrame" in end_body and "requestRender()" in end_body
+    assert "hideDynamicCombatTraces" not in APP_JS and "dynamicTraceIndices" not in APP_JS
+    assert "if(!cameraInteracting)updatePanels(logicalFrame)" in APP_JS
+    assert APP_JS.count("await Plotly.restyle(graph") == 6  # 5 render batches + one ground-view update
+    assert "dragmode:'orbit'" in APP_JS and "scrollZoom:true" in APP_JS
+    assert "cameraOverlay" not in APP_JS
+
+    node=shutil.which("node")
+    if node:
+        function=APP_JS.split("function frameAtOrBeforeTime(time) {",1)[1].split("function updatePanels",1)[0]
+        source=("const P={time_s:[0,0.1,0.2,0.3,0.4]};const n=P.time_s.length;"
+                "function frameAtOrBeforeTime(time) {"+function+
+                "if(frameAtOrBeforeTime(.25)!==2||frameAtOrBeforeTime(.4)!==4||frameAtOrBeforeTime(9)!==4)process.exit(1);")
+        path=tmp_path/"playback_helper.js";path.write_text(source,encoding="utf-8")
+        subprocess.run([node,str(path)],check=True,capture_output=True,text=True)
