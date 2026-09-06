@@ -1,0 +1,148 @@
+{
+  "trace_schema_version": 2,
+  "checkpoint_path": "C:\\Users\\HPK\\Desktop\\2_uav\\.pytest_tmp_full\\test_deterministic_short_recor0\\model.pt",
+  "checkpoint_sha256": "2e26ebcb3c46ad61ec04c0300bd2770ddb19c5fb5dc032b477b0085c5b4805de",
+  "checkpoint_sampled_steps": 0,
+  "algorithm": "HAPPO",
+  "actor_variant": "vanilla",
+  "method_variant": "baseline",
+  "actor_architecture": null,
+  "environment_version": "heterogeneous_mavuav_4v4_v3_0",
+  "observation_dim": 100,
+  "global_state_dim": 119,
+  "training_profile": "learnability",
+  "evaluation_profile": "learnability",
+  "blue_target_mode": "nearest",
+  "episode_seed": 424242,
+  "episode_role": "qualitative_visualization_only",
+  "used_for_quantitative_metrics": false,
+  "decision_dt": 1.0,
+  "physics_dt": 0.1,
+  "max_decision_steps": 2,
+  "raw_trace_dt": 1.0,
+  "visual_interpolation": true,
+  "visual_interpolation_dt": 0.1,
+  "visual_interpolation_method": "linear x/y/h/v; shortest-angle theta/psi; left-continuous alive",
+  "raw_state_features": [
+    "x",
+    "y",
+    "h",
+    "v",
+    "theta",
+    "psi"
+  ],
+  "raw_state_units": [
+    "m",
+    "m",
+    "m",
+    "m/s",
+    "rad",
+    "rad"
+  ],
+  "altitude_semantics": "h is altitude positive up; visual altitude = h",
+  "battlefield": {
+    "x": [
+      -100000.0,
+      100000.0
+    ],
+    "y": [
+      -100000.0,
+      100000.0
+    ],
+    "altitude": [
+      1000.0,
+      20000.0
+    ]
+  },
+  "aircraft_specs": {
+    "MAV": {
+      "v_min": 250.0,
+      "v_max": 400.0,
+      "nx": [
+        -1.0,
+        5.0
+      ],
+      "ny": [
+        -1.5,
+        2.0
+      ],
+      "nz": [
+        -3.0,
+        3.0
+      ]
+    },
+    "UAV": {
+      "v_min": 150.0,
+      "v_max": 300.0,
+      "nx": [
+        -1.0,
+        5.0
+      ],
+      "ny": [
+        -1.5,
+        1.5
+      ],
+      "nz": [
+        -2.0,
+        2.0
+      ]
+    },
+    "Blue": {
+      "v_min": 250.0,
+      "v_max": 400.0,
+      "nx": [
+        -1.0,
+        5.0
+      ],
+      "ny": [
+        -1.5,
+        3.0
+      ],
+      "nz": [
+        -3.0,
+        3.0
+      ]
+    }
+  },
+  "entity_ids": [
+    "MAV",
+    "UAV1",
+    "UAV2",
+    "UAV3",
+    "Blue1",
+    "Blue2",
+    "Blue3",
+    "Blue4"
+  ],
+  "entity_types": {
+    "MAV": "MAV",
+    "UAV1": "UAV",
+    "UAV2": "UAV",
+    "UAV3": "UAV",
+    "Blue1": "Blue",
+    "Blue2": "Blue",
+    "Blue3": "Blue",
+    "Blue4": "Blue"
+  },
+  "entity_teams": {
+    "MAV": "red",
+    "UAV1": "red",
+    "UAV2": "red",
+    "UAV3": "red",
+    "Blue1": "blue",
+    "Blue2": "blue",
+    "Blue3": "blue",
+    "Blue4": "blue"
+  },
+  "events": [],
+  "outcome": "draw",
+  "episode_length": 2,
+  "mav_survived": true,
+  "red_uav_survivors": 3,
+  "blue_survivors": 4,
+  "red_attack_kills": 0,
+  "blue_attack_kills": 0,
+  "red_uav_losses": 0,
+  "mav_loss": 0,
+  "episode_return": 0.8309312753474893
+}

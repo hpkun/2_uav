@@ -17,6 +17,7 @@ from algorithm.modules.structured_uniform import StructuredUniformIndependentAct
 from .networks import IndependentActors
 from .recurrent import RecurrentIndependentActors
 from .recurrent_buffer import RecurrentRolloutBuffer
+from .relational_critic import RelationalCentralizedCritic
 from .agp import apply_agp
 from .curriculum import DEFAULT_CURRICULUM_SCHEDULE, nearest_probability, normalized_schedule
 
@@ -26,7 +27,7 @@ DEFAULTS = {
     "gamma": 0.99, "gae_lambda": 0.95, "ppo_epochs": 4, "minibatch_size": 256,
     "clip_coef": 0.2, "actor_learning_rate": 3e-4, "critic_learning_rate": 1e-3,
     "entropy_coef": 0.01, "value_loss_coef": 0.5, "max_grad_norm": 0.5,
-    "hidden_dim": 128, "actor_variant": "vanilla", "method_variant": "baseline",
+    "hidden_dim": 128, "actor_variant": "vanilla", "critic_variant": "mlp", "method_variant": "baseline",
     "agp_lambda": 0.5, "curriculum_schedule": DEFAULT_CURRICULUM_SCHEDULE,
     "curriculum_total_steps": None,
     "hrta_entity_dim": 32, "hrta_role_dim": 16, "hrta_fusion_hidden_dim": 64,
@@ -62,6 +63,12 @@ class HAPPOTrainer:
             raise ValueError("invalid method_variant")
         if c["actor_variant"] != "vanilla" and c["method_variant"] != "baseline":
             raise ValueError("AGP and curriculum methods require actor_variant='vanilla'")
+        if c["critic_variant"] not in ("mlp", "relational"):
+            raise ValueError("critic_variant must be 'mlp' or 'relational'")
+        if c["critic_variant"] == "relational" and (
+            c["actor_variant"] != "vanilla" or c["method_variant"] != "baseline"
+        ):
+            raise ValueError("relational critic is only supported with vanilla actors and baseline HAPPO")
         self.agp_enabled = c["method_variant"] in ("agp", "agp_curriculum")
         self.curriculum_enabled = c["method_variant"] in ("curriculum", "agp_curriculum")
         self.curriculum_schedule = normalized_schedule(c.get("curriculum_schedule"))
@@ -102,7 +109,10 @@ class HAPPOTrainer:
             ).to(self.device)
         else:
             raise ValueError("actor_variant must be 'vanilla', 'hrta', 'structured_uniform' or 'recurrent'")
-        self.critic = CentralizedCritic(GLOBAL_STATE_DIM, int(c["hidden_dim"])).to(self.device)
+        if c["critic_variant"] == "relational":
+            self.critic = RelationalCentralizedCritic(GLOBAL_STATE_DIM).to(self.device)
+        else:
+            self.critic = CentralizedCritic(GLOBAL_STATE_DIM, int(c["hidden_dim"])).to(self.device)
         self.actor_optimizers = [torch.optim.Adam(actor.parameters(), lr=float(c["actor_learning_rate"])) for actor in self.actors.actors]
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=float(c["critic_learning_rate"]))
         self.buffer = self.make_buffer(int(c["rollout_steps"]))
@@ -170,6 +180,16 @@ class HAPPOTrainer:
         return {"per_agent": per_agent, "total": sum(per_agent)}
 
     @property
+    def critic_architecture(self) -> dict[str, int]:
+        if self.config["critic_variant"] == "relational":
+            return RelationalCentralizedCritic.architecture()
+        return {"state_dim": GLOBAL_STATE_DIM, "hidden_dim": int(self.config["hidden_dim"])}
+
+    @property
+    def critic_parameter_count(self) -> int:
+        return sum(parameter.numel() for parameter in self.critic.parameters())
+
+    @property
     def is_recurrent(self) -> bool:
         return self.config["actor_variant"] == "recurrent"
 
@@ -192,6 +212,26 @@ class HAPPOTrainer:
             raise RuntimeError(
                 f"incompatible actor architecture: checkpoint={checkpoint_architecture!r} "
                 f"current={self.actor_architecture!r}"
+            )
+
+    def _validate_critic_architecture(self, data: Mapping[str, Any]) -> None:
+        saved_config = data.get("trainer_config", data.get("config", {}))
+        checkpoint_variant = data.get("critic_variant", saved_config.get("critic_variant", "mlp"))
+        if checkpoint_variant != self.config["critic_variant"]:
+            raise RuntimeError(
+                f"incompatible critic variant: checkpoint={checkpoint_variant!r} "
+                f"current={self.config['critic_variant']!r}"
+            )
+        checkpoint_architecture = data.get("critic_architecture")
+        if checkpoint_variant == "relational" and checkpoint_architecture != self.critic_architecture:
+            raise RuntimeError(
+                f"incompatible critic architecture: checkpoint={checkpoint_architecture!r} "
+                f"current={self.critic_architecture!r}"
+            )
+        if checkpoint_architecture is not None and checkpoint_architecture != self.critic_architecture:
+            raise RuntimeError(
+                f"incompatible critic architecture: checkpoint={checkpoint_architecture!r} "
+                f"current={self.critic_architecture!r}"
             )
 
     def collect_rollout(self) -> list[dict[str, Any]]:
@@ -512,7 +552,7 @@ class HAPPOTrainer:
 
     def save(self, path: str | Path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        torch.save({"environment_version": ENVIRONMENT_VERSION, "environment_profile": self.config["environment_profile"], "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM, "actor_variant": self.config["actor_variant"], "method_variant": self.config["method_variant"], "actor_architecture": self.actor_architecture, "actors": self.actors.state_dict(), "critic": self.critic.state_dict(), "config": self.config}, path)
+        torch.save({"environment_version": ENVIRONMENT_VERSION, "environment_profile": self.config["environment_profile"], "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM, "actor_variant": self.config["actor_variant"], "critic_variant": self.config["critic_variant"], "method_variant": self.config["method_variant"], "actor_architecture": self.actor_architecture, "critic_architecture": self.critic_architecture, "critic_parameter_count": self.critic_parameter_count, "actors": self.actors.state_dict(), "critic": self.critic.state_dict(), "config": self.config}, path)
 
     def checkpoint_state(self) -> dict[str, Any]:
         """Return all state required for an exact continuation of training."""
@@ -524,11 +564,14 @@ class HAPPOTrainer:
             "observation_dim": OBS_DIM,
             "global_state_dim": GLOBAL_STATE_DIM,
             "actor_variant": self.config["actor_variant"],
+            "critic_variant": self.config["critic_variant"],
             "method_variant": self.config["method_variant"],
             "agp_lambda": float(self.config["agp_lambda"]),
             "curriculum_schedule": [list(item) for item in self.curriculum_schedule],
             "curriculum_total_steps": self.curriculum_total_steps,
             "actor_architecture": self.actor_architecture,
+            "critic_architecture": self.critic_architecture,
+            "critic_parameter_count": self.critic_parameter_count,
             "environment_config": deepcopy(self.environment_config),
             "trainer_config": deepcopy(self.config),
             "actors": self.actors.state_dict(),
@@ -567,6 +610,7 @@ class HAPPOTrainer:
         if actual != expected:
             raise RuntimeError("incompatible checkpoint contract for HAPPO environment")
         self._validate_actor_architecture(data)
+        self._validate_critic_architecture(data)
         saved_config = data.get("trainer_config", data.get("config", {}))
         checkpoint_method = data.get("method_variant", saved_config.get("method_variant", "baseline"))
         if checkpoint_method != self.config["method_variant"]:
@@ -659,6 +703,7 @@ class HAPPOTrainer:
         if (data.get("environment_version"), data.get("observation_dim"), data.get("global_state_dim")) != (ENVIRONMENT_VERSION, OBS_DIM, GLOBAL_STATE_DIM):
             raise RuntimeError("incompatible HAPPO checkpoint environment contract")
         self._validate_actor_architecture(data)
+        self._validate_critic_architecture(data)
         if data.get("environment_profile") != self.config["environment_profile"]:
             raise RuntimeError(
                 f"incompatible HAPPO checkpoint environment profile: {data.get('environment_profile')!r} "

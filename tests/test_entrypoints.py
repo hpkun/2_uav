@@ -30,6 +30,8 @@ def test_direct_happo_entrypoints_show_help_without_package_install():
     assert "--steps" in _run("algorithm/train_happo_agp.py", "--help").stdout
     assert "--steps" in _run("algorithm/train_happo_curriculum.py", "--help").stdout
     assert "--steps" in _run("algorithm/train_happo_agp_curriculum.py", "--help").stdout
+    assert "--steps" in _run("algorithm/train_happo_relational_critic.py", "--help").stdout
+    assert "--blue-mode" in _run("algorithm/evaluate_happo_relational_critic.py", "--help").stdout
 
 
 def _simulated_schedule(total: int, interval: int) -> tuple[list[int], list[int]]:

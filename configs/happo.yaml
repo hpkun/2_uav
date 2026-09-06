@@ -18,6 +18,7 @@ training:
   recurrent_hidden_dim: 128
   recurrent_sequence_length: 16
   actor_variant: vanilla
+  critic_variant: mlp
   method_variant: baseline
   agp_lambda: 0.5
   curriculum_schedule:

@@ -38,7 +38,15 @@ TRAINING_FIELDS = (
 LOSS_FIELDS = (*(f"actor_{i}_loss" for i in range(len(RED_IDS))), "critic_loss", "entropy")
 
 
-def _algorithm_name(actor_variant: str, method_variant: str = "baseline") -> str:
+def _algorithm_name(
+    actor_variant: str, method_variant: str = "baseline", critic_variant: str = "mlp",
+) -> str:
+    if critic_variant == "relational":
+        if actor_variant != "vanilla" or method_variant != "baseline":
+            raise ValueError("relational critic only supports vanilla baseline HAPPO")
+        return "rc_happo"
+    if critic_variant != "mlp":
+        raise ValueError(f"unsupported critic_variant: {critic_variant!r}")
     if actor_variant == "vanilla" and method_variant != "baseline":
         method_names = {
             "agp": "happo_agp",
@@ -164,7 +172,7 @@ def _new_run_dir(args: argparse.Namespace) -> Path:
         if args.output_name:
             raise ValueError("--output-name cannot be combined with --resume")
         return checkpoint.parent
-    algorithm = _algorithm_name(args.actor_variant, args.method_variant)
+    algorithm = _algorithm_name(args.actor_variant, args.method_variant, args.critic_variant)
     name = args.output_name or (
         f"{algorithm}_{args.profile}_seed{args.seed}_{_step_label(args.steps)}_"
         f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -226,7 +234,10 @@ def _evaluation_row(
     )
     return {
         "sampled_steps": trainer.env_steps,
-        "algorithm": _algorithm_name(trainer.config["actor_variant"], trainer.config["method_variant"]),
+        "algorithm": _algorithm_name(
+            trainer.config["actor_variant"], trainer.config["method_variant"],
+            trainer.config["critic_variant"],
+        ),
         "method_variant": trainer.config["method_variant"],
         "seed": seed,
         "blue_mode": mode, "training_profile": trainer.config["environment_profile"],
@@ -318,12 +329,18 @@ def _initial_resolved(
 ) -> dict[str, Any]:
     return {
         "environment": dict(env_config), "happo": dict(trainer.config), "profile": args.profile,
-        "algorithm": _algorithm_name(trainer.config["actor_variant"], trainer.config["method_variant"]),
+        "algorithm": _algorithm_name(
+            trainer.config["actor_variant"], trainer.config["method_variant"],
+            trainer.config["critic_variant"],
+        ),
         "method_variant": trainer.config["method_variant"],
         "actor_variant": trainer.config["actor_variant"],
+        "critic_variant": trainer.config["critic_variant"],
         "actor_architecture": trainer.actor_architecture,
         "actor_parameter_count_per_agent": trainer.actor_parameter_counts["per_agent"],
         "actor_parameter_count_total": trainer.actor_parameter_counts["total"],
+        "critic_architecture": trainer.critic_architecture,
+        "critic_parameter_count": trainer.critic_parameter_count,
         "seed": args.seed, "requested_device": args.device, "resolved_device": device,
         "device_fallback_reason": fallback, "num_envs": args.num_envs, "total_steps": args.steps,
         "checkpoint_interval": args.checkpoint_interval, "evaluation_interval": args.eval_interval,
@@ -365,11 +382,14 @@ def _write_resolved_config(
         yaml.safe_dump(resolved, stream, sort_keys=False, allow_unicode=True)
 
 
-def main(actor_variant: str = "vanilla", method_variant: str = "baseline") -> None:
-    algorithm = _algorithm_name(actor_variant, method_variant)
+def main(
+    actor_variant: str = "vanilla", method_variant: str = "baseline", critic_variant: str = "mlp",
+) -> None:
+    algorithm = _algorithm_name(actor_variant, method_variant, critic_variant)
     args = parse_args()
     args.actor_variant = actor_variant
     args.method_variant = method_variant
+    args.critic_variant = critic_variant
     if args.steps <= 0 or args.num_envs <= 0:
         raise ValueError("steps and num-envs must be positive")
     if args.steps % args.num_envs:
@@ -394,7 +414,7 @@ def main(actor_variant: str = "vanilla", method_variant: str = "baseline") -> No
     env_config = load_environment_config(args.env_config.expanduser().resolve())
     config["training"].update({
         "environment_profile": args.profile, "seed": args.seed, "device": device, "num_envs": args.num_envs,
-        "actor_variant": actor_variant, "method_variant": method_variant,
+        "actor_variant": actor_variant, "critic_variant": critic_variant, "method_variant": method_variant,
         "curriculum_total_steps": args.steps if method_variant in ("curriculum", "agp_curriculum") else None,
     })
     trainer = HAPPOTrainer(env_config, config)
@@ -410,10 +430,11 @@ def main(actor_variant: str = "vanilla", method_variant: str = "baseline") -> No
 
         separator = "=" * 60
         start_lines = [
-            separator, f"{algorithm.upper()} TRAINING",
+            separator, f"{'RC-HAPPO' if algorithm == 'rc_happo' else algorithm.upper()} TRAINING",
             f"Run: {run_dir.name}", f"Profile: {args.profile}",
             f"Seed: {args.seed}", f"Device: {device}", f"Envs: {args.num_envs}",
             f"Method: {method_variant}",
+            f"Critic: {critic_variant}",
             f"Rollout: {trainer.config['rollout_steps']}", f"Target steps: {args.steps:,}",
             f"Checkpoint interval: {_interval_text(args.checkpoint_interval)}",
             f"Evaluation interval: {_interval_text(args.eval_interval)}",
@@ -512,7 +533,8 @@ def main(actor_variant: str = "vanilla", method_variant: str = "baseline") -> No
 
         summary = {
             "algorithm": algorithm,
-            "actor_variant": actor_variant, "method_variant": method_variant,
+            "actor_variant": actor_variant, "critic_variant": critic_variant,
+            "method_variant": method_variant,
             "agp_lambda": float(trainer.config["agp_lambda"]),
             "curriculum_schedule": [list(item) for item in trainer.curriculum_schedule],
             "curriculum_total_steps": trainer.curriculum_total_steps,
@@ -521,6 +543,8 @@ def main(actor_variant: str = "vanilla", method_variant: str = "baseline") -> No
             "actor_architecture": trainer.actor_architecture,
             "actor_parameter_count_per_agent": trainer.actor_parameter_counts["per_agent"],
             "actor_parameter_count_total": trainer.actor_parameter_counts["total"],
+            "critic_architecture": trainer.critic_architecture,
+            "critic_parameter_count": trainer.critic_parameter_count,
             "status": "complete", "sampled_steps": trainer.env_steps,
             "training_profile": args.profile, "seed": args.seed, "device": device,
             "num_envs": args.num_envs, "completed_episodes": completed,

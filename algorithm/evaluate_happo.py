@@ -17,6 +17,7 @@ import torch
 
 from algorithm.happo.evaluation import evaluate_actors, summarize_records
 from algorithm.happo.networks import IndependentActors
+from algorithm.happo.relational_critic import RelationalCentralizedCritic
 from env.mavuav import ENVIRONMENT_VERSION, GLOBAL_STATE_DIM, OBS_DIM, load_environment_config
 
 
@@ -35,7 +36,7 @@ def _resolved_device(requested: str) -> str:
     return "cpu" if requested.startswith("cuda") and not torch.cuda.is_available() else requested
 
 
-def main() -> None:
+def main(expected_critic_variant: str = "mlp") -> None:
     args = parse_args()
     if args.episodes <= 0:
         raise ValueError("episodes must be positive")
@@ -54,6 +55,18 @@ def main() -> None:
     method_variant = payload.get("method_variant", trainer_config.get("method_variant", "baseline"))
     if method_variant not in ("baseline", "agp", "curriculum", "agp_curriculum"):
         raise RuntimeError(f"unsupported HAPPO method_variant: {method_variant!r}")
+    critic_variant = payload.get("critic_variant", trainer_config.get("critic_variant", "mlp"))
+    if critic_variant != expected_critic_variant:
+        raise RuntimeError(
+            f"incompatible critic variant: evaluator requires {expected_critic_variant!r}, "
+            f"checkpoint contains {critic_variant!r}"
+        )
+    critic_architecture = payload.get("critic_architecture")
+    if critic_variant == "relational":
+        if method_variant != "baseline":
+            raise RuntimeError("RC-HAPPO evaluator requires method_variant='baseline'")
+        if critic_architecture != RelationalCentralizedCritic.architecture():
+            raise RuntimeError("incompatible relational critic architecture metadata")
     actors = IndependentActors(hidden_dim=int(trainer_config["hidden_dim"])).to(device)
     actors.load_state_dict(payload["actors"])
     actors.eval()
@@ -66,13 +79,16 @@ def main() -> None:
     training_profile = str(payload["environment_profile"])
     modes = ("nearest", "mav_priority") if args.blue_mode == "both" else (args.blue_mode,)
     rows = []
+    algorithm = "rc_happo" if critic_variant == "relational" else "happo"
     for mode in modes:
         records = evaluate_actors(
             actors, env_config, args.episodes, mode, args.profile, seed=1000, device=device,
         )
         rows.append({
             "checkpoint": checkpoint.name, "sampled_steps": int(payload.get("sampled_steps", 0)),
+            "algorithm": algorithm,
             "method_variant": method_variant,
+            "critic_variant": critic_variant,
             "blue_mode": mode, "training_profile": training_profile,
             "evaluation_profile": args.profile, "episodes": args.episodes,
             **summarize_records(records),
@@ -87,8 +103,9 @@ def main() -> None:
     summary_path = checkpoint.parent / f"evaluation_{label}_summary.json"
     with summary_path.open("w", encoding="utf-8") as stream:
         json.dump({
-            "checkpoint": str(checkpoint), "training_profile": training_profile,
+            "algorithm": algorithm, "checkpoint": str(checkpoint), "training_profile": training_profile,
             "evaluation_profile": args.profile, "method_variant": method_variant,
+            "critic_variant": critic_variant, "critic_architecture": critic_architecture,
             "device": device, "results": rows,
         }, stream, indent=2, ensure_ascii=False)
     print({"evaluation_csv": str(csv_path), "summary_json": str(summary_path), "results": rows}, flush=True)

@@ -1,0 +1,5 @@
+sampled_steps,algorithm,seed,blue_mode,environment_profile,episodes,red_win_rate,blue_win_rate,draw_rate,MAV_survival_rate,mean_UAV_survivors,mean_red_attack_kills,mean_blue_attack_kills,mean_episode_length,mean_episode_return,baseline
+0,zero,1,nearest,learnability,1,0.0,0.0,1.0,1.0,3.0,0.0,0.0,2.0,0.8312855177752503,zero
+0,zero,1,mav_priority,learnability,1,0.0,0.0,1.0,1.0,3.0,0.0,0.0,2.0,0.8123070165097446,zero
+0,random,1,nearest,learnability,1,0.0,0.0,1.0,1.0,3.0,0.0,0.0,2.0,0.8279446821462345,random
+0,random,1,mav_priority,learnability,1,0.0,0.0,1.0,1.0,3.0,0.0,0.0,2.0,0.8192594254280869,random
