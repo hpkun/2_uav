@@ -15,7 +15,7 @@ from tools.diagnostics import (
 )
 from algorithm.mappo import MAPPOTrainer
 from algorithm.common.buffer import RolloutBuffer
-from env.mavuav import HeterogeneousMAVUAVAirCombatEnv, load_environment_config
+from env.mavuav import GLOBAL_STATE_DIM, OBS_DIM, RED_IDS, HeterogeneousMAVUAVAirCombatEnv, load_environment_config
 from tools.diagnostics import OBSERVATION_GROUPS
 
 
@@ -32,7 +32,7 @@ def test_fixed_evaluation_seeds_are_identical_across_checkpoints():
 
 def test_action_saturation_statistics_are_agent_and_dimension_specific():
     buffer = RolloutBuffer(1, 1)
-    buffer.actions[0, 0] = np.asarray([[1.0, 0.2, -0.96], [0.0, 0.0, 0.0], [-1.0, 0.5, 0.94]])
+    buffer.actions[0, 0] = np.asarray([[1.0, 0.2, -0.96], [0.0, 0.0, 0.0], [-1.0, 0.5, 0.94], [0.1, -0.2, 0.3]])
     buffer.active_masks[0, 0] = 1.0
     diagnostics = TrainingDiagnostics(); diagnostics.observe_rollout(buffer)
     rows = diagnostics.action_rows("mappo", 1, 1)
@@ -51,9 +51,9 @@ def test_observation_statistics_are_finite_and_cover_groups():
     assert all(np.isfinite(row[key]) for row in rows for key in ("mean", "std", "min", "max", "p01", "p99"))
 
 
-def test_v22_enemy_observation_groups_use_canonical_indices():
-    assert OBSERVATION_GROUPS["enemy_relative_position"] == (33, 34, 35, 47, 48, 49)
-    assert OBSERVATION_GROUPS["enemy_relative_velocity"] == (37, 38, 39, 51, 52, 53)
+def test_v30_enemy_observation_groups_use_canonical_indices():
+    assert OBSERVATION_GROUPS["enemy_relative_position"] == (44, 58, 72, 86, 45, 59, 73, 87, 46, 60, 74, 88)
+    assert OBSERVATION_GROUPS["enemy_relative_velocity"] == (48, 62, 76, 90, 49, 63, 77, 91, 50, 64, 78, 92)
 
 
 def test_compact_diagnostics_preserve_statistics_without_raw_action_history():
@@ -75,12 +75,12 @@ def test_compact_diagnostics_preserve_statistics_without_raw_action_history():
 
 
 def test_legacy_diagnostics_are_compacted_when_loaded():
-    actions = np.asarray([[[1.0, 0.0, -0.5], [0.5, 0.25, 0.0], [-1.0, 0.0, 0.5]]], dtype=np.float32)
+    actions = np.asarray([[[1.0, 0.0, -0.5], [0.5, 0.25, 0.0], [-1.0, 0.0, 0.5], [0.0, 0.0, 0.0]]], dtype=np.float32)
     legacy = {
         "max_observation_samples": 1,
-        "observation_batches": [np.zeros((1, 61), dtype=np.float32)],
+        "observation_batches": [np.zeros((1, OBS_DIM), dtype=np.float32)],
         "action_batches": [actions],
-        "active_mask_batches": [np.ones((1, 3), dtype=np.float32)],
+        "active_mask_batches": [np.ones((1, len(RED_IDS)), dtype=np.float32)],
         "observation_sample_count": 1,
     }
     restored = TrainingDiagnostics.from_state_dict(legacy)
@@ -187,7 +187,7 @@ def test_cuda_calibration_checkpoint_restores_cpu_and_cuda_rng_state(tmp_path: P
     save_calibration_checkpoint(checkpoint, trainer, "mappo", 2, diagnostics)
     restored = tiny_trainer(seed=22, device="cuda")
     sampled_steps, _ = load_calibration_checkpoint(checkpoint, restored, "mappo")
-    assert sampled_steps == 2 and restored.observations.shape[-1] == 61 and restored.global_states.shape[-1] == 67
+    assert sampled_steps == 2 and restored.observations.shape[-1] == OBS_DIM and restored.global_states.shape[-1] == GLOBAL_STATE_DIM
     trainer.close(); restored.close()
 
 
@@ -196,5 +196,5 @@ def test_sampled_step_counting_uses_num_env_transitions_exactly():
     trainer = MAPPOTrainer(config, {"num_envs": 2, "rollout_steps": 3, "ppo_epochs": 1, "minibatch_size": 4, "hidden_dim": 16, "seed": 4})
     diagnostics = TrainingDiagnostics(); _, metrics = train_to_sampled_steps(trainer, 10, diagnostics)
     assert trainer.env_steps == 10 and metrics[-1]["sampled_steps"] == 10
-    assert diagnostics.observation_sample_count == 30
+    assert diagnostics.observation_sample_count == 40
     trainer.close()

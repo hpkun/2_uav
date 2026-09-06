@@ -26,8 +26,8 @@ let playbackRaf = null;
 let playAnchorVisualTime = 0, playAnchorWallTime = 0, speed = 1, trailSeconds = -1;
 let wheelEndTimer = null, wheelActive = false, pointerActive = false, currentView = 'episode';
 const graph = document.getElementById('graph'), loading = document.getElementById('loading');
-const idx = {trajectory: [], current: [], heading: [], deaths: 15, attacks: 16, ground: 17};
-for (let i=0;i<5;i++) { idx.trajectory.push(i); idx.current.push(5+i); idx.heading.push(10+i); }
+const idx = {trajectory: [], current: [], heading: [], deaths: 3*ids.length, attacks: 3*ids.length+1, ground: 3*ids.length+2};
+for (let i=0;i<ids.length;i++) { idx.trajectory.push(i); idx.current.push(ids.length+i); idx.heading.push(2*ids.length+i); }
 const options = id => document.getElementById(id);
 function esc(x) { return String(x).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function eventText(e) {
@@ -70,7 +70,7 @@ async function renderFrame(frameIndex) {
   const tx=[],ty=[],tz=[],tv=[];
   const cx=[],cy=[],cz=[],ct=[],ch=[],cv=[];
   const hx=[],hy=[],hz=[],hv=[];
-  for(let i=0;i<5;i++) {
+  for(let i=0;i<ids.length;i++) {
     const tr=trajectory(i,start,f), q=P.kinematics[f][i], live=P.alive[f][i];
     tx.push(tr.x);ty.push(tr.y);tz.push(tr.z);tv.push(true);
     const text=hover(i,q,live), label=options('showLabels').checked?ids[i]:'';
@@ -173,9 +173,9 @@ async function init(){
  try {
   if(typeof Plotly==='undefined') throw new Error('Embedded Plotly library is unavailable.');
   const data=[];
-  for(let i=0;i<5;i++) data.push({type:'scatter3d',mode:'lines',name:ids[i],x:[],y:[],z:[],line:{color:P.styles[ids[i]].color,width:P.styles[ids[i]].width,dash:P.styles[ids[i]].dash},hoverinfo:'skip'});
-  for(let i=0;i<5;i++) data.push({type:'scatter3d',mode:'markers+text',showlegend:false,x:[],y:[],z:[],text:[],textposition:'top center',hoverinfo:'text',marker:{color:P.styles[ids[i]].color,size:ids[i]==='MAV'?8:6,symbol:P.styles[ids[i]].marker,line:{color:'#fff',width:1}}});
-  for(let i=0;i<5;i++) data.push({type:'scatter3d',mode:'lines',showlegend:false,x:[],y:[],z:[],hoverinfo:'skip',line:{color:P.styles[ids[i]].color,width:4}});
+  for(let i=0;i<ids.length;i++) data.push({type:'scatter3d',mode:'lines',name:ids[i],x:[],y:[],z:[],line:{color:P.styles[ids[i]].color,width:P.styles[ids[i]].width,dash:P.styles[ids[i]].dash},hoverinfo:'skip'});
+  for(let i=0;i<ids.length;i++) data.push({type:'scatter3d',mode:'markers+text',showlegend:false,x:[],y:[],z:[],text:[],textposition:'top center',hoverinfo:'text',marker:{color:P.styles[ids[i]].color,size:ids[i]==='MAV'?8:6,symbol:P.styles[ids[i]].marker,line:{color:'#fff',width:1}}});
+  for(let i=0;i<ids.length;i++) data.push({type:'scatter3d',mode:'lines',showlegend:false,x:[],y:[],z:[],hoverinfo:'skip',line:{color:P.styles[ids[i]].color,width:4}});
   data.push({type:'scatter3d',mode:'markers',name:'Loss',x:[],y:[],z:[],hoverinfo:'text',marker:{symbol:'x',size:8,color:'#222'}});
   data.push({type:'scatter3d',mode:'lines',name:'Attack',x:[],y:[],z:[],hoverinfo:'skip',line:{color:'#ed3b3b',width:7}});
   data.push({type:'mesh3d',name:'Ground reference',showlegend:false,hoverinfo:'skip',x:[P.episode_ranges.x[0],P.episode_ranges.x[1],P.episode_ranges.x[1],P.episode_ranges.x[0]],y:[P.episode_ranges.y[0],P.episode_ranges.y[0],P.episode_ranges.y[1],P.episode_ranges.y[1]],z:[0,0,0,0],i:[0,0],j:[1,2],k:[2,3],color:'#8d99a6',opacity:.07,flatshading:true});
@@ -226,8 +226,8 @@ def render_interactive(input_dir: Path, output: Path | None = None, *, visual_dt
                "full_ranges":{"x":[x/1000 for x in field["x"]],"y":[x/1000 for x in field["y"]],"z":[x/1000 for x in field["altitude"]]},
                "default_camera":{"eye":{"x":1.50,"y":-1.60,"z":1.25},"up":{"x":0,"y":0,"z":1}}}
     outcome={"red":"RED WIN","blue":"BLUE WIN","draw":"DRAW"}.get(meta["outcome"],str(meta["outcome"]).upper())
-    body=(f"{'MAV SURVIVED' if meta['mav_survived'] else 'MAV LOST'}<br>UAV Survivors {meta['red_uav_survivors']}/2<br>"
-          f"Blue Survivors {meta['blue_survivors']}/2<br>Red Attack Kills {meta['red_attack_kills']}<br>Blue Attack Kills {meta['blue_attack_kills']}<br>"
+    body=(f"{'MAV SURVIVED' if meta['mav_survived'] else 'MAV LOST'}<br>UAV Survivors {meta['red_uav_survivors']}/3<br>"
+          f"Blue Survivors {meta['blue_survivors']}/4<br>Red Attack Kills {meta['red_attack_kills']}<br>Blue Attack Kills {meta['blue_attack_kills']}<br>"
           f"Episode Return {meta['episode_return']:.3f}<br>Episode Length {meta['episode_length']}<br>Evaluation Profile {meta['evaluation_profile']}<br>Blue Policy {meta['blue_target_mode']}")
     html=HTML_TEMPLATE.replace("PLOTLY_JS",get_plotlyjs()).replace("PAYLOAD_JSON",_json(payload)).replace("APPLICATION_JS",APP_JS.replace("PAYLOAD","P"))
     # Undo the one placeholder reference: APP_JS expects global P assigned from PAYLOAD.

@@ -7,17 +7,20 @@ from typing import Any
 
 import numpy as np
 
-HETERO_COMBAT_TRACE_SCHEMA_VERSION = 1
+HETERO_COMBAT_TRACE_SCHEMA_VERSION = 2
 MIN_HORIZONTAL_SPAN_KM = 10.0
 CUBE_SPAN_ROUNDING_KM = 0.5
-ENTITY_IDS = ("MAV", "UAV1", "UAV2", "Blue1", "Blue2")
+ENTITY_IDS = ("MAV", "UAV1", "UAV2", "UAV3", "Blue1", "Blue2", "Blue3", "Blue4")
 FEATURES = ("x", "y", "h", "v", "theta", "psi")
 STYLES = {
     "MAV": {"color": "#c5163a", "marker": "diamond", "mpl_marker": "D", "width": 3.0, "dash": "solid"},
     "UAV1": {"color": "#c5163a", "marker": "circle", "mpl_marker": "o", "width": 2.0, "dash": "solid"},
     "UAV2": {"color": "#c5163a", "marker": "circle", "mpl_marker": "o", "width": 2.0, "dash": "solid"},
+    "UAV3": {"color": "#c5163a", "marker": "circle", "mpl_marker": "o", "width": 2.0, "dash": "solid"},
     "Blue1": {"color": "#4169e1", "marker": "triangle-up", "mpl_marker": "^", "width": 2.0, "dash": "dash"},
     "Blue2": {"color": "#4169e1", "marker": "triangle-up", "mpl_marker": "^", "width": 2.0, "dash": "dash"},
+    "Blue3": {"color": "#4169e1", "marker": "triangle-up", "mpl_marker": "^", "width": 2.0, "dash": "dash"},
+    "Blue4": {"color": "#4169e1", "marker": "triangle-up", "mpl_marker": "^", "width": 2.0, "dash": "dash"},
 }
 
 
@@ -34,10 +37,11 @@ def validate_raw_trace(trace: dict[str, np.ndarray]) -> None:
     if missing:
         raise ValueError(f"trace is missing arrays: {sorted(missing)}")
     f = len(trace["time_s"])
-    if trace["kinematics"].shape != (f, 5, 6) or trace["alive"].shape != (f, 5):
-        raise ValueError("trace kinematics/alive shape violates schema [F,5,6]/[F,5]")
-    if trace["red_actions"].shape != (f - 1, 3, 3):
-        raise ValueError("trace red_actions shape violates schema [F-1,3,3]")
+    entity_count = len(ENTITY_IDS)
+    if trace["kinematics"].shape != (f, entity_count, 6) or trace["alive"].shape != (f, entity_count):
+        raise ValueError(f"trace kinematics/alive shape violates schema [F,{entity_count},6]/[F,{entity_count}]")
+    if trace["red_actions"].shape != (f - 1, 4, 3):
+        raise ValueError("trace red_actions shape violates schema [F-1,4,3]")
 
 
 def load_trace(input_dir: str | Path) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
@@ -103,8 +107,8 @@ def episode_cube_ranges(
     Raw coordinates remain untouched; this helper only selects axis ranges in km.
     """
     values = np.asarray(kinematics, dtype=np.float64)
-    if values.ndim != 3 or values.shape[1:] != (5, 6):
-        raise ValueError("kinematics must have shape [F,5,6]")
+    if values.ndim != 3 or values.shape[1:] != (len(ENTITY_IDS), 6):
+        raise ValueError(f"kinematics must have shape [F,{len(ENTITY_IDS)},6]")
     positions = values[:, :, :3] / 1000.0
     positions = positions[np.all(np.isfinite(positions), axis=-1)]
     if not len(positions):

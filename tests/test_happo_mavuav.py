@@ -4,7 +4,7 @@ import torch
 from algorithm.happo import HAPPOTrainer
 from algorithm.happo.trainer import _restore_cuda_rng_state
 from copy import deepcopy
-from env.mavuav import ENVIRONMENT_VERSION, GLOBAL_STATE_DIM, OBS_DIM, load_environment_config
+from env.mavuav import ENVIRONMENT_VERSION, GLOBAL_STATE_DIM, OBS_DIM, RED_IDS, load_environment_config
 
 
 @pytest.mark.parametrize("profile", ["learnability", "main"])
@@ -15,13 +15,13 @@ def test_happo_trainer_propagates_environment_profile(profile):
     trainer.close()
 
 
-def test_v22_observation_contract_and_vanilla_parameter_count():
+def test_v30_observation_contract_and_vanilla_parameter_count():
     trainer = HAPPOTrainer(config={"num_envs": 1, "rollout_steps": 1, "hidden_dim": 128})
-    assert ENVIRONMENT_VERSION == "heterogeneous_mavuav_3v2_v2_2"
-    assert OBS_DIM == 61 and GLOBAL_STATE_DIM == 67
-    assert all(actor.network[0].in_features == 61 for actor in trainer.actors.actors)
-    assert all(sum(parameter.numel() for parameter in actor.parameters()) == 24838 for actor in trainer.actors.actors)
-    assert sum(sum(parameter.numel() for parameter in actor.parameters()) for actor in trainer.actors.actors) == 74514
+    assert ENVIRONMENT_VERSION == "heterogeneous_mavuav_4v4_v3_0"
+    assert OBS_DIM == 100 and GLOBAL_STATE_DIM == 119
+    assert all(actor.network[0].in_features == OBS_DIM for actor in trainer.actors.actors)
+    assert all(sum(parameter.numel() for parameter in actor.parameters()) == 29830 for actor in trainer.actors.actors)
+    assert sum(sum(parameter.numel() for parameter in actor.parameters()) for actor in trainer.actors.actors) == 119320
     trainer.close()
 
 
@@ -33,6 +33,24 @@ def test_happo_rejects_legacy_v21_55d_checkpoint(tmp_path):
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
     payload["environment_version"] = "heterogeneous_mavuav_3v2_v2_1"
     payload["observation_dim"] = 55
+    torch.save(payload, checkpoint)
+    target = HAPPOTrainer(config={"num_envs": 1, "rollout_steps": 1, "hidden_dim": 8})
+    with pytest.raises(RuntimeError, match="incompatible checkpoint contract"):
+        target.load_checkpoint(checkpoint)
+    target.close()
+
+
+def test_happo_rejects_legacy_v22_3v2_checkpoint_contract(tmp_path):
+    source = HAPPOTrainer(config={"num_envs": 1, "rollout_steps": 1, "hidden_dim": 8})
+    checkpoint = tmp_path / "legacy_v22.pt"
+    source.save_checkpoint(checkpoint)
+    source.close()
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    payload.update({
+        "environment_version": "heterogeneous_mavuav_3v2_v2_2",
+        "observation_dim": 61,
+        "global_state_dim": 67,
+    })
     torch.save(payload, checkpoint)
     target = HAPPOTrainer(config={"num_envs": 1, "rollout_steps": 1, "hidden_dim": 8})
     with pytest.raises(RuntimeError, match="incompatible checkpoint contract"):
@@ -55,14 +73,14 @@ def test_happo_rollout_gae_sequential_updates_are_finite_and_change_parameters()
     trainer = HAPPOTrainer(env_config, {"num_envs": 2, "rollout_steps": 8, "ppo_epochs": 2, "minibatch_size": 8, "hidden_dim": 16, "seed": 13})
     before = [[p.detach().clone() for p in actor.parameters()] for actor in trainer.actors.actors]
     critic_before = [p.detach().clone() for p in trainer.critic.parameters()]
-    assert len(trainer.actors.actors) == 3 and len({id(actor) for actor in trainer.actors.actors}) == 3
-    assert all(actor.network[0].in_features == 61 for actor in trainer.actors.actors)
-    assert trainer.critic.network[0].in_features == 67
+    assert len(trainer.actors.actors) == len(RED_IDS) and len({id(actor) for actor in trainer.actors.actors}) == len(RED_IDS)
+    assert all(actor.network[0].in_features == OBS_DIM for actor in trainer.actors.actors)
+    assert trainer.critic.network[0].in_features == GLOBAL_STATE_DIM
     completed = trainer.collect_rollout()
     assert completed and all(record["episode_length"] <= 3 for record in completed)
     assert np.all(np.isfinite(trainer.buffer.advantages)) and trainer.buffer.position == 8
     metrics = trainer.update()
-    assert all(np.isfinite(v) for v in metrics.values() if isinstance(v, float)) and sorted(metrics["agent_update_order"]) == [0, 1, 2]
+    assert all(np.isfinite(v) for v in metrics.values() if isinstance(v, float)) and sorted(metrics["agent_update_order"]) == list(range(len(RED_IDS)))
     assert all(any(not torch.equal(a, b) for a, b in zip(snapshot, actor.parameters())) for snapshot, actor in zip(before, trainer.actors.actors))
     assert any(not torch.equal(a, b) for a, b in zip(critic_before, trainer.critic.parameters()))
     assert np.all(np.isfinite(trainer.buffer.returns))

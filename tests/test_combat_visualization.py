@@ -14,7 +14,7 @@ from algorithm.happo.evaluation import evaluate_recurrent_actors
 from algorithm.happo.recurrent import RecurrentIndependentActors
 from algorithm.modules.hrta import HRTAIndependentActors
 from algorithm.modules.structured_uniform import StructuredUniformIndependentActors
-from env.mavuav import ENTITY_IDS, ENVIRONMENT_VERSION, GLOBAL_STATE_DIM, OBS_DIM, load_environment_config
+from env.mavuav import BLUE_IDS, ENTITY_IDS, RED_IDS, ENVIRONMENT_VERSION, GLOBAL_STATE_DIM, OBS_DIM, load_environment_config
 from tools.combat_visualization import (HETERO_COMBAT_TRACE_SCHEMA_VERSION, STYLES, episode_cube_ranges,
                                         interpolate_trace_for_visualization,
                                         shortest_angle_interpolate, validate_raw_trace)
@@ -25,27 +25,27 @@ from tools.replay_policy import infer_method_display_name, load_replay_actors
 
 
 def synthetic_trace(frames: int = 3):
-    kin = np.zeros((frames, 5, 6), dtype=np.float64)
+    kin = np.zeros((frames, len(ENTITY_IDS), 6), dtype=np.float64)
     for f in range(frames):
-        for i in range(5): kin[f, i] = [f*1000+i*100, i*200, 5000+f*100, 200+i*20, .1*f, np.deg2rad(179 if f == 0 else -179)]
-    alive = np.ones((frames, 5), dtype=bool); alive[-1, 3] = False
+        for i in range(len(ENTITY_IDS)): kin[f, i] = [f*1000+i*100, i*200, 5000+f*100, 200+i*20, .1*f, np.deg2rad(179 if f == 0 else -179)]
+    alive = np.ones((frames, len(ENTITY_IDS)), dtype=bool); alive[-1, len(RED_IDS)] = False
     n = frames - 1
     return {"kinematics":kin,"alive":alive,"steps":np.arange(frames),"time_s":np.arange(frames,dtype=float),
-            "red_actions":np.zeros((n,3,3),np.float32),"team_reward":np.zeros(n),"team_situation":np.zeros(n),
+            "red_actions":np.zeros((n,len(RED_IDS),3),np.float32),"team_reward":np.zeros(n),"team_situation":np.zeros(n),
             "event_reward":np.zeros(n),"terminal_reward":np.zeros(n),
             "minimum_friendly_red_distance":np.full(n,500.),"red_safe_distance_violation":np.zeros(n,bool)}
 
 
 def synthetic_metadata():
     config=load_environment_config(None)
-    return {"trace_schema_version":1,"decision_dt":1.,"algorithm":"HAPPO","evaluation_profile":"main",
-            "blue_target_mode":"nearest","entity_types":{"MAV":"MAV","UAV1":"UAV","UAV2":"UAV","Blue1":"Blue","Blue2":"Blue"},
-            "entity_teams":{x:("red" if i<3 else "blue") for i,x in enumerate(ENTITY_IDS)},
+    return {"trace_schema_version":HETERO_COMBAT_TRACE_SCHEMA_VERSION,"decision_dt":1.,"algorithm":"HAPPO","evaluation_profile":"main",
+            "blue_target_mode":"nearest","entity_types":{x:("MAV" if x=="MAV" else "UAV" if x in RED_IDS else "Blue") for x in ENTITY_IDS},
+            "entity_teams":{x:("red" if x in RED_IDS else "blue") for x in ENTITY_IDS},
             "aircraft_specs":config["aircraft_specs"],"battlefield":config["battlefield"],
             "events":[{"trace_frame":2,"time_s":2.,"type":"attack","attacker":"MAV","target":"Blue1"},
                       {"trace_frame":2,"time_s":2.,"type":"attack","attacker":"UAV1","target":"Blue1"},
                       {"trace_frame":2,"time_s":2.,"type":"death","entity":"Blue1","cause":"red_attack"}],
-            "outcome":"red","mav_survived":True,"red_uav_survivors":2,"blue_survivors":1,
+            "outcome":"red","mav_survived":True,"red_uav_survivors":3,"blue_survivors":3,
             "red_attack_kills":1,"blue_attack_kills":0,"episode_return":12.5,"episode_length":2}
 
 
@@ -64,19 +64,19 @@ def recurrent_checkpoint(path: Path, *, hidden_dim: int = 12, recurrent_hidden_d
              "trainer_config":{"actor_variant":"recurrent","method_variant":"baseline",
                                "hidden_dim":hidden_dim,"recurrent_hidden_dim":recurrent_hidden_dim},
              "environment_profile":"learnability","actors":actors.state_dict(),
-             "rollout_state":{"actor_hidden_states":np.ones((1,3,recurrent_hidden_dim),np.float32),
-                              "actor_recurrent_masks":np.ones((1,3),np.float32)}}
+             "rollout_state":{"actor_hidden_states":np.ones((1,len(RED_IDS),recurrent_hidden_dim),np.float32),
+                              "actor_recurrent_masks":np.ones((1,len(RED_IDS)),np.float32)}}
     torch.save(payload,path)
     return actors,payload
 
 
 def test_schema_entity_order_altitude_positive_up_and_shapes():
-    assert ENTITY_IDS == ("MAV","UAV1","UAV2","Blue1","Blue2")
+    assert ENTITY_IDS == ("MAV","UAV1","UAV2","UAV3","Blue1","Blue2","Blue3","Blue4")
     trace=synthetic_trace();validate_raw_trace(trace)
-    assert trace["kinematics"].shape==(3,5,6) and trace["alive"].shape==(3,5)
+    assert trace["kinematics"].shape==(3,8,6) and trace["alive"].shape==(3,8)
     assert trace["steps"][0]==0 and trace["kinematics"][0,0,2]==5000
-    assert {STYLES[x]["color"] for x in ("MAV","UAV1","UAV2")} == {"#c5163a"}
-    assert {STYLES[x]["color"] for x in ("Blue1","Blue2")} == {"#4169e1"}
+    assert {STYLES[x]["color"] for x in RED_IDS} == {"#c5163a"}
+    assert {STYLES[x]["color"] for x in BLUE_IDS} == {"#4169e1"}
 
 
 def test_shortest_angle_and_interpolation_no_future_leakage():
@@ -92,9 +92,9 @@ def test_shortest_angle_and_interpolation_no_future_leakage():
 
 def test_episode_cube_ranges_are_equal_grounded_and_contain_all_finite_positions():
     trace=synthetic_trace(2);kin=trace["kinematics"]
-    kin[0,:,0]=np.linspace(-4000,4000,5);kin[1,:,0]=np.linspace(-4000,4000,5)
-    kin[0,:,1]=np.linspace(-3000,5000,5);kin[1,:,1]=np.linspace(-3000,5000,5)
-    kin[0,:,2]=np.linspace(4000,6000,5);kin[1,:,2]=np.linspace(6000,8000,5)
+    kin[0,:,0]=np.linspace(-4000,4000,len(ENTITY_IDS));kin[1,:,0]=np.linspace(-4000,4000,len(ENTITY_IDS))
+    kin[0,:,1]=np.linspace(-3000,5000,len(ENTITY_IDS));kin[1,:,1]=np.linspace(-3000,5000,len(ENTITY_IDS))
+    kin[0,:,2]=np.linspace(4000,6000,len(ENTITY_IDS));kin[1,:,2]=np.linspace(6000,8000,len(ENTITY_IDS))
     trace["alive"][1,4]=False
     ranges=episode_cube_ranges(kin,trace["alive"])
     spans=[ranges[axis][1]-ranges[axis][0] for axis in ("x","y","z")]
@@ -170,29 +170,29 @@ def test_recurrent_adapter_history_reset_and_agent_masks(tmp_path):
     torch.manual_seed(23);path=tmp_path/"recurrent.pt";recurrent_checkpoint(path)
     adapter=load_replay_actors(path);adapter.reset_episode()
     obs0={aid:np.linspace(-.2,.2,OBS_DIM,dtype=np.float32)+index*.01
-          for index,aid in enumerate(("MAV","UAV1","UAV2"))}
+          for index,aid in enumerate(RED_IDS)}
     obs1={aid:value+.05 for aid,value in obs0.items()}
     first=adapter.actions(obs0)
     first_next=[state.clone() for state in adapter.next_hidden_states]
     assert all(torch.count_nonzero(state)>0 for state in first_next)
-    adapter.after_step([1,1,1],False)
+    adapter.after_step([1,1,1,1],False)
     assert all(torch.equal(state,first_next[index]) for index,state in enumerate(adapter.hidden_states))
     second=adapter.actions(obs1)
     manual=[]
     with torch.no_grad():
-        for index,aid in enumerate(("MAV","UAV1","UAV2")):
+        for index,aid in enumerate(RED_IDS):
             action,_,_=adapter.actors.actors[index].sample_step(
                 torch.as_tensor(obs1[aid]).unsqueeze(0),first_next[index],torch.ones(1),deterministic=True)
             manual.append(action.squeeze(0).numpy())
     assert np.allclose(second,np.asarray(manual))
-    adapter.after_step([1,0,1],False)
-    assert torch.count_nonzero(adapter.hidden_states[1])==0 and adapter.recurrent_masks[:,0].tolist()==[1,0,1]
+    adapter.after_step([1,0,1,1],False)
+    assert torch.count_nonzero(adapter.hidden_states[1])==0 and adapter.recurrent_masks[:,0].tolist()==[1,0,1,1]
     assert torch.count_nonzero(adapter.hidden_states[0])>0 and torch.count_nonzero(adapter.hidden_states[2])>0
     adapter.actions(obs1);blue_death_next=[state.clone() for state in adapter.next_hidden_states]
-    adapter.after_step([1,1,1],False)
+    adapter.after_step([1,1,1,1],False)
     assert all(torch.equal(state,blue_death_next[index]) for index,state in enumerate(adapter.hidden_states))
-    assert adapter.recurrent_masks[:,0].tolist()==[1,1,1]
-    adapter.actions(obs1);adapter.after_step([1,1,1],True)
+    assert adapter.recurrent_masks[:,0].tolist()==[1,1,1,1]
+    adapter.actions(obs1);adapter.after_step([1,1,1,1],True)
     assert all(torch.count_nonzero(state)==0 for state in adapter.hidden_states)
     assert torch.count_nonzero(adapter.recurrent_masks)==0
     reset_first=adapter.actions(obs0)

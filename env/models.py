@@ -1,4 +1,4 @@
-"""Core data models for the MAV/UAV 3v2 environment."""
+"""Core data models for the MAV/UAV 4v4 environment."""
 from __future__ import annotations
 
 from dataclasses import dataclass

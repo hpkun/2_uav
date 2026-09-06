@@ -16,7 +16,7 @@ import yaml
 
 from algorithm.happo import HAPPOTrainer, IndependentActors
 from algorithm.modules.hrta import HRTAIndependentActors
-from env.mavuav import load_environment_config
+from env.mavuav import RED_IDS, load_environment_config
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -46,7 +46,7 @@ def test_default_trainer_remains_vanilla_and_hrta_actors_are_independent():
     hrta = HAPPOTrainer(_short_env(), _config("hrta"))
     assert isinstance(hrta.actors, HRTAIndependentActors)
     parameter_ids = [{id(parameter) for parameter in actor.parameters()} for actor in hrta.actors.actors]
-    assert all(parameter_ids[i].isdisjoint(parameter_ids[j]) for i in range(3) for j in range(i + 1, 3))
+    assert all(parameter_ids[i].isdisjoint(parameter_ids[j]) for i in range(len(RED_IDS)) for j in range(i + 1, len(RED_IDS)))
     hrta.close()
 
 
@@ -161,16 +161,18 @@ def test_hrta_direct_training_resume_evaluation_and_attention_output_smoke():
             rows = list(csv.DictReader(stream))
         required = {
             "episode", "decision_step", "blue_mode", "agent", "outcome",
-            "friend_attention_friend1", "friend_attention_friend2",
-            "enemy_attention_Blue1", "enemy_attention_Blue2", "Blue1_alive", "Blue2_alive",
+            "friend_attention_friend1", "friend_attention_friend2", "friend_attention_friend3",
+            "enemy_attention_Blue1", "enemy_attention_Blue2", "enemy_attention_Blue3", "enemy_attention_Blue4",
+            "Blue1_alive", "Blue2_alive", "Blue3_alive", "Blue4_alive",
             "Blue1_direct_or_datalink_visible", "Blue2_direct_or_datalink_visible",
+            "Blue3_direct_or_datalink_visible", "Blue4_direct_or_datalink_visible",
         }
         assert rows and required <= rows[0].keys()
         for row in rows:
-            weights = np.asarray([float(row["enemy_attention_Blue1"]), float(row["enemy_attention_Blue2"])])
+            weights = np.asarray([float(row[f"enemy_attention_Blue{i}"]) for i in range(1, 5)])
             eligible = np.asarray([
-                int(row["Blue1_alive"]) and int(row["Blue1_direct_or_datalink_visible"]),
-                int(row["Blue2_alive"]) and int(row["Blue2_direct_or_datalink_visible"]),
+                int(row[f"Blue{i}_alive"]) and int(row[f"Blue{i}_direct_or_datalink_visible"])
+                for i in range(1, 5)
             ], dtype=bool)
             assert np.isfinite(weights).all()
             if eligible.any():

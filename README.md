@@ -1,6 +1,8 @@
-# MAV/UAV 3v2 Air-Combat Research Environment
+# MAV/UAV 4v4 Air-Combat Research Environment
 
-本项目包含异构 `1 MAV + 2 UAV vs 2 Blue` 环境、vanilla HAPPO/MAPPO 实现，以及独立的评估和诊断工具。正式研究代码位于 `env/` 与 `algorithm/`，不需要安装当前项目 package。
+本项目包含异构 `1 MAV + 3 UAV vs 4 Blue` 环境、vanilla HAPPO/MAPPO 实现，以及独立的评估和诊断工具。正式研究代码位于 `env/` 与 `algorithm/`，不需要安装当前项目 package。
+
+当前 canonical contract 为 `heterogeneous_mavuav_4v4_v3_0`，actor observation 为 100D，centralized state 为 119D。旧 3v2/v2.2 checkpoint 与结果仅作为历史实验保留，不能续跑到 4v4，也不能与 4v4 baseline 直接合并比较。
 
 ## 环境准备
 
@@ -78,11 +80,11 @@ python algorithm/evaluate_happo.py \
     --blue-mode both
 ```
 
-评估允许训练 profile 与 evaluation profile 不同，用于跨 profile 泛化检查；环境版本、61D observation 和 67D global state contract 仍会严格校验。
+评估允许训练 profile 与 evaluation profile 不同，用于跨 profile 泛化检查；环境版本、100D observation 和 119D global state contract 仍会严格校验。
 
 ## R-HAPPO 基线
 
-R-HAPPO 使用三个独立 GRU Actor，并保持现有 67D centralized MLP Critic 与环境语义不变。训练和独立评估入口为：
+R-HAPPO 使用四个独立 GRU Actor，并保持现有 119D centralized MLP Critic 与环境语义不变。训练和独立评估入口为：
 
 ```bash
 python algorithm/train_happo_recurrent.py --steps 5000000 --profile main --seed 1 --device cuda --num-envs 16

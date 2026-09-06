@@ -16,15 +16,15 @@ from algorithm.happo.agp import (
 from algorithm.happo.curriculum import nearest_probability
 from algorithm.happo import HAPPOTrainer
 from env.blue_policy import BluePolicy
-from env.mavuav import load_environment_config
+from env.mavuav import BLUE_IDS, OBS_DIM, RED_IDS, load_environment_config
 from env.vector_env import MAVUAVVectorEnv
 
 
 DISTANCE_SCALE = 12_000.0
 
 
-def _observations(*, red_alive: tuple[bool, bool, bool] = (True, True, True)) -> np.ndarray:
-    observations = np.zeros((1, 3, 61), dtype=np.float32)
+def _observations(*, red_alive: tuple[bool, ...] = (True, True, True, True)) -> np.ndarray:
+    observations = np.zeros((1, len(RED_IDS), OBS_DIM), dtype=np.float32)
     for agent, alive in enumerate(red_alive):
         observations[0, agent, 6] = float(alive)
     return observations
@@ -43,7 +43,7 @@ def _set_blue(
     datalink: bool = False,
     killed: bool = False,
 ) -> None:
-    start = (33, 44)[blue]
+    start = (44, 58, 72, 86)[blue]
     observations[0, red, start + 3] = distance / DISTANCE_SCALE
     observations[0, red, start + 7] = ata / 180.0
     observations[0, red, start + 8] = aa / 180.0
@@ -91,34 +91,34 @@ def test_agp_smooth_gates_and_pair_bounds():
 
 
 def test_team_potential_observation_contract_visibility_liveness_and_fixed_normalization():
-    observations = _observations(red_alive=(True, False, False))
+    observations = _observations(red_alive=(True, False, False, False))
     _set_blue(observations, 0, 0)
     expected_pair = float(pair_potential(2000.0, 15.0, 45.0))
-    assert team_potential_from_observations(observations, DISTANCE_SCALE)[0] == pytest.approx(expected_pair / 3.0)
+    assert team_potential_from_observations(observations, DISTANCE_SCALE)[0] == pytest.approx(expected_pair / len(RED_IDS))
 
     for change in (
         {"direct": False, "datalink": False},
         {"alive": False},
         {"killed": True},
     ):
-        changed = _observations(red_alive=(True, False, False))
+        changed = _observations(red_alive=(True, False, False, False))
         _set_blue(changed, 0, 0, **change)
         assert team_potential_from_observations(changed, DISTANCE_SCALE)[0] == 0.0
-    dead_red = _observations(red_alive=(False, False, False))
+    dead_red = _observations(red_alive=(False, False, False, False))
     _set_blue(dead_red, 0, 0)
     assert team_potential_from_observations(dead_red, DISTANCE_SCALE)[0] == 0.0
-    assert team_potential_from_observations(np.zeros((2, 3, 61), dtype=np.float32), DISTANCE_SCALE).shape == (2,)
-    with pytest.raises(ValueError, match=r"\[B, 3, 61\]"):
-        team_potential_from_observations(np.zeros((3, 61), dtype=np.float32), DISTANCE_SCALE)
+    assert team_potential_from_observations(np.zeros((2, len(RED_IDS), OBS_DIM), dtype=np.float32), DISTANCE_SCALE).shape == (2,)
+    with pytest.raises(ValueError, match=rf"\[B, {len(RED_IDS)}, {OBS_DIM}\]"):
+        team_potential_from_observations(np.zeros((len(RED_IDS), OBS_DIM), dtype=np.float32), DISTANCE_SCALE)
 
 
 def test_agp_terminal_zeroes_auto_reset_successor_and_scale_is_exact():
     current = _observations()
     following = _observations()
-    for red in range(3):
+    for red in range(len(RED_IDS)):
         _set_blue(current, red, 0, distance=2500, ata=20, aa=60)
         _set_blue(following, red, 0, distance=2000, ata=0, aa=0)
-    base = np.asarray([[1.0, 2.0, 3.0]], dtype=np.float32)
+    base = np.asarray([[1.0, 2.0, 3.0, 4.0]], dtype=np.float32)
     current_phi = team_potential_from_observations(current, DISTANCE_SCALE)[0]
     rewards, raw, shaping = apply_agp(
         base, current, following, np.asarray([True]), DISTANCE_SCALE,
@@ -126,7 +126,7 @@ def test_agp_terminal_zeroes_auto_reset_successor_and_scale_is_exact():
     )
     assert raw[0] == pytest.approx(-current_phi)
     assert shaping[0] == pytest.approx(0.5 * (0.99 * 0.0 - current_phi))
-    np.testing.assert_allclose(rewards - base, np.full((1, 3), shaping[0]), rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(rewards - base, np.full((1, len(RED_IDS)), shaping[0]), rtol=1e-6, atol=1e-6)
 
     nonterminal_rewards, nonterminal_raw, nonterminal_shaping = apply_agp(
         base, current, following, np.asarray([False]), DISTANCE_SCALE,
@@ -135,7 +135,7 @@ def test_agp_terminal_zeroes_auto_reset_successor_and_scale_is_exact():
     next_phi = team_potential_from_observations(following, DISTANCE_SCALE)[0]
     assert nonterminal_raw[0] == pytest.approx(0.99 * next_phi - current_phi)
     assert nonterminal_shaping[0] == pytest.approx(0.5 * nonterminal_raw[0])
-    np.testing.assert_allclose(nonterminal_rewards - base, np.full((1, 3), nonterminal_shaping[0]), rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(nonterminal_rewards - base, np.full((1, len(RED_IDS)), nonterminal_shaping[0]), rtol=1e-6, atol=1e-6)
 
 
 @pytest.mark.parametrize(
@@ -169,7 +169,7 @@ def test_vector_auto_reset_changes_only_the_next_episode_mode(parallel):
         *_, reset_infos = vector.reset(nearest_probability=0.0)
         assert reset_infos[0]["blue_target_mode"] == "mav_priority"
         *_, infos = vector.step(
-            np.zeros((1, 3, 3), dtype=np.float32), reset_nearest_probability=1.0,
+            np.zeros((1, len(RED_IDS), 3), dtype=np.float32), reset_nearest_probability=1.0,
         )
         assert infos[0]["episode_summary"]["blue_target_mode"] == "mav_priority"
         assert infos[0]["reset_info"]["blue_target_mode"] == "nearest"
@@ -196,7 +196,7 @@ def test_baseline_rollout_reward_is_unshaped_and_method_isolation_preserves_acto
             monkeypatch.setattr(trainer.vector_env, "step", capture)
             trainer.collect_rollout()
             np.testing.assert_array_equal(trainer.buffer.rewards[0], captured[0][:, 0])
-            np.testing.assert_array_equal(captured[0], np.repeat(captured[0][:, :1], 3, axis=1))
+            np.testing.assert_array_equal(captured[0], np.repeat(captured[0][:, :1], len(RED_IDS), axis=1))
             assert trainer.last_rollout_metrics["agp_shaping_mean_abs"] == 0.0
         trainer.close()
     assert len(set(counts)) == 1

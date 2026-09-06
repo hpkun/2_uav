@@ -31,10 +31,10 @@ def _payload(seed: int = 7) -> dict:
     return {
         "format": "happo_training_checkpoint_v1",
         "sampled_steps": 2_000_000,
-        "environment_version": ENVIRONMENT_VERSION,
+        "environment_version": "heterogeneous_mavuav_3v2_v2_2",
         "environment_profile": "main",
-        "observation_dim": OBS_DIM,
-        "global_state_dim": GLOBAL_STATE_DIM,
+        "observation_dim": 61,
+        "global_state_dim": 67,
         "actor_variant": "vanilla",
         "method_variant": "baseline",
         "environment_config": load_environment_config(None),
@@ -59,14 +59,8 @@ def _checkpoint(tmp_path: Path, *, final_only: bool = False) -> Path:
 
 def test_v22_checkpoint_contract_and_checkpoint_preference(tmp_path):
     payload = _payload()
-    validated = validate_checkpoint_contract(payload)
-    assert validated == {
-        "environment_version": "heterogeneous_mavuav_3v2_v2_2",
-        "observation_dim": 61,
-        "global_state_dim": 67,
-        "actor_variant": "vanilla",
-        "method_variant": "baseline",
-    }
+    with pytest.raises(RuntimeError, match="current source tree is not the required v2.2"):
+        validate_checkpoint_contract(payload)
     for field, bad in (
         ("environment_version", "heterogeneous_mavuav_3v2_v2_1"),
         ("observation_dim", 55),
@@ -126,36 +120,17 @@ def test_failure_taxonomy_is_mutually_exclusive(row, expected):
     assert classify_failure(row) == expected
 
 
-def _assert_one_episode_smoke(tmp_path: Path, device: str) -> None:
+def _assert_historical_audit_rejects_current_source(tmp_path: Path, device: str) -> None:
     run_dir = _checkpoint(tmp_path, final_only=True)
     output_dir = tmp_path / "audit"
-    paths = run_audit([run_dir], episodes=1, device_name=device, output_dir=output_dir)
-    assert {path.name for path in paths.values()} == {
-        EPISODE_FILENAME, EARLY_FILENAME, SUMMARY_FILENAME, METADATA_FILENAME,
-    }
-    with paths["episodes"].open(encoding="utf-8", newline="") as stream:
-        episode_rows = list(csv.DictReader(stream))
-    with paths["early20"].open(encoding="utf-8", newline="") as stream:
-        early_rows = list(csv.DictReader(stream))
-    with paths["summary"].open(encoding="utf-8", newline="") as stream:
-        summary_rows = list(csv.DictReader(stream))
-    metadata = json.loads(paths["metadata"].read_text(encoding="utf-8"))
-    assert len(episode_rows) == len(summary_rows) == 1
-    assert episode_rows[0]["evaluation_seed"] == "1000"
-    assert 6 <= len(early_rows) <= 120
-    assert {row["red_id"] for row in early_rows} == {"MAV", "UAV1", "UAV2"}
-    assert {row["blue_id"] for row in early_rows} == {"Blue1", "Blue2"}
-    assert max(int(row["step"]) for row in early_rows) <= 19
-    assert metadata["profile"] == "main"
-    assert metadata["blue_mode"] == "nearest"
-    assert metadata["deterministic"] is True
-    assert metadata["compatibility_note"] == "v2.2 current code only; no legacy v2.1 checkpoint compatibility"
+    with pytest.raises(RuntimeError, match="current source tree is not the required v2.2"):
+        run_audit([run_dir], episodes=1, device_name=device, output_dir=output_dir)
+    assert output_dir.exists() and not any(output_dir.iterdir())
 
 
-def test_one_episode_cpu_focused_smoke(tmp_path):
-    _assert_one_episode_smoke(tmp_path, "cpu")
+def test_historical_v22_audit_rejects_current_v30_source_cpu(tmp_path):
+    _assert_historical_audit_rejects_current_source(tmp_path, "cpu")
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
-def test_one_episode_cuda_focused_smoke(tmp_path):
-    _assert_one_episode_smoke(tmp_path, "cuda:0")
+def test_historical_v22_audit_rejects_current_v30_source_cuda_request(tmp_path):
+    _assert_historical_audit_rejects_current_source(tmp_path, "cuda:0")

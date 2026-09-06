@@ -1,4 +1,4 @@
-"""Canonical heterogeneous 1 MAV + 2 UAV versus 2 Blue environment."""
+"""Canonical heterogeneous 1 MAV + 3 UAV versus 4 Blue environment."""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -14,18 +14,18 @@ from .models import Aircraft, AircraftSpec, AircraftState
 from .reward import situation_reward
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "env.yaml"
-RED_IDS = ("MAV", "UAV1", "UAV2")
-BLUE_IDS = ("Blue1", "Blue2")
+RED_IDS = ("MAV", "UAV1", "UAV2", "UAV3")
+BLUE_IDS = ("Blue1", "Blue2", "Blue3", "Blue4")
 ENTITY_IDS = RED_IDS + BLUE_IDS
-TYPE_BY_ID = {"MAV": "MAV", "UAV1": "UAV", "UAV2": "UAV", "Blue1": "Blue", "Blue2": "Blue"}
+TYPE_BY_ID = {aid: ("MAV" if aid == "MAV" else "UAV" if aid in RED_IDS else "Blue") for aid in ENTITY_IDS}
 TYPE_ONE_HOT = {
     "MAV": (1.0, 0.0, 0.0),
     "UAV": (0.0, 1.0, 0.0),
     "Blue": (0.0, 0.0, 1.0),
 }
-ENVIRONMENT_VERSION = "heterogeneous_mavuav_3v2_v2_2"
-OBS_DIM = 61
-GLOBAL_STATE_DIM = 67
+ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_0"
+OBS_DIM = 100
+GLOBAL_STATE_DIM = 119
 CROSS_TEAM_ATTACK_PAIRS = tuple((red, blue) for red in RED_IDS for blue in BLUE_IDS) + tuple(
     (blue, red) for blue in BLUE_IDS for red in RED_IDS
 )
@@ -74,7 +74,7 @@ def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError(f"aircraft_specs.{aircraft_type} has unknown or missing fields")
         AircraftSpec(aircraft_type, float(raw["v_min"]), float(raw["v_max"]), _pair(raw["nx"], "nx"), _pair(raw["ny"], "ny"), _pair(raw["nz"], "nz"))
     if set(cfg["scenario"]) != {"default_profile", "initial"} or set(cfg["scenario"]["initial"]) != set(ENTITY_IDS):
-        raise ValueError("scenario must define default_profile and the five fixed initial entity slots")
+        raise ValueError("scenario must define default_profile and the eight fixed initial entity slots")
     profiles = cfg["randomization_profiles"]
     if set(profiles) != {"learnability", "main"} or cfg["scenario"]["default_profile"] not in profiles:
         raise ValueError("randomization_profiles must define learnability/main and include scenario.default_profile")
@@ -133,7 +133,7 @@ def load_environment_config(path_or_config: str | Path | Mapping[str, Any] | Non
 
 
 class HeterogeneousMAVUAVAirCombatEnv:
-    """Three trainable Red agents and two fixed-rule homogeneous Blue aircraft."""
+    """Four trainable Red agents and four fixed-rule homogeneous Blue aircraft."""
 
     red_ids = RED_IDS
     blue_ids = BLUE_IDS
@@ -233,8 +233,9 @@ class HeterogeneousMAVUAVAirCombatEnv:
             result = {aid: np.asarray(actions[aid], dtype=np.float64) for aid in RED_IDS}
         else:
             values = np.asarray(actions, dtype=np.float64)
-            if values.shape != (3, 3):
-                raise ValueError(f"actions must have shape (3, 3), got {values.shape}")
+            expected_shape = (len(RED_IDS), 3)
+            if values.shape != expected_shape:
+                raise ValueError(f"actions must have shape {expected_shape}, got {values.shape}")
             result = {aid: values[index] for index, aid in enumerate(RED_IDS)}
         for aid, action in result.items():
             if action.shape != (3,) or not np.all(np.isfinite(action)):
@@ -272,7 +273,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
         situation = self._team_situation_reward()
         reward_cfg = self.config["reward"]
         event = reward_cfg["blue_kill"] * sum(aid in BLUE_IDS and cause == "red_attack" for aid, cause in death_causes.items())
-        event += reward_cfg["uav_loss"] * sum(aid in ("UAV1", "UAV2") for aid in death_causes)
+        event += reward_cfg["uav_loss"] * sum(aid in RED_IDS[1:] for aid in death_causes)
         event += reward_cfg["mav_loss"] * int("MAV" in death_causes)
         terminal = 0.0
         if outcome == "red": terminal = float(reward_cfg["terminal_red_win"])
@@ -378,16 +379,16 @@ class HeterogeneousMAVUAVAirCombatEnv:
             own = self.entities[aid]
             if own.state.alive and visible_alive_blue:
                 total += max(situation_reward(own.state, target.state) for target in visible_alive_blue)
-        return float(total / 3.0)
+        return float(total / len(RED_IDS))
 
     def _episode_summary(self, outcome: str | None) -> dict[str, Any]:
         return {
             "outcome": outcome, "episode_length": self.step_count,
             "mav_survived": bool(self.entities["MAV"].state.alive),
-            "red_uav_survivors": sum(self.entities[aid].state.alive for aid in ("UAV1", "UAV2")),
+            "red_uav_survivors": sum(self.entities[aid].state.alive for aid in RED_IDS[1:]),
             "blue_survivors": sum(self.entities[aid].state.alive for aid in BLUE_IDS),
             "red_attack_kills": len(self._red_attack_kills), "blue_attack_kills": len(self._blue_attack_kills),
-            "red_uav_losses": sum(not self.entities[aid].state.alive for aid in ("UAV1", "UAV2")),
+            "red_uav_losses": sum(not self.entities[aid].state.alive for aid in RED_IDS[1:]),
             "mav_loss": int(not self.entities["MAV"].state.alive),
             "blue_target_mode": self.blue_policy.episode_mode, "episode_return": float(self.episode_return),
         }
@@ -438,8 +439,8 @@ class HeterogeneousMAVUAVAirCombatEnv:
         for own_id in RED_IDS:
             own = self.entities[own_id]
             state = own.state
-            # Stable 61D contract: self 11D, two Red teammates 11D each,
-            # then Blue1/Blue2 enemy blocks 14D each.
+            # Stable 100D contract: self 11D, three Red teammates 11D each,
+            # then four Blue enemy blocks of 14D each.
             values = [
                 self._self_xy_norm(state.x), self._self_xy_norm(state.y), self._altitude_norm(state.h),
                 float(np.clip(state.v / 400.0, 0.0, 1.0)), state.theta / np.pi, state.psi / np.pi,

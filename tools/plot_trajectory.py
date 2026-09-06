@@ -24,8 +24,8 @@ from env.mavuav import (
 
 
 COLORS = {
-    "MAV": "#d62728", "UAV1": "#ff7f0e", "UAV2": "#bcbd22",
-    "Blue1": "#1f77b4", "Blue2": "#17becf",
+    "MAV": "#d62728", "UAV1": "#ff7f0e", "UAV2": "#bcbd22", "UAV3": "#e377c2",
+    "Blue1": "#1f77b4", "Blue2": "#17becf", "Blue3": "#9467bd", "Blue4": "#2ca02c",
 }
 
 

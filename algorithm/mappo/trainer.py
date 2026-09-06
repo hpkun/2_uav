@@ -9,7 +9,7 @@ import torch
 from torch import nn
 
 from env.vector_env import MAVUAVVectorEnv
-from env.mavuav import ENVIRONMENT_VERSION, GLOBAL_STATE_DIM, OBS_DIM
+from env.mavuav import ENVIRONMENT_VERSION, GLOBAL_STATE_DIM, OBS_DIM, RED_IDS
 from algorithm.common.buffer import RolloutBuffer
 from algorithm.common.networks import CentralizedCritic, GaussianActor
 
@@ -54,8 +54,8 @@ class MAPPOTrainer:
             with torch.no_grad():
                 actions, log_probs = self.actor.sample(obs_tensor.reshape(-1, OBS_DIM))
                 values = self.critic(state_tensor)
-            actions_np = actions.reshape(self.buffer.num_envs, 3, 3).cpu().numpy()
-            log_probs_np = log_probs.reshape(self.buffer.num_envs, 3).cpu().numpy()
+            actions_np = actions.reshape(self.buffer.num_envs, len(RED_IDS), 3).cpu().numpy()
+            log_probs_np = log_probs.reshape(self.buffer.num_envs, len(RED_IDS)).cpu().numpy()
             next_obs, next_states, rewards, terminated, truncated, next_masks, infos = self.vector_env.step(actions_np)
             self.buffer.insert(self.observations, self.global_states, actions_np, log_probs_np, rewards, values.cpu().numpy(), terminated, truncated, self.active_masks)
             for info in infos:
@@ -74,7 +74,7 @@ class MAPPOTrainer:
         actions = torch.as_tensor(self.buffer.actions.reshape(-1, 3), device=self.device)
         old_log_probs = torch.as_tensor(self.buffer.log_probs.reshape(-1), device=self.device)
         active = torch.as_tensor(self.buffer.active_masks.reshape(-1), device=self.device) > 0.5
-        advantages_team = np.repeat(self.buffer.advantages[..., None], 3, axis=-1).reshape(-1)
+        advantages_team = np.repeat(self.buffer.advantages[..., None], len(RED_IDS), axis=-1).reshape(-1)
         advantages = torch.as_tensor(advantages_team, device=self.device)
         if active.any():
             mean, std = advantages[active].mean(), advantages[active].std(unbiased=False).clamp_min(1e-8)
@@ -87,7 +87,7 @@ class MAPPOTrainer:
             order = self.rng.permutation(batch_size)
             for start in range(0, batch_size, mini):
                 team_idx = order[start:start + mini]
-                agent_idx = np.concatenate([3 * team_idx + i for i in range(3)])
+                agent_idx = np.concatenate([len(RED_IDS) * team_idx + i for i in range(len(RED_IDS))])
                 idx = torch.as_tensor(agent_idx, device=self.device)
                 idx = idx[active[idx]]
                 if len(idx):

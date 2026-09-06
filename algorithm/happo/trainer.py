@@ -11,7 +11,7 @@ from torch import nn
 from algorithm.common.buffer import RolloutBuffer
 from algorithm.common.networks import CentralizedCritic
 from env.vector_env import MAVUAVVectorEnv
-from env.mavuav import ENVIRONMENT_VERSION, GLOBAL_STATE_DIM, OBS_DIM, load_environment_config
+from env.mavuav import ENVIRONMENT_VERSION, GLOBAL_STATE_DIM, OBS_DIM, RED_IDS, load_environment_config
 from algorithm.modules.hrta import HRTAIndependentActors
 from algorithm.modules.structured_uniform import StructuredUniformIndependentActors
 from .networks import IndependentActors
@@ -112,9 +112,9 @@ class HAPPOTrainer:
         )
         if self.is_recurrent:
             self.actor_hidden_states = np.zeros(
-                (int(c["num_envs"]), 3, int(c["recurrent_hidden_dim"])), dtype=np.float32,
+                (int(c["num_envs"]), len(RED_IDS), int(c["recurrent_hidden_dim"])), dtype=np.float32,
             )
-            self.actor_recurrent_masks = np.zeros((int(c["num_envs"]), 3), dtype=np.float32)
+            self.actor_recurrent_masks = np.zeros((int(c["num_envs"]), len(RED_IDS)), dtype=np.float32)
         self.env_steps = 0
         self.completed_episodes: list[dict[str, Any]] = []
         self.current_blue_modes = [str(info["blue_target_mode"]) for info in reset_infos]
@@ -330,16 +330,17 @@ class HAPPOTrainer:
         if self.is_recurrent:
             return self._update_recurrent()
         c = self.config
-        observations = torch.as_tensor(self.buffer.observations.reshape(-1, 3, OBS_DIM), device=self.device)
-        actions = torch.as_tensor(self.buffer.actions.reshape(-1, 3, 3), device=self.device)
-        old_log_probs = torch.as_tensor(self.buffer.log_probs.reshape(-1, 3), device=self.device)
-        active_masks = torch.as_tensor(self.buffer.active_masks.reshape(-1, 3), device=self.device)
+        num_agents = len(RED_IDS)
+        observations = torch.as_tensor(self.buffer.observations.reshape(-1, num_agents, OBS_DIM), device=self.device)
+        actions = torch.as_tensor(self.buffer.actions.reshape(-1, num_agents, 3), device=self.device)
+        old_log_probs = torch.as_tensor(self.buffer.log_probs.reshape(-1, num_agents), device=self.device)
+        active_masks = torch.as_tensor(self.buffer.active_masks.reshape(-1, num_agents), device=self.device)
         advantages = torch.as_tensor(self.buffer.advantages.reshape(-1), device=self.device)
         states = torch.as_tensor(self.buffer.global_states.reshape(-1, GLOBAL_STATE_DIM), device=self.device)
         returns = torch.as_tensor(self.buffer.returns.reshape(-1), device=self.device)
         factor = torch.ones_like(advantages)
-        order = [int(v) for v in self.rng.permutation(3)]
-        actor_losses: list[list[float]] = [[], [], []]; entropies: list[float] = []
+        order = [int(v) for v in self.rng.permutation(num_agents)]
+        actor_losses: list[list[float]] = [[] for _ in RED_IDS]; entropies: list[float] = []
         clip = float(c["clip_coef"]); mini = int(c["minibatch_size"]); total = len(advantages)
         for agent in order:
             active = active_masks[:, agent] > 0.5
@@ -373,7 +374,7 @@ class HAPPOTrainer:
                 self.critic_optimizer.zero_grad(); (float(c["value_loss_coef"]) * value_loss).backward()
                 nn.utils.clip_grad_norm_(self.critic.parameters(), float(c["max_grad_norm"])); self.critic_optimizer.step()
                 critic_losses.append(float(value_loss.item()))
-        metrics: dict[str, Any] = {f"actor_{i}_loss": float(np.mean(actor_losses[i])) if actor_losses[i] else 0.0 for i in range(3)}
+        metrics: dict[str, Any] = {f"actor_{i}_loss": float(np.mean(actor_losses[i])) if actor_losses[i] else 0.0 for i in range(num_agents)}
         metrics.update({"actor_loss": float(np.mean([v for rows in actor_losses for v in rows])), "critic_loss": float(np.mean(critic_losses)), "entropy": float(np.mean(entropies)), "agent_update_order": order})
         metrics.update(self.last_rollout_metrics)
         if not all(np.isfinite(v) for v in metrics.values() if isinstance(v, float)): raise FloatingPointError("non-finite HAPPO update")
@@ -420,8 +421,9 @@ class HAPPOTrainer:
         active_masks = torch.as_tensor(buffer.active_masks, device=self.device)
         advantages = torch.as_tensor(buffer.advantages, device=self.device)
         factor = torch.ones_like(advantages)
-        order = [int(value) for value in self.rng.permutation(3)]
-        actor_losses: list[list[float]] = [[], [], []]
+        num_agents = len(RED_IDS)
+        order = [int(value) for value in self.rng.permutation(num_agents)]
+        actor_losses: list[list[float]] = [[] for _ in RED_IDS]
         entropies: list[float] = []
         clip = float(c["clip_coef"])
         mini = int(c["minibatch_size"])
@@ -491,7 +493,7 @@ class HAPPOTrainer:
         flat_actor_losses = [value for rows in actor_losses for value in rows]
         metrics: dict[str, Any] = {
             f"actor_{agent}_loss": float(np.mean(actor_losses[agent])) if actor_losses[agent] else 0.0
-            for agent in range(3)
+            for agent in range(num_agents)
         }
         metrics.update({
             "actor_loss": float(np.mean(flat_actor_losses)) if flat_actor_losses else 0.0,
@@ -619,11 +621,11 @@ class HAPPOTrainer:
             self.actor_hidden_states = np.asarray(rollout["actor_hidden_states"], dtype=np.float32)
             self.actor_recurrent_masks = np.asarray(rollout["actor_recurrent_masks"], dtype=np.float32)
             expected_hidden = (
-                int(self.config["num_envs"]), 3, int(self.config["recurrent_hidden_dim"]),
+                int(self.config["num_envs"]), len(RED_IDS), int(self.config["recurrent_hidden_dim"]),
             )
             if self.actor_hidden_states.shape != expected_hidden:
                 raise RuntimeError("checkpoint recurrent hidden-state shape mismatch")
-            if self.actor_recurrent_masks.shape != (int(self.config["num_envs"]), 3):
+            if self.actor_recurrent_masks.shape != (int(self.config["num_envs"]), len(RED_IDS)):
                 raise RuntimeError("checkpoint recurrent mask shape mismatch")
         self.vector_env.set_env_states(
             rollout["environment_states"],

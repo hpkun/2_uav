@@ -21,7 +21,7 @@ import yaml
 
 from algorithm.happo import HAPPOTrainer
 from algorithm.happo.evaluation import evaluate_actors, evaluate_recurrent_actors, summarize_records
-from env.mavuav import load_environment_config
+from env.mavuav import RED_IDS, load_environment_config
 
 
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "happo.yaml"
@@ -30,12 +30,12 @@ OUTPUT_ROOT = PROJECT_ROOT / "outputs"
 TRAINING_FIELDS = (
     "sampled_steps", "completed_episodes", "mean_episode_return", "red_win_rate", "blue_win_rate",
     "draw_rate", "MAV_survival_rate", "mean_UAV_survivors", "mean_red_attack_kills",
-    "mean_blue_attack_kills", "mean_episode_length", "actor_0_loss", "actor_1_loss",
-    "actor_2_loss", "critic_loss", "entropy", "method_variant", "p_nearest",
+    "mean_blue_attack_kills", "mean_episode_length", *(f"actor_{i}_loss" for i in range(len(RED_IDS))),
+    "critic_loss", "entropy", "method_variant", "p_nearest",
     "agp_raw_mean", "agp_raw_mean_abs", "agp_shaping_mean", "agp_shaping_mean_abs",
     "transitions_nearest", "transitions_mav_priority", "episodes_nearest", "episodes_mav_priority",
 )
-LOSS_FIELDS = ("actor_0_loss", "actor_1_loss", "actor_2_loss", "critic_loss", "entropy")
+LOSS_FIELDS = (*(f"actor_{i}_loss" for i in range(len(RED_IDS))), "critic_loss", "entropy")
 
 
 def _algorithm_name(actor_variant: str, method_variant: str = "baseline") -> str:
@@ -290,9 +290,9 @@ def _progress_lines(
             "        MAV survival n/a | UAV survivors n/a",
             "        Red kills n/a | Blue kills n/a | ep length n/a",
         ])
+    actor_loss_text = ", ".join(f"{losses[f'actor_{i}_loss']:.3f}" for i in range(len(RED_IDS)))
     lines.extend([
-        f"        actor loss [{losses['actor_0_loss']:.3f}, {losses['actor_1_loss']:.3f}, "
-        f"{losses['actor_2_loss']:.3f}]",
+        f"        actor loss [{actor_loss_text}]",
         f"        critic loss {losses['critic_loss']:.3f} | entropy {losses['entropy']:.3f}",
     ])
     return "\n".join(lines)
@@ -456,8 +456,8 @@ def main(actor_variant: str = "vanilla", method_variant: str = "baseline") -> No
             row = {
                 "sampled_steps": trainer.env_steps, "completed_episodes": completed,
                 **_episode_metrics(episodes),
-                "actor_0_loss": metrics["actor_0_loss"], "actor_1_loss": metrics["actor_1_loss"],
-                "actor_2_loss": metrics["actor_2_loss"], "critic_loss": metrics["critic_loss"],
+                **{f"actor_{i}_loss": metrics[f"actor_{i}_loss"] for i in range(len(RED_IDS))},
+                "critic_loss": metrics["critic_loss"],
                 "entropy": metrics["entropy"],
                 **{field: metrics[field] for field in TRAINING_FIELDS if field in metrics},
             }

@@ -3,7 +3,7 @@ import pytest
 import torch
 from algorithm.mappo import MAPPOTrainer
 from copy import deepcopy
-from env.mavuav import load_environment_config
+from env.mavuav import GLOBAL_STATE_DIM, OBS_DIM, load_environment_config
 
 
 @pytest.mark.parametrize("profile", ["learnability", "main"])
@@ -29,8 +29,8 @@ def test_mappo_rollout_gae_updates_are_finite_and_change_parameters():
     trainer = MAPPOTrainer(env_config, {"num_envs": 2, "rollout_steps": 8, "ppo_epochs": 2, "minibatch_size": 8, "hidden_dim": 16, "seed": 12})
     before = [p.detach().clone() for p in trainer.actor.parameters()]
     critic_before = [p.detach().clone() for p in trainer.critic.parameters()]
-    assert trainer.actor.network[0].in_features == 61
-    assert trainer.critic.network[0].in_features == 67
+    assert trainer.actor.network[0].in_features == OBS_DIM
+    assert trainer.critic.network[0].in_features == GLOBAL_STATE_DIM
     completed = trainer.collect_rollout()
     assert completed and all(record["episode_length"] <= 3 for record in completed)
     assert np.all(np.isfinite(trainer.buffer.advantages)) and trainer.buffer.position == 8

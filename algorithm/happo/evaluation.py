@@ -6,7 +6,8 @@ from typing import Any, Mapping
 import numpy as np
 import torch
 
-from env.mavuav import HeterogeneousMAVUAVAirCombatEnv
+from env.mavuav import BLUE_IDS, RED_IDS, HeterogeneousMAVUAVAirCombatEnv
+from algorithm.modules.hrta import ENEMY_SLICES, FRIEND_SLICES
 
 
 def summarize_records(records: list[dict[str, Any]]) -> dict[str, float]:
@@ -43,22 +44,17 @@ def evaluate_actors(actors: Any, env_config: str | Path | Mapping[str, Any] | No
                         enemy = diagnostics["enemy_attention"].squeeze(0).cpu().numpy()
                         friend = diagnostics["friend_attention"].squeeze(0).cpu().numpy()
                         observation = observations[aid]
-                        attention_records.append({
+                        row = {
                             "episode": episode, "decision_step": decision_step,
                             "blue_mode": blue_target_mode, "agent": aid, "outcome": "",
-                            "friend_attention_friend1": float(friend[0]),
-                            "friend_attention_friend2": float(friend[1]),
-                            "enemy_attention_Blue1": float(enemy[0]),
-                            "enemy_attention_Blue2": float(enemy[1]),
-                            "Blue1_alive": int(observation[33 + 9] > 0.5),
-                            "Blue2_alive": int(observation[47 + 9] > 0.5),
-                            "Blue1_direct_or_datalink_visible": int(
-                                observation[33 + 10] > 0.5 or observation[33 + 11] > 0.5
-                            ),
-                            "Blue2_direct_or_datalink_visible": int(
-                                observation[47 + 10] > 0.5 or observation[47 + 11] > 0.5
-                            ),
-                        })
+                        }
+                        row.update({f"friend_attention_friend{i + 1}": float(value) for i, value in enumerate(friend)})
+                        for i, blue_id in enumerate(BLUE_IDS):
+                            start = ENEMY_SLICES[i].start
+                            row[f"enemy_attention_{blue_id}"] = float(enemy[i])
+                            row[f"{blue_id}_alive"] = int(observation[start + 9] > 0.5)
+                            row[f"{blue_id}_direct_or_datalink_visible"] = int(observation[start + 10] > 0.5 or observation[start + 11] > 0.5)
+                        attention_records.append(row)
                     action, _ = actor.sample(actor_observation, deterministic=True)
                     actions.append(action.squeeze(0).cpu().numpy())
             observations, _, terminated, truncated, info = env.step(np.asarray(actions))
@@ -88,7 +84,7 @@ def evaluate_recurrent_actors(
     for episode in range(int(episodes)):
         observations, _ = env.reset(seed=seed + episode)
         hidden = [actor.initial_hidden(1, device=device) for actor in actors.actors]
-        recurrent_masks = torch.zeros((3, 1), device=device)
+        recurrent_masks = torch.zeros((len(RED_IDS), 1), device=device)
         done = False
         while not done:
             actions: list[np.ndarray] = []

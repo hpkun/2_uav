@@ -18,7 +18,7 @@ from algorithm.happo import HAPPOTrainer
 from algorithm.happo.evaluation import evaluate_recurrent_actors
 from algorithm.happo.recurrent import RecurrentGaussianActor
 from algorithm.happo.recurrent_buffer import RecurrentRolloutBuffer, sequence_chunks
-from env.mavuav import GLOBAL_STATE_DIM, load_environment_config
+from env.mavuav import GLOBAL_STATE_DIM, OBS_DIM, RED_IDS, load_environment_config
 
 
 def _trainer_config(**updates):
@@ -56,25 +56,25 @@ def _next_policy_values(trainer: HAPPOTrainer):
 
 def test_recurrent_actor_step_sequence_shapes_and_parameter_count():
     actor = RecurrentGaussianActor()
-    observation = torch.randn(4, 61)
+    observation = torch.randn(4, OBS_DIM)
     hidden = actor.initial_hidden(4)
     action, log_prob, next_hidden = actor.sample_step(observation, hidden, torch.ones(4))
     assert action.shape == (4, 3) and log_prob.shape == (4,) and next_hidden.shape == (4, 128)
     assert all(torch.isfinite(value).all() for value in (action, log_prob, next_hidden))
-    observations = torch.randn(4, 5, 61)
+    observations = torch.randn(4, 5, OBS_DIM)
     actions = torch.tanh(torch.randn(4, 5, 3))
     logs, entropy, final_hidden = actor.evaluate_actions_sequence(
         observations, actions, hidden, torch.ones(4, 5),
     )
     assert logs.shape == entropy.shape == (4, 5) and final_hidden.shape == (4, 128)
     assert all(torch.isfinite(value).all() for value in (logs, entropy, final_hidden))
-    assert sum(parameter.numel() for parameter in actor.parameters()) == 123_910
+    assert sum(parameter.numel() for parameter in actor.parameters()) == 128_902
 
 
 def test_sequence_evaluation_matches_manual_ordered_steps():
     torch.manual_seed(3)
     actor = RecurrentGaussianActor(hidden_dim=12, recurrent_hidden_dim=9)
-    observations = torch.randn(2, 6, 61)
+    observations = torch.randn(2, 6, OBS_DIM)
     actions = torch.tanh(torch.randn(2, 6, 3))
     masks = torch.tensor([[0, 1, 1, 0, 1, 1], [1, 1, 0, 1, 1, 1]], dtype=torch.float32)
     initial = torch.randn(2, 9)
@@ -98,7 +98,7 @@ def test_sequence_evaluation_matches_manual_ordered_steps():
 def test_recurrent_mask_resets_history_and_actor_is_history_sensitive():
     torch.manual_seed(5)
     actor = RecurrentGaussianActor(hidden_dim=16, recurrent_hidden_dim=16)
-    observation = torch.randn(3, 61)
+    observation = torch.randn(3, OBS_DIM)
     prior = torch.randn(3, 16)
     reset_mean, reset_hidden = actor.forward_step(observation, prior, torch.zeros(3))
     zero_mean, zero_hidden = actor.forward_step(observation, torch.zeros_like(prior), torch.zeros(3))
@@ -110,18 +110,18 @@ def test_recurrent_mask_resets_history_and_actor_is_history_sensitive():
 
 def test_recurrent_buffer_stores_pre_action_hidden_and_masks():
     buffer = RecurrentRolloutBuffer(2, 1, recurrent_hidden_dim=4)
-    hidden = np.arange(12, dtype=np.float32).reshape(1, 3, 4)
+    hidden = np.arange(16, dtype=np.float32).reshape(1, len(RED_IDS), 4)
     next_hidden = hidden + 100
-    masks = np.asarray([[0, 1, 1]], dtype=np.float32)
+    masks = np.asarray([[0, 1, 1, 1]], dtype=np.float32)
     buffer.insert(
-        np.zeros((1, 3, 61), np.float32), np.zeros((1, 67), np.float32),
-        np.zeros((1, 3, 3), np.float32), np.zeros((1, 3), np.float32),
-        np.zeros((1, 3), np.float32), np.zeros(1, np.float32),
-        np.zeros(1, bool), np.zeros(1, bool), np.ones((1, 3), np.float32),
+        np.zeros((1, len(RED_IDS), OBS_DIM), np.float32), np.zeros((1, GLOBAL_STATE_DIM), np.float32),
+        np.zeros((1, len(RED_IDS), 3), np.float32), np.zeros((1, len(RED_IDS)), np.float32),
+        np.zeros((1, len(RED_IDS)), np.float32), np.zeros(1, np.float32),
+        np.zeros(1, bool), np.zeros(1, bool), np.ones((1, len(RED_IDS)), np.float32),
         hidden, masks, next_hidden,
     )
-    assert buffer.actor_hidden_states.shape == (3, 1, 3, 4)
-    assert buffer.recurrent_masks.shape == (2, 1, 3)
+    assert buffer.actor_hidden_states.shape == (3, 1, len(RED_IDS), 4)
+    assert buffer.recurrent_masks.shape == (2, 1, len(RED_IDS))
     assert np.array_equal(buffer.actor_hidden_states[0], hidden)
     assert np.array_equal(buffer.actor_hidden_states[1], next_hidden)
     assert np.array_equal(buffer.recurrent_masks[0], masks)
@@ -142,7 +142,7 @@ def test_sequence_chunks_keep_env_time_order_and_short_tail(horizon, expected):
 
 def test_episode_boundary_inside_sequence_resets_at_next_step():
     actor = RecurrentGaussianActor(hidden_dim=10, recurrent_hidden_dim=10)
-    observations = torch.randn(1, 16, 61)
+    observations = torch.randn(1, 16, OBS_DIM)
     actions = torch.tanh(torch.randn(1, 16, 3))
     masks = torch.ones(1, 16)
     masks[:, 0] = 0
@@ -156,7 +156,7 @@ def test_episode_boundary_inside_sequence_resets_at_next_step():
     assert torch.allclose(mean_boundary, mean_zero) and torch.allclose(hidden_boundary, hidden_zero)
 
 
-@pytest.mark.parametrize("done,next_masks", [(False, [1, 0, 1]), (True, [1, 1, 1])])
+@pytest.mark.parametrize("done,next_masks", [(False, [1, 0, 1, 1]), (True, [1, 1, 1, 1])])
 def test_collection_resets_only_required_agent_hidden(monkeypatch, done, next_masks):
     trainer = HAPPOTrainer(_short_env(20), _trainer_config(rollout_steps=1))
     trainer.actor_hidden_states.fill(0.5)
@@ -168,7 +168,7 @@ def test_collection_resets_only_required_agent_hidden(monkeypatch, done, next_ma
         infos = [{"episode_summary": {"outcome": "draw"}, "auto_reset": True,
                   "reset_info": {"blue_target_mode": "nearest"}}] if done else [{}]
         return (
-            observations.copy(), states.copy(), np.zeros((1, 3), np.float32),
+            observations.copy(), states.copy(), np.zeros((1, len(RED_IDS)), np.float32),
             np.asarray([done]), np.asarray([False]), np.asarray([next_masks], np.float32), infos,
         )
 
@@ -181,7 +181,7 @@ def test_collection_resets_only_required_agent_hidden(monkeypatch, done, next_ma
         assert np.count_nonzero(trainer.actor_hidden_states[:, 1]) == 0
         assert np.count_nonzero(trainer.actor_hidden_states[:, 0]) > 0
         assert np.count_nonzero(trainer.actor_hidden_states[:, 2]) > 0
-        assert np.array_equal(trainer.actor_recurrent_masks, np.asarray([[1, 0, 1]], np.float32))
+        assert np.array_equal(trainer.actor_recurrent_masks, np.asarray([[1, 0, 1, 1]], np.float32))
     trainer.close()
 
 
@@ -208,7 +208,7 @@ def test_short_final_chunk_recurrent_update_uses_all_steps(horizon):
     trainer.collect_rollout()
     metrics = trainer.update()
     assert trainer.buffer.position == horizon
-    assert sorted(metrics["agent_update_order"]) == [0, 1, 2]
+    assert sorted(metrics["agent_update_order"]) == list(range(len(RED_IDS)))
     assert all(np.isfinite(value) for value in metrics.values() if isinstance(value, float))
     trainer.close()
 
@@ -233,10 +233,10 @@ def test_recurrent_sequential_factor_matches_sequence_log_probs_and_ignores_inac
 def test_recurrent_critic_and_architecture_contract_are_unchanged():
     trainer = HAPPOTrainer(config=_trainer_config(hidden_dim=128, recurrent_hidden_dim=128, rollout_steps=1))
     assert isinstance(trainer.critic, CentralizedCritic)
-    assert trainer.critic.network[0].in_features == GLOBAL_STATE_DIM == 67
-    assert trainer.actor_parameter_counts == {"per_agent": [123_910] * 3, "total": 371_730}
+    assert trainer.critic.network[0].in_features == GLOBAL_STATE_DIM == 119
+    assert trainer.actor_parameter_counts == {"per_agent": [128_902] * len(RED_IDS), "total": 515_608}
     assert trainer.actor_architecture == {
-        "observation_dim": 61, "encoder_dim": 128, "recurrent_hidden_dim": 128,
+        "observation_dim": OBS_DIM, "encoder_dim": 128, "recurrent_hidden_dim": 128,
         "head_dim": 128, "action_dim": 3,
     }
     trainer.close()
@@ -336,7 +336,7 @@ def test_recurrent_training_and_evaluation_entrypoints_cpu_smoke(tmp_path):
         for data in (summary, resolved, checkpoint):
             assert data["actor_variant"] == "recurrent"
             assert data["actor_architecture"] == {
-                "observation_dim": 61, "encoder_dim": 128, "recurrent_hidden_dim": 128,
+                "observation_dim": OBS_DIM, "encoder_dim": 128, "recurrent_hidden_dim": 128,
                 "head_dim": 128, "action_dim": 3,
             }
         assert summary["algorithm"] == resolved["algorithm"] == "happo_recurrent"

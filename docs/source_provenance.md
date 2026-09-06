@@ -15,21 +15,21 @@ This project deliberately combines sources and engineering choices; it is not a 
 ## C. Project multi-target extensions
 
 - Each Red agent uses the maximum situation score over currently Red-team-visible alive Blue aircraft, with no assigned target; no visible target contributes zero.
-- Team dense reward sums the three Red slots and always divides by three.
+- Team dense reward sums the four Red slots and always divides by four.
 - All cross-team attacker-target pairs maintain independent streaks and resolve kills synchronously.
-- Fixed-slot multi-target observation and centralized state, using the v2.2 environment contract at 61D/67D; each Blue block includes three Red-relative-velocity values.
+- Fixed-slot multi-target observation and centralized state, using the v3.0 4v4 contract at 100D/119D; each Blue block includes three Red-relative-velocity values.
 
 ## D. Project engineering parameters
 
 - Physics step 0.1 s and RK4 integration inside the 1 s decision interval.
-- Exact mirrored 3v2 initial coordinates, interval-midpoint speeds and small seeded initial jitter.
+- Exact mirrored 4v4 initial coordinates, interval-midpoint speeds and small seeded initial jitter.
 - +/-100 km horizontal volume, 1-20 km altitude, and +/-60-degree pitch guard.
 - Blue's 27-candidate overload lookahead and `mixed_episode` target mode.
-- Synchronous Python vector environment with per-environment auto-reset.
+- Multiprocessing vector environment with deterministic per-environment auto-reset and a serial reference mode for testing.
 - Distance-only heterogeneous sensor ranges (MAV 12 km, UAV 8 km).
 - Instantaneous reliable Red datalink and masking of unseen enemy geometry.
-- One-hot type fields and the explicit 61D actor-observation layout in v2.2.
-- The 67D centralized state extension containing streaks, Red kill history, actual Blue episode mode and time fraction.
+- One-hot type fields and the explicit 100D actor-observation layout in v3.0.
+- The 119D centralized state containing all 8 entities, 32 directed attack streaks, Red kill history, actual Blue episode mode and time fraction.
 - Actor normalization scales: 30 km self x/y, 12 km relative x/y and distance, 10 km relative altitude, and 800 m/s relative velocity. Centralized-state x/y instead map the full battlefield bounds linearly to `[-1,1]`.
 - Seeded `main` and `learnability` randomization profiles with team-level and slot-level offsets.
 - Explicit propagation and recording of the selected `main` or `learnability` profile across training, benchmark, evaluation and checkpoints.

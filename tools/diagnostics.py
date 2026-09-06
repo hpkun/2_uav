@@ -24,28 +24,34 @@ from env.mavuav import (
 )
 from env.reward import situation_reward
 
-AGENT_NAMES = ("MAV", "UAV1", "UAV2")
+AGENT_NAMES = RED_IDS
 ACTION_NAMES = ("ux", "uy", "uz")
-OBSERVATION_FEATURES = (
+_SELF_FEATURES = (
     "self_x", "self_y", "self_altitude", "self_speed", "self_theta", "self_psi", "self_alive",
     "self_type_MAV", "self_type_UAV", "self_type_Blue", "time_fraction",
-    "friend1_dx", "friend1_dy", "friend1_dh", "friend1_distance", "friend1_dvx", "friend1_dvy", "friend1_dvh", "friend1_alive", "friend1_type_MAV", "friend1_type_UAV", "friend1_type_Blue",
-    "friend2_dx", "friend2_dy", "friend2_dh", "friend2_distance", "friend2_dvx", "friend2_dvy", "friend2_dvh", "friend2_alive", "friend2_type_MAV", "friend2_type_UAV", "friend2_type_Blue",
-    "blue1_dx", "blue1_dy", "blue1_dh", "blue1_distance", "blue1_dvx", "blue1_dvy", "blue1_dvh", "blue1_ata", "blue1_aa", "blue1_alive", "blue1_direct_visible", "blue1_datalink_visible", "blue1_own_attack_streak", "blue1_killed_by_red",
-    "blue2_dx", "blue2_dy", "blue2_dh", "blue2_distance", "blue2_dvx", "blue2_dvy", "blue2_dvh", "blue2_ata", "blue2_aa", "blue2_alive", "blue2_direct_visible", "blue2_datalink_visible", "blue2_own_attack_streak", "blue2_killed_by_red",
 )
+_FRIEND_FIELDS = ("dx", "dy", "dh", "distance", "dvx", "dvy", "dvh", "alive", "type_MAV", "type_UAV", "type_Blue")
+_ENEMY_FIELDS = ("dx", "dy", "dh", "distance", "dvx", "dvy", "dvh", "ata", "aa", "alive", "direct_visible", "datalink_visible", "own_attack_streak", "killed_by_red")
+OBSERVATION_FEATURES = _SELF_FEATURES + tuple(
+    f"friend{slot}_{field}" for slot in range(1, len(RED_IDS)) for field in _FRIEND_FIELDS
+) + tuple(
+    f"{blue_id.lower()}_{field}" for blue_id in BLUE_IDS for field in _ENEMY_FIELDS
+)
+_friend_indices = [tuple(11 + 11 * slot + offset for slot in range(len(RED_IDS) - 1)) for offset in range(11)]
+_enemy_start = 11 + 11 * (len(RED_IDS) - 1)
+_enemy_indices = [tuple(_enemy_start + 14 * slot + offset for slot in range(len(BLUE_IDS))) for offset in range(14)]
 OBSERVATION_GROUPS: dict[str, tuple[int, ...]] = {
     "self_position": (0, 1), "self_altitude": (2,), "self_speed": (3,),
     "self_theta_psi": (4, 5), "self_alive_type": (6, 7, 8, 9), "time_fraction": (10,),
-    "friendly_relative_position": (11, 12, 13, 22, 23, 24),
-    "friendly_distance": (14, 25),
-    "friendly_relative_velocity": (15, 16, 17, 26, 27, 28),
-    "friendly_alive_type": (18, 19, 20, 21, 29, 30, 31, 32),
-    "enemy_relative_position": (33, 34, 35, 47, 48, 49),
-    "enemy_distance": (36, 50), "enemy_relative_velocity": (37, 38, 39, 51, 52, 53),
-    "enemy_ata": (40, 54), "enemy_aa": (41, 55), "enemy_alive": (42, 56),
-    "enemy_visibility": (43, 44, 57, 58),
-    "enemy_own_attack_streak": (45, 59), "enemy_killed_by_red": (46, 60),
+    "friendly_relative_position": _friend_indices[0] + _friend_indices[1] + _friend_indices[2],
+    "friendly_distance": _friend_indices[3],
+    "friendly_relative_velocity": _friend_indices[4] + _friend_indices[5] + _friend_indices[6],
+    "friendly_alive_type": _friend_indices[7] + _friend_indices[8] + _friend_indices[9] + _friend_indices[10],
+    "enemy_relative_position": _enemy_indices[0] + _enemy_indices[1] + _enemy_indices[2],
+    "enemy_distance": _enemy_indices[3], "enemy_relative_velocity": _enemy_indices[4] + _enemy_indices[5] + _enemy_indices[6],
+    "enemy_ata": _enemy_indices[7], "enemy_aa": _enemy_indices[8], "enemy_alive": _enemy_indices[9],
+    "enemy_visibility": _enemy_indices[10] + _enemy_indices[11],
+    "enemy_own_attack_streak": _enemy_indices[12], "enemy_killed_by_red": _enemy_indices[13],
 }
 
 
@@ -81,16 +87,16 @@ class TrainingDiagnostics:
     observation_sample_count: int = 0
     observation_feature_statistics: list[dict[str, float]] | None = None
     observation_group_statistics: dict[str, dict[str, float]] | None = None
-    action_count: np.ndarray = field(default_factory=lambda: np.zeros((3, 3), dtype=np.int64))
-    action_sum: np.ndarray = field(default_factory=lambda: np.zeros((3, 3), dtype=np.float64))
-    action_sum_sq: np.ndarray = field(default_factory=lambda: np.zeros((3, 3), dtype=np.float64))
-    action_abs_sum: np.ndarray = field(default_factory=lambda: np.zeros((3, 3), dtype=np.float64))
-    action_saturation_count: np.ndarray = field(default_factory=lambda: np.zeros((3, 3), dtype=np.int64))
+    action_count: np.ndarray = field(default_factory=lambda: np.zeros((len(RED_IDS), 3), dtype=np.int64))
+    action_sum: np.ndarray = field(default_factory=lambda: np.zeros((len(RED_IDS), 3), dtype=np.float64))
+    action_sum_sq: np.ndarray = field(default_factory=lambda: np.zeros((len(RED_IDS), 3), dtype=np.float64))
+    action_abs_sum: np.ndarray = field(default_factory=lambda: np.zeros((len(RED_IDS), 3), dtype=np.float64))
+    action_saturation_count: np.ndarray = field(default_factory=lambda: np.zeros((len(RED_IDS), 3), dtype=np.int64))
 
     def _observe_actions(self, actions: np.ndarray, active_masks: np.ndarray) -> None:
-        actions = np.asarray(actions, dtype=np.float32).reshape(-1, 3, 3)
-        masks = np.asarray(active_masks, dtype=np.float32).reshape(-1, 3) > 0.5
-        for agent_index in range(3):
+        actions = np.asarray(actions, dtype=np.float32).reshape(-1, len(RED_IDS), 3)
+        masks = np.asarray(active_masks, dtype=np.float32).reshape(-1, len(RED_IDS)) > 0.5
+        for agent_index in range(len(RED_IDS)):
             values = np.asarray(actions[masks[:, agent_index], agent_index, :], dtype=np.float64)
             if not len(values):
                 continue
@@ -210,7 +216,7 @@ def target_proxies(env: HeterogeneousMAVUAVAirCombatEnv) -> dict[str, str]:
 
 def _minimum_distances(env: HeterogeneousMAVUAVAirCombatEnv) -> tuple[float, float]:
     cross = [compute_pairwise_geometry(env.entities[r].state, env.entities[b].state).distance for r in RED_IDS for b in BLUE_IDS if env.entities[r].state.alive and env.entities[b].state.alive]
-    friendly = [compute_pairwise_geometry(env.entities[RED_IDS[i]].state, env.entities[RED_IDS[j]].state).distance for i in range(3) for j in range(i + 1, 3) if env.entities[RED_IDS[i]].state.alive and env.entities[RED_IDS[j]].state.alive]
+    friendly = [compute_pairwise_geometry(env.entities[RED_IDS[i]].state, env.entities[RED_IDS[j]].state).distance for i in range(len(RED_IDS)) for j in range(i + 1, len(RED_IDS)) if env.entities[RED_IDS[i]].state.alive and env.entities[RED_IDS[j]].state.alive]
     return (min(cross) if cross else np.inf, min(friendly) if friendly else np.inf)
 
 
@@ -262,13 +268,13 @@ def evaluate_policy(
                 comparable_steps += 1
                 counts = Counter(proxies.values())
                 two_same_steps += int(max(counts.values()) >= 2)
-                all_same_steps += int(len(proxies) == 3 and max(counts.values()) == 3)
+                all_same_steps += int(len(proxies) == len(RED_IDS) and max(counts.values()) == len(RED_IDS))
             cross, friendly = _minimum_distances(env)
             min_cross, min_friendly = min(min_cross, cross), min(min_friendly, friendly)
             if action_mode == "zero":
-                actions = np.zeros((3, 3), dtype=np.float32)
+                actions = np.zeros((len(RED_IDS), 3), dtype=np.float32)
             elif action_mode == "random":
-                actions = rng.uniform(-1.0, 1.0, (3, 3)).astype(np.float32)
+                actions = rng.uniform(-1.0, 1.0, (len(RED_IDS), 3)).astype(np.float32)
             else:
                 actions = _policy_actions(policy, algorithm, observations, device)
             observations, _, terminated, truncated, info = env.step(actions)
@@ -292,7 +298,7 @@ def evaluate_policy(
             "terminal_reward_sum": float(terminal_sum), "safety_reward_sum": float(safety_sum),
             "minimum_cross_team_distance": float(min_cross), "minimum_friendly_red_distance": float(min_friendly),
             "attack_window_active_steps": int(attack_window_steps), "maximum_attack_streak": int(max_streak),
-            "all_three_same_target_steps": int(all_same_steps), "two_or_more_same_target_steps": int(two_same_steps),
+            "all_red_same_target_steps": int(all_same_steps), "two_or_more_same_target_steps": int(two_same_steps),
             "target_comparable_steps": int(comparable_steps),
         })
         for aid in RED_IDS:
@@ -338,7 +344,7 @@ def target_concentration_summary(records: list[Mapping[str, Any]], algorithm: st
     comparable = sum(int(r["target_comparable_steps"]) for r in records)
     row: dict[str, Any] = {
         "sampled_steps": sampled_steps, "algorithm": algorithm, "seed": seed, "blue_mode": blue_mode,
-        "all_three_same_target_rate": sum(int(r["all_three_same_target_steps"]) for r in records) / max(1, comparable),
+        "all_red_same_target_rate": sum(int(r["all_red_same_target_steps"]) for r in records) / max(1, comparable),
         "two_or_more_same_target_rate": sum(int(r["two_or_more_same_target_steps"]) for r in records) / max(1, comparable),
     }
     for aid in RED_IDS:

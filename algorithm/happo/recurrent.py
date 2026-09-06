@@ -5,7 +5,7 @@ import torch
 from torch import nn
 from torch.distributions import Normal
 
-from env.mavuav import OBS_DIM
+from env.mavuav import OBS_DIM, RED_IDS
 
 
 class RecurrentGaussianActor(nn.Module):
@@ -89,7 +89,7 @@ class RecurrentGaussianActor(nn.Module):
 
 
 class RecurrentIndependentActors(nn.Module):
-    """Three independent recurrent actors for MAV, UAV1 and UAV2."""
+    """One independent recurrent actor for each Red aircraft."""
 
     def __init__(
         self,
@@ -104,5 +104,5 @@ class RecurrentIndependentActors(nn.Module):
                 observation_dim=observation_dim, action_dim=action_dim,
                 hidden_dim=hidden_dim, recurrent_hidden_dim=recurrent_hidden_dim,
             )
-            for _ in range(3)
+            for _ in RED_IDS
         ])

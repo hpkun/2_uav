@@ -1,4 +1,4 @@
-"""Heterogeneous Role-Target Attention actor for structured 61D observations.
+"""Heterogeneous Role-Target Attention actor for structured observations.
 
 This optional module is intentionally independent from the vanilla HAPPO
 trainer.  It changes actor representation only and preserves the existing
@@ -13,12 +13,13 @@ import torch
 from torch import nn
 from torch.distributions import Normal
 
-from env.mavuav import OBS_DIM
+from env.mavuav import BLUE_IDS, OBS_DIM, RED_IDS
 
 
 SELF_SLICE = slice(0, 11)
-FRIEND_SLICES = (slice(11, 22), slice(22, 33))
-ENEMY_SLICES = (slice(33, 47), slice(47, 61))
+FRIEND_SLICES = tuple(slice(11 + 11 * index, 22 + 11 * index) for index in range(len(RED_IDS) - 1))
+_ENEMY_START = 11 + 11 * (len(RED_IDS) - 1)
+ENEMY_SLICES = tuple(slice(_ENEMY_START + 14 * index, _ENEMY_START + 14 * (index + 1)) for index in range(len(BLUE_IDS)))
 
 SELF_TYPE_SLICE = slice(7, 10)
 FRIEND_ALIVE_INDEX = 7
@@ -44,11 +45,11 @@ class SelfEncoder(_EntityEncoder):
 
 
 class FriendEncoder(_EntityEncoder):
-    """Shared encoder for both 11D friendly blocks."""
+    """Shared encoder for all 11D friendly blocks."""
 
 
 class EnemyEncoder(_EntityEncoder):
-    """Shared encoder for both 14D Blue blocks."""
+    """Shared encoder for all 14D Blue blocks."""
 
     def __init__(self, entity_dim: int) -> None:
         nn.Module.__init__(self)
@@ -63,7 +64,7 @@ def _masked_single_head_attention(
     values: torch.Tensor,
     eligible: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Numerically safe scaled dot-product pooling over two entities."""
+    """Numerically safe scaled dot-product pooling over an entity set."""
     scores = torch.einsum("...d,...nd->...n", query, values) / math.sqrt(query.shape[-1])
     mask = eligible.to(dtype=torch.bool)
     masked_scores = scores.masked_fill(~mask, torch.finfo(scores.dtype).min)
@@ -200,9 +201,9 @@ class HRTAActor(nn.Module):
 
 
 class HRTAIndependentActors(nn.Module):
-    """Three parameter-independent HRTA actors for MAV, UAV1, and UAV2."""
+    """Parameter-independent HRTA actors for all Red aircraft."""
 
-    def __init__(self, num_agents: int = 3, **actor_kwargs: Any) -> None:
+    def __init__(self, num_agents: int = len(RED_IDS), **actor_kwargs: Any) -> None:
         super().__init__()
         self.actors = nn.ModuleList([HRTAActor(**actor_kwargs) for _ in range(num_agents)])
 

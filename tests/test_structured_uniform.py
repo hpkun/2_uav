@@ -9,15 +9,15 @@ from algorithm.modules.structured_uniform import (
     StructuredUniformIndependentActors,
     masked_uniform_pool,
 )
-from env.mavuav import OBS_DIM
+from env.mavuav import OBS_DIM, RED_IDS
 
 
 def observations(batch: int = 6) -> torch.Tensor:
     generator = torch.Generator().manual_seed(4217)
     values = torch.randn(batch, OBS_DIM, generator=generator) * 0.2
     values[:, 7:10] = torch.tensor([1.0, 0.0, 0.0])
-    values[:, (11 + 7, 22 + 7)] = 1.0
-    for start in (33, 47):
+    values[:, (11 + 7, 22 + 7, 33 + 7)] = 1.0
+    for start in (44, 58, 72, 86):
         values[:, start + 9] = 1.0
         values[:, start + 10] = 1.0
         values[:, start + 11] = 0.0
@@ -55,21 +55,21 @@ def test_structured_uniform_observation_masks_match_hrta_semantics():
     obs = observations(5)
     # Both eligible; Blue1 alive but invisible; Blue1 dead with stale visibility;
     # Blue1 direct-visible only; Blue1 datalink-visible only. Blue2 is disabled after row 0.
-    obs[1:, 47 + 9] = 0.0
-    obs[1, 33 + 10] = obs[1, 33 + 11] = 0.0
-    obs[2, 33 + 9] = 0.0
-    obs[2, 33 + 10] = 1.0
-    obs[3, 33 + 10], obs[3, 33 + 11] = 1.0, 0.0
-    obs[4, 33 + 10], obs[4, 33 + 11] = 0.0, 1.0
-    obs[3, 11 + 7], obs[3, 22 + 7] = 1.0, 0.0
-    obs[4, 11 + 7], obs[4, 22 + 7] = 0.0, 0.0
+    obs[1:, 58 + 9] = obs[1:, 72 + 9] = obs[1:, 86 + 9] = 0.0
+    obs[1, 44 + 10] = obs[1, 44 + 11] = 0.0
+    obs[2, 44 + 9] = 0.0
+    obs[2, 44 + 10] = 1.0
+    obs[3, 44 + 10], obs[3, 44 + 11] = 1.0, 0.0
+    obs[4, 44 + 10], obs[4, 44 + 11] = 0.0, 1.0
+    obs[3, 11 + 7], obs[3, 22 + 7], obs[3, 33 + 7] = 1.0, 0.0, 0.0
+    obs[4, 11 + 7], obs[4, 22 + 7], obs[4, 33 + 7] = 0.0, 0.0, 0.0
     features, diagnostics = StructuredUniformActor().encode(obs)
     assert torch.equal(diagnostics["enemy_pooling_weights"], torch.tensor([
-        [0.5, 0.5], [0.0, 0.0], [0.0, 0.0], [1.0, 0.0], [1.0, 0.0],
+        [0.25, 0.25, 0.25, 0.25], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0],
     ]))
-    assert torch.equal(diagnostics["friend_pooling_weights"][0], torch.tensor([0.5, 0.5]))
-    assert torch.equal(diagnostics["friend_pooling_weights"][3], torch.tensor([1.0, 0.0]))
-    assert torch.equal(diagnostics["friend_pooling_weights"][4], torch.tensor([0.0, 0.0]))
+    assert torch.allclose(diagnostics["friend_pooling_weights"][0], torch.tensor([1/3, 1/3, 1/3]))
+    assert torch.equal(diagnostics["friend_pooling_weights"][3], torch.tensor([1.0, 0.0, 0.0]))
+    assert torch.equal(diagnostics["friend_pooling_weights"][4], torch.tensor([0.0, 0.0, 0.0]))
     assert torch.isfinite(features).all()
 
 
@@ -86,9 +86,9 @@ def test_structured_uniform_actor_distribution_and_independent_actor_semantics()
     assert torch.allclose(sampled_log_prob, evaluated_log_prob, atol=2e-5, rtol=2e-5)
 
     actors = StructuredUniformIndependentActors()
-    assert len({id(item) for item in actors.actors}) == 3
+    assert len({id(item) for item in actors.actors}) == len(RED_IDS)
     parameter_ids = [{id(parameter) for parameter in item.parameters()} for item in actors.actors]
-    assert all(parameter_ids[i].isdisjoint(parameter_ids[j]) for i in range(3) for j in range(i + 1, 3))
+    assert all(parameter_ids[i].isdisjoint(parameter_ids[j]) for i in range(len(RED_IDS)) for j in range(i + 1, len(RED_IDS)))
 
 
 def _hrta_forced_uniform_distribution(actor: HRTAActor, obs: torch.Tensor) -> Normal:

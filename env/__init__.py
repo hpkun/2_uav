@@ -1,4 +1,4 @@
-"""Public interfaces for the heterogeneous MAV/UAV 3v2 environment."""
+"""Public interfaces for the heterogeneous MAV/UAV 4v4 environment."""
 
 from .mavuav import (
     ENVIRONMENT_VERSION,

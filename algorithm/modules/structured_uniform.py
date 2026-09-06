@@ -7,7 +7,7 @@ import torch
 from torch import nn
 from torch.distributions import Normal
 
-from env.mavuav import OBS_DIM
+from env.mavuav import OBS_DIM, RED_IDS
 from .hrta import (
     ENEMY_ALIVE_INDEX,
     ENEMY_DATALINK_VISIBLE_INDEX,
@@ -160,9 +160,9 @@ class StructuredUniformActor(nn.Module):
 
 
 class StructuredUniformIndependentActors(nn.Module):
-    """Three independent structured-uniform actors."""
+    """Independent structured-uniform actors for all Red aircraft."""
 
-    def __init__(self, num_agents: int = 3, **actor_kwargs: Any) -> None:
+    def __init__(self, num_agents: int = len(RED_IDS), **actor_kwargs: Any) -> None:
         super().__init__()
         self.actors = nn.ModuleList(
             [StructuredUniformActor(**actor_kwargs) for _ in range(num_agents)]

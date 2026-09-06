@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import numpy as np
+from env.mavuav import BLUE_IDS, OBS_DIM, RED_IDS
 
 
 SELF_ALIVE_INDEX = 6
-ENEMY_BLOCK_STARTS = (33, 47)
+ENEMY_BLOCK_STARTS = tuple(11 + 11 * (len(RED_IDS) - 1) + 14 * index for index in range(len(BLUE_IDS)))
 ENEMY_DISTANCE_OFFSET = 3
 ENEMY_ATA_OFFSET = 7
 ENEMY_AA_OFFSET = 8
@@ -13,7 +14,7 @@ ENEMY_ALIVE_OFFSET = 9
 ENEMY_DIRECT_OFFSET = 10
 ENEMY_DATALINK_OFFSET = 11
 ENEMY_KILLED_OFFSET = 13
-EXPECTED_OBSERVATION_SHAPE = (3, 61)
+EXPECTED_OBSERVATION_SHAPE = (len(RED_IDS), OBS_DIM)
 
 
 def _sigmoid(value: np.ndarray | float) -> np.ndarray:
@@ -51,17 +52,17 @@ def pair_potential(
 
 
 def team_potential_from_observations(observations: np.ndarray, distance_scale: float) -> np.ndarray:
-    """Parse the stable [B, 3, 61] actor-observation contract into team potential."""
+    """Parse the stable batched actor-observation contract into team potential."""
     values = np.asarray(observations, dtype=np.float64)
     if values.ndim != 3 or values.shape[1:] != EXPECTED_OBSERVATION_SHAPE:
-        raise ValueError(f"observations must have shape [B, 3, 61], got {values.shape}")
+        raise ValueError(f"observations must have shape [B, {len(RED_IDS)}, {OBS_DIM}], got {values.shape}")
     if not np.isfinite(values).all():
         raise ValueError("observations contain non-finite values")
     if float(distance_scale) <= 0.0:
         raise ValueError("distance_scale must be positive")
 
     team = np.zeros(values.shape[0], dtype=np.float64)
-    for red_index in range(3):
+    for red_index in range(len(RED_IDS)):
         red_observation = values[:, red_index]
         eligible_potentials = []
         for start in ENEMY_BLOCK_STARTS:
@@ -78,10 +79,10 @@ def team_potential_from_observations(observations: np.ndarray, distance_scale: f
                 red_observation[:, start + ENEMY_AA_OFFSET] * 180.0,
             )
             eligible_potentials.append(np.where(eligible, potential, 0.0))
-        best_blue = np.maximum(eligible_potentials[0], eligible_potentials[1])
+        best_blue = np.maximum.reduce(eligible_potentials)
         red_alive = red_observation[:, SELF_ALIVE_INDEX] > 0.5
         team += np.where(red_alive, best_blue, 0.0)
-    return team / 3.0
+    return team / len(RED_IDS)
 
 
 def potential_delta(
@@ -111,10 +112,10 @@ def apply_agp(
     gamma: float = 0.99,
     agp_lambda: float = 0.5,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Add the same training-only shaping reward to all three Red agents."""
+    """Add the same training-only shaping reward to all Red agents."""
     rewards = np.asarray(base_rewards, dtype=np.float32)
-    if rewards.ndim != 2 or rewards.shape[1] != 3:
-        raise ValueError(f"base_rewards must have shape [B, 3], got {rewards.shape}")
+    if rewards.ndim != 2 or rewards.shape[1] != len(RED_IDS):
+        raise ValueError(f"base_rewards must have shape [B, {len(RED_IDS)}], got {rewards.shape}")
     raw = potential_delta(current_observations, next_observations, done, distance_scale, gamma)
     shaping = float(agp_lambda) * raw
     return rewards + shaping[:, None].astype(np.float32), raw, shaping
