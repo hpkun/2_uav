@@ -11,6 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import argparse
 import numpy as np
 from env import MAVUAVVectorEnv
+from env.mavuav import RED_IDS
 
 
 def main() -> None:
@@ -19,7 +20,9 @@ def main() -> None:
     env = MAVUAVVectorEnv(args.num_envs, seed=args.seed); observations, states, masks, _ = env.reset()
     episodes = 0
     for _ in range(args.steps):
-        observations, states, rewards, terminated, truncated, masks, infos = env.step(rng.uniform(-1.0, 1.0, (args.num_envs, 3, 3)))
+        observations, states, rewards, terminated, truncated, masks, infos = env.step(
+            rng.uniform(-1.0, 1.0, (args.num_envs, len(RED_IDS), 3))
+        )
         assert np.all(np.isfinite(observations)) and np.all(np.isfinite(states)) and np.all(np.isfinite(rewards))
         episodes += int(np.logical_or(terminated, truncated).sum())
     print({"vector_steps": args.steps, "sampled_environment_steps": args.steps * args.num_envs, "completed_episodes": episodes, "finite": True})

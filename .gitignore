@@ -12,6 +12,7 @@ outputs/
 
 # Local test/runtime artifacts
 .pytest_tmp/
+.pytest_tmp_full/
 .pytest_cache/
 outputs/mappo/checkpoints/
 outputs/mappo/*.csv

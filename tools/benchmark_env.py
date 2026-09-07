@@ -16,6 +16,7 @@ import time
 import numpy as np
 
 from env import MAVUAVVectorEnv
+from env.mavuav import RED_IDS
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,22 +38,29 @@ def main() -> None:
     rng = np.random.default_rng(args.seed)
     actions = rng.uniform(
         -1.0, 1.0,
-        (vector_steps + args.warmup_vector_steps, args.num_envs, 3, 3),
+        (vector_steps + args.warmup_vector_steps, args.num_envs, len(RED_IDS), 3),
     )
     results: dict[str, object] = {
         "logical_cpu_count": os.cpu_count(),
         "num_envs": args.num_envs,
         "sampled_steps": args.sample_steps,
+        "finite": True,
     }
     timings: dict[str, dict[str, object]] = {}
     for label, parallel in (("serial", False), ("multiprocess", True)):
         with MAVUAVVectorEnv(args.num_envs, seed=args.seed, parallel=parallel) as env:
             env.reset()
             for action in actions[:args.warmup_vector_steps]:
-                env.step(action)
+                observations, states, rewards, *_ = env.step(action)
+                assert np.all(np.isfinite(observations))
+                assert np.all(np.isfinite(states))
+                assert np.all(np.isfinite(rewards))
             start = time.perf_counter()
             for action in actions[args.warmup_vector_steps:]:
-                env.step(action)
+                observations, states, rewards, *_ = env.step(action)
+                assert np.all(np.isfinite(observations))
+                assert np.all(np.isfinite(states))
+                assert np.all(np.isfinite(rewards))
             elapsed = time.perf_counter() - start
             timings[label] = {
                 "elapsed_seconds": elapsed,
