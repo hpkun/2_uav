@@ -26,7 +26,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile", choices=("learnability", "main"), default="main")
     parser.add_argument("--episodes", type=int, default=100)
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--blue-mode", choices=("nearest", "mav_priority", "both"), default="both")
     parser.add_argument("--env-config", type=Path)
     return parser.parse_args()
 
@@ -76,18 +75,14 @@ def main() -> None:
     else:
         env_config = load_environment_config(None)
     training_profile = str(payload["environment_profile"])
-    modes = ("nearest", "mav_priority") if args.blue_mode == "both" else (args.blue_mode,)
     rows: list[dict[str, Any]] = []
-    for mode in modes:
-        records = evaluate_actors(
-            actors, env_config, args.episodes, mode, args.profile, seed=1000, device=device,
-        )
-        rows.append({
+    records = evaluate_actors(actors, env_config, args.episodes, args.profile, seed=1000, device=device)
+    rows.append({
             "checkpoint": checkpoint.name,
             "sampled_steps": int(payload.get("sampled_steps", 0)),
             "algorithm": "happo_structured_uniform",
             "actor_variant": "structured_uniform",
-            "blue_mode": mode,
+            "blue_target_strategy": "nearest_red_uav",
             "training_profile": training_profile,
             "evaluation_profile": args.profile,
             "episodes": args.episodes,

@@ -22,7 +22,6 @@ def _environment_state(env: HeterogeneousMAVUAVAirCombatEnv) -> dict[str, Any]:
         "red_attack_kills": set(env._red_attack_kills),
         "blue_attack_kills": set(env._blue_attack_kills),
         "rng": deepcopy(env.rng.bit_generator.state),
-        "blue_episode_mode": env.blue_policy.episode_mode,
         "profile": env.profile,
     }
 
@@ -36,7 +35,6 @@ def _restore_environment_state(env: HeterogeneousMAVUAVAirCombatEnv, state: Mapp
     env._red_attack_kills = set(state["red_attack_kills"])
     env._blue_attack_kills = set(state["blue_attack_kills"])
     env.rng.bit_generator.state = deepcopy(state["rng"])
-    env.blue_policy.episode_mode = state["blue_episode_mode"]
     env.profile = state["profile"]
 
 
@@ -45,7 +43,6 @@ def _worker(
     config_path: str | Path | Mapping[str, Any] | None,
     index: int,
     base_seed: int | None,
-    blue_target_mode: str | None,
     randomize: bool | None,
     profile: str | None,
 ) -> None:
@@ -59,31 +56,25 @@ def _worker(
 
     try:
         env = HeterogeneousMAVUAVAirCombatEnv(
-            config_path, seed=episode_seed(), blue_target_mode=blue_target_mode, randomize=randomize, profile=profile,
+            config_path, seed=episode_seed(), randomize=randomize, profile=profile,
         )
         while True:
             command, payload = connection.recv()
             try:
                 if command == "reset":
-                    base_seed, nearest_probability = payload
+                    base_seed = payload
                     reset_count = 0
-                    reset_options = None if nearest_probability is None else {
-                        "nearest_probability": nearest_probability,
-                    }
-                    observation, info = env.reset(seed=episode_seed(), options=reset_options)
+                    observation, info = env.reset(seed=episode_seed())
                     result = (observation, env.global_state(), env.active_masks, info, reset_count)
                 elif command == "step":
-                    actions, reset_nearest_probability = payload
+                    actions = payload
                     observation, reward, terminated, truncated, info = env.step(actions)
                     info = dict(info)
                     if terminated or truncated:
                         terminal_state = env.global_state().copy()
                         terminal_masks = env.active_masks.copy()
                         reset_count += 1
-                        reset_options = None if reset_nearest_probability is None else {
-                            "nearest_probability": reset_nearest_probability,
-                        }
-                        observation, reset_info = env.reset(seed=episode_seed(), options=reset_options)
+                        observation, reset_info = env.reset(seed=episode_seed())
                         info.update({
                             "terminal_global_state": terminal_state,
                             "terminal_active_masks": terminal_masks,
@@ -135,7 +126,6 @@ class MAVUAVVectorEnv:
         config_path: str | Path | Mapping[str, Any] | None = None,
         *,
         seed: int | None = None,
-        blue_target_mode: str | None = None,
         randomize: bool | None = None,
         profile: str | None = None,
         parallel: bool = True,
@@ -158,7 +148,7 @@ class MAVUAVVectorEnv:
             self.envs = [
                 HeterogeneousMAVUAVAirCombatEnv(
                     config_path, seed=None if seed is None else seed + index,
-                    blue_target_mode=blue_target_mode, randomize=randomize, profile=profile,
+                    randomize=randomize, profile=profile,
                 )
                 for index in range(self.num_envs)
             ]
@@ -174,7 +164,7 @@ class MAVUAVVectorEnv:
             parent, child = context.Pipe()
             process = context.Process(
                 target=_worker,
-                args=(child, config_path, index, seed, blue_target_mode, randomize, profile),
+                args=(child, config_path, index, seed, randomize, profile),
                 name=f"mavuav-env-{index}", daemon=True,
             )
             process.start()
@@ -216,23 +206,19 @@ class MAVUAVVectorEnv:
     def reset(
         self,
         seed: int | None = None,
-        nearest_probability: float | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[dict[str, Any]]]:
         if seed is not None:
             self.base_seed = int(seed)
         self.reset_counts.fill(0)
         if self.parallel:
             results = self._send_all(
-                "reset", [(self.base_seed, nearest_probability)] * self.num_envs,
+                "reset", [self.base_seed] * self.num_envs,
             )
             observations, states, masks, infos, counts = zip(*results)
             self.reset_counts[:] = counts
         else:
-            reset_options = None if nearest_probability is None else {
-                "nearest_probability": nearest_probability,
-            }
             local_results = [
-                env.reset(seed=self._seed(index), options=reset_options)
+                env.reset(seed=self._seed(index))
                 for index, env in enumerate(self.envs)
             ]
             observations = [item[0] for item in local_results]
@@ -247,7 +233,6 @@ class MAVUAVVectorEnv:
     def step(
         self,
         actions: np.ndarray,
-        reset_nearest_probability: float | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[dict[str, Any]]]:
         values = np.asarray(actions, dtype=np.float64)
         expected = (self.num_envs, len(RED_IDS), 3)
@@ -256,7 +241,7 @@ class MAVUAVVectorEnv:
         if self.parallel:
             results = self._send_all(
                 "step",
-                [(values[index], reset_nearest_probability) for index in range(self.num_envs)],
+                [values[index] for index in range(self.num_envs)],
             )
             observations, states, rewards, terminated, truncated, masks, infos, counts = zip(*results)
             self.reset_counts[:] = counts
@@ -281,10 +266,7 @@ class MAVUAVVectorEnv:
                 terminal_state = env.global_state().copy()
                 terminal_masks = env.active_masks.copy()
                 self.reset_counts[index] += 1
-                reset_options = None if reset_nearest_probability is None else {
-                    "nearest_probability": reset_nearest_probability,
-                }
-                observation, reset_info = env.reset(seed=self._seed(index), options=reset_options)
+                observation, reset_info = env.reset(seed=self._seed(index))
                 info = dict(info)
                 info.update({
                     "terminal_global_state": terminal_state,

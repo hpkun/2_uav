@@ -23,9 +23,9 @@ TYPE_ONE_HOT = {
     "UAV": (0.0, 1.0, 0.0),
     "Blue": (0.0, 0.0, 1.0),
 }
-ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_0"
+ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_1"
 OBS_DIM = 100
-GLOBAL_STATE_DIM = 119
+GLOBAL_STATE_DIM = 117
 CROSS_TEAM_ATTACK_PAIRS = tuple((red, blue) for red in RED_IDS for blue in BLUE_IDS) + tuple(
     (blue, red) for blue in BLUE_IDS for red in RED_IDS
 )
@@ -102,11 +102,10 @@ def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
     reward_fields = {"blue_kill", "uav_loss", "mav_loss", "terminal_red_win", "terminal_blue_win", "terminal_draw"}
     if set(cfg["reward"]) != reward_fields or not np.all(np.isfinite([float(cfg["reward"][key]) for key in reward_fields])):
         raise ValueError("reward has unknown, missing or non-finite fields")
-    if set(cfg["blue_policy"]) != {"target_mode"}:
+    if set(cfg["blue_policy"]) != {"target_strategy"}:
         raise ValueError("blue_policy has unknown or missing fields")
-    mode = cfg["blue_policy"]["target_mode"]
-    if mode not in BluePolicy.MODES:
-        raise ValueError(f"invalid blue target mode: {mode}")
+    if cfg["blue_policy"]["target_strategy"] != BluePolicy.TARGET_STRATEGY:
+        raise ValueError(f"blue_policy.target_strategy must be {BluePolicy.TARGET_STRATEGY!r}")
     for aircraft_id in ENTITY_IDS:
         start = cfg["scenario"]["initial"][aircraft_id]
         if set(start) != {"position", "speed", "heading_deg"} or len(start["position"]) != 3:
@@ -141,7 +140,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
     global_state_dim = GLOBAL_STATE_DIM
     action_dim = 3
 
-    def __init__(self, config_path: str | Path | Mapping[str, Any] | None = None, *, seed: int | None = None, blue_target_mode: str | None = None, randomize: bool | None = None, profile: str | None = None) -> None:
+    def __init__(self, config_path: str | Path | Mapping[str, Any] | None = None, *, seed: int | None = None, randomize: bool | None = None, profile: str | None = None) -> None:
         self.config = load_environment_config(config_path)
         sim = self.config["simulation"]
         self.decision_dt = float(sim["decision_dt"])
@@ -152,8 +151,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
         self.profile = profile or str(self.config["scenario"]["default_profile"])
         if self.profile not in self.config["randomization_profiles"]:
             raise ValueError(f"unknown randomization profile: {self.profile}")
-        mode = blue_target_mode or self.config["blue_policy"]["target_mode"]
-        self.blue_policy = BluePolicy(mode, self.decision_dt, self.physics_dt)
+        self.blue_policy = BluePolicy(self.decision_dt, self.physics_dt, self.config["battlefield"])
         self.rng = np.random.default_rng(seed)
         self.entities: dict[str, Aircraft] = {}
         self.step_count = 0
@@ -219,11 +217,10 @@ class HeterogeneousMAVUAVAirCombatEnv:
         self._red_attack_kills.clear()
         self._blue_attack_kills.clear()
         self._running = True
-        nearest_probability = options.get("nearest_probability")
-        mode = self.blue_policy.reset(self.rng, nearest_probability=nearest_probability)
+        strategy = self.blue_policy.reset(self.rng)
         return self._observations(), {
             "outcome": None, "attack_events": [], "killed_ids": [], "death_causes": {},
-            "active_masks": self.active_masks.copy(), "blue_target_mode": mode, "profile": self.profile,
+            "active_masks": self.active_masks.copy(), "blue_target_strategy": strategy, "profile": self.profile,
         }
 
     def _action_dict(self, actions: Mapping[str, np.ndarray] | np.ndarray | list[np.ndarray]) -> dict[str, np.ndarray]:
@@ -316,14 +313,21 @@ class HeterogeneousMAVUAVAirCombatEnv:
     def _apply_boundaries(self) -> dict[str, str]:
         deaths: dict[str, str] = {}
         battlefield = self.config["battlefield"]
-        for aid in ENTITY_IDS:
+        for aid in RED_IDS:
             entity = self.entities[aid]
             if not entity.state.alive:
                 continue
             state = entity.state
             outside = not (battlefield["x"][0] <= state.x <= battlefield["x"][1] and battlefield["y"][0] <= state.y <= battlefield["y"][1] and battlefield["altitude"][0] <= state.h <= battlefield["altitude"][1])
             if outside:
-                self._deactivate(aid, "blue_escape" if aid in BLUE_IDS else "boundary", deaths)
+                self._deactivate(aid, "boundary", deaths)
+        for aid in BLUE_IDS:
+            entity = self.entities[aid]
+            if entity.state.alive:
+                state = entity.state
+                inside = battlefield["x"][0] <= state.x <= battlefield["x"][1] and battlefield["y"][0] <= state.y <= battlefield["y"][1] and battlefield["altitude"][0] <= state.h <= battlefield["altitude"][1]
+                if not inside:
+                    raise RuntimeError(f"Blue boundary invariant violated after environment step: {aid}")
         return deaths
 
     def _resolve_attacks(self) -> tuple[list[dict[str, str]], dict[str, str]]:
@@ -363,7 +367,9 @@ class HeterogeneousMAVUAVAirCombatEnv:
             return True, False, "blue"
         all_blue_inactive = not any(self.entities[aid].state.alive for aid in BLUE_IDS)
         if all_blue_inactive:
-            return True, False, "red" if self._red_attack_kills == set(BLUE_IDS) else "blue"
+            if self._red_attack_kills != set(BLUE_IDS):
+                raise RuntimeError("all Blue inactive without four Red attack kills")
+            return True, False, "red"
         if self.step_count >= self.max_decision_steps:
             return False, True, "draw"
         return False, False, None
@@ -374,12 +380,13 @@ class HeterogeneousMAVUAVAirCombatEnv:
             for aid in BLUE_IDS
             if self.entities[aid].state.alive and self.team_visible(aid)
         ]
-        total = 0.0
-        for aid in RED_IDS:
-            own = self.entities[aid]
-            if own.state.alive and visible_alive_blue:
-                total += max(situation_reward(own.state, target.state) for target in visible_alive_blue)
-        return float(total / len(RED_IDS))
+        alive_red = [self.entities[aid] for aid in RED_IDS if self.entities[aid].state.alive]
+        if not visible_alive_blue or not alive_red:
+            return 0.0
+        return float(np.mean([
+            max(situation_reward(red.state, blue.state) for red in alive_red)
+            for blue in visible_alive_blue
+        ]))
 
     def _episode_summary(self, outcome: str | None) -> dict[str, Any]:
         return {
@@ -390,7 +397,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
             "red_attack_kills": len(self._red_attack_kills), "blue_attack_kills": len(self._blue_attack_kills),
             "red_uav_losses": sum(not self.entities[aid].state.alive for aid in RED_IDS[1:]),
             "mav_loss": int(not self.entities["MAV"].state.alive),
-            "blue_target_mode": self.blue_policy.episode_mode, "episode_return": float(self.episode_return),
+            "blue_target_strategy": self.blue_policy.TARGET_STRATEGY, "episode_return": float(self.episode_return),
         }
 
     def _self_xy_norm(self, value: float) -> float:
@@ -493,11 +500,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
         hold_steps = int(self.config["combat"]["hold_steps"])
         values.extend(min(self._attack_streak.get(pair, 0), hold_steps) / hold_steps for pair in CROSS_TEAM_ATTACK_PAIRS)
         values.extend(float(blue_id in self._red_attack_kills) for blue_id in BLUE_IDS)
-        values.extend([
-            float(self.blue_policy.episode_mode == "nearest"),
-            float(self.blue_policy.episode_mode == "mav_priority"),
-            float(np.clip(self.step_count / self.max_decision_steps, 0.0, 1.0)),
-        ])
+        values.append(float(np.clip(self.step_count / self.max_decision_steps, 0.0, 1.0)))
         result = np.asarray(values, dtype=np.float32)
         if result.shape != (GLOBAL_STATE_DIM,):
             raise AssertionError(f"global state contract violated: {result.shape}")

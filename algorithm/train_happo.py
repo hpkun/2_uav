@@ -31,9 +31,8 @@ TRAINING_FIELDS = (
     "sampled_steps", "completed_episodes", "mean_episode_return", "red_win_rate", "blue_win_rate",
     "draw_rate", "MAV_survival_rate", "mean_UAV_survivors", "mean_red_attack_kills",
     "mean_blue_attack_kills", "mean_episode_length", *(f"actor_{i}_loss" for i in range(len(RED_IDS))),
-    "critic_loss", "entropy", "method_variant", "p_nearest",
+    "critic_loss", "entropy", "method_variant",
     "agp_raw_mean", "agp_raw_mean_abs", "agp_shaping_mean", "agp_shaping_mean_abs",
-    "transitions_nearest", "transitions_mav_priority", "episodes_nearest", "episodes_mav_priority",
 )
 LOSS_FIELDS = (*(f"actor_{i}_loss" for i in range(len(RED_IDS))), "critic_loss", "entropy")
 
@@ -50,8 +49,6 @@ def _algorithm_name(
     if actor_variant == "vanilla" and method_variant != "baseline":
         method_names = {
             "agp": "happo_agp",
-            "curriculum": "happo_curriculum",
-            "agp_curriculum": "happo_agp_curriculum",
         }
         try:
             return method_names[method_variant]
@@ -223,14 +220,13 @@ def _episode_metrics(records: list[Mapping[str, Any]]) -> dict[str, Any]:
 def _evaluation_row(
     trainer: HAPPOTrainer,
     episodes: int,
-    mode: str,
     profile: str,
     seed: int,
     device: str,
 ) -> dict[str, Any]:
     evaluator = evaluate_recurrent_actors if trainer.is_recurrent else evaluate_actors
     records = evaluator(
-        trainer.actors, trainer.environment_config, episodes, mode, profile, seed=1000, device=device,
+        trainer.actors, trainer.environment_config, episodes, profile, seed=1000, device=device,
     )
     return {
         "sampled_steps": trainer.env_steps,
@@ -240,7 +236,7 @@ def _evaluation_row(
         ),
         "method_variant": trainer.config["method_variant"],
         "seed": seed,
-        "blue_mode": mode, "training_profile": trainer.config["environment_profile"],
+        "blue_target_strategy": "nearest_red_uav", "training_profile": trainer.config["environment_profile"],
         "evaluation_profile": profile, "episodes": episodes, **summarize_records(records),
     }
 
@@ -311,7 +307,7 @@ def _progress_lines(
 
 def _evaluation_lines(prefix: str, row: Mapping[str, Any]) -> str:
     return "\n".join([
-        f"[{prefix}] step {int(row['sampled_steps']):,} | {row['blue_mode']}",
+        f"[{prefix}] step {int(row['sampled_steps']):,} | nearest_red_uav",
         f"       win {row['red_win_rate']:.1%} | blue {row['blue_win_rate']:.1%} | "
         f"draw {row['draw_rate']:.1%}",
         f"       return {row['mean_episode_return']:.2f} | "
@@ -415,7 +411,6 @@ def main(
     config["training"].update({
         "environment_profile": args.profile, "seed": args.seed, "device": device, "num_envs": args.num_envs,
         "actor_variant": actor_variant, "critic_variant": critic_variant, "method_variant": method_variant,
-        "curriculum_total_steps": args.steps if method_variant in ("curriculum", "agp_curriculum") else None,
     })
     trainer = HAPPOTrainer(env_config, config)
     try:
@@ -504,13 +499,12 @@ def main(
 
             crossed_evaluations = evaluation_observer.consume(trainer.env_steps)
             if crossed_evaluations and trainer.env_steps < args.steps:
-                for mode in ("nearest", "mav_priority"):
-                    eval_row = _evaluation_row(
-                        trainer, args.eval_episodes, mode, args.profile, args.seed, device,
-                    )
-                    evaluation_fields = evaluation_fields or tuple(eval_row.keys())
-                    _append_csv(run_dir / "evaluations.csv", eval_row, evaluation_fields)
-                    log(_evaluation_lines("EVAL", eval_row))
+                eval_row = _evaluation_row(
+                    trainer, args.eval_episodes, args.profile, args.seed, device,
+                )
+                evaluation_fields = evaluation_fields or tuple(eval_row.keys())
+                _append_csv(run_dir / "evaluations.csv", eval_row, evaluation_fields)
+                log(_evaluation_lines("EVAL", eval_row))
 
         trainer.buffer = trainer.make_buffer(configured_horizon)
         if args.log_interval and window.updates:
@@ -520,15 +514,13 @@ def main(
         trainer.save_checkpoint(run_dir / "checkpoint_final.pt")
 
         final_evaluation_started = time.perf_counter()
-        final_rows = []
-        for mode in ("nearest", "mav_priority"):
-            eval_row = _evaluation_row(
-                trainer, args.final_eval_episodes, mode, args.profile, args.seed, device,
-            )
-            evaluation_fields = evaluation_fields or tuple(eval_row.keys())
-            _append_csv(run_dir / "evaluations.csv", eval_row, evaluation_fields)
-            final_rows.append(eval_row)
-            log(_evaluation_lines("FINAL EVAL", eval_row))
+        eval_row = _evaluation_row(
+            trainer, args.final_eval_episodes, args.profile, args.seed, device,
+        )
+        evaluation_fields = evaluation_fields or tuple(eval_row.keys())
+        _append_csv(run_dir / "evaluations.csv", eval_row, evaluation_fields)
+        final_rows = [eval_row]
+        log(_evaluation_lines("FINAL EVAL", eval_row))
         final_evaluation_elapsed = time.perf_counter() - final_evaluation_started
 
         summary = {
@@ -536,10 +528,7 @@ def main(
             "actor_variant": actor_variant, "critic_variant": critic_variant,
             "method_variant": method_variant,
             "agp_lambda": float(trainer.config["agp_lambda"]),
-            "curriculum_schedule": [list(item) for item in trainer.curriculum_schedule],
-            "curriculum_total_steps": trainer.curriculum_total_steps,
-            "mode_transition_counts": trainer.mode_transition_counts,
-            "mode_episode_counts": trainer.mode_episode_counts,
+            "blue_target_strategy": "nearest_red_uav",
             "actor_architecture": trainer.actor_architecture,
             "actor_parameter_count_per_agent": trainer.actor_parameter_counts["per_agent"],
             "actor_parameter_count_total": trainer.actor_parameter_counts["total"],

@@ -14,7 +14,7 @@ class RelationalCentralizedCritic(nn.Module):
     ENTITY_INPUT_DIM = 10
     ENTITY_EMBED_DIM = 64
     ATTENTION_HEADS = 4
-    CONTEXT_INPUT_DIM = 39
+    CONTEXT_INPUT_DIM = 37
     CONTEXT_EMBED_DIM = 64
     VALUE_HIDDEN_DIM = 128
 
@@ -73,7 +73,7 @@ class RelationalCentralizedCritic(nn.Module):
         return self.layer_norm(embeddings + attended) * alive.unsqueeze(-1)
 
     def encode_context(self, states: torch.Tensor) -> torch.Tensor:
-        return self.context_encoder(states[..., 80:119])
+        return self.context_encoder(states[..., 80:117])
 
     def forward(self, states: torch.Tensor) -> torch.Tensor:
         if states.shape[-1] != GLOBAL_STATE_DIM:

@@ -10,42 +10,41 @@ from .geometry import compute_pairwise_geometry
 from .models import Aircraft
 from .reward import situation_reward
 
-BLUE_ACTION_CANDIDATES = np.asarray(list(product((-1.0, 0.0, 1.0), repeat=3)), dtype=np.float64)
+BLUE_ACTION_CANDIDATES = np.asarray(
+    sorted(product((-1.0, 0.0, 1.0), repeat=3), key=lambda action: (sum(v * v for v in action), action)),
+    dtype=np.float64,
+)
 
 
 class BluePolicy:
-    """Team target mode plus independent 27-action lookahead for each Blue."""
+    """Independent nearest-Red-UAV 27-action boundary-safe lookahead."""
 
-    MODES = ("nearest", "mav_priority", "mixed_episode")
+    TARGET_STRATEGY = "nearest_red_uav"
 
-    def __init__(self, mode: str, decision_dt: float, physics_dt: float) -> None:
-        if mode not in self.MODES:
-            raise ValueError(f"invalid Blue target mode: {mode}")
-        self.configured_mode = mode
-        self.episode_mode = mode
+    def __init__(self, decision_dt: float, physics_dt: float, battlefield: Mapping[str, tuple[float, float]]) -> None:
         self.physics_dt = float(physics_dt)
         self.substeps = int(round(float(decision_dt) / self.physics_dt))
+        self.battlefield = {axis: tuple(float(v) for v in battlefield[axis]) for axis in ("x", "y", "altitude")}
 
-    def reset(self, rng: np.random.Generator, nearest_probability: float | None = None) -> str:
-        if nearest_probability is None:
-            # Preserve the exact baseline RNG call and seeded mode sequence.
-            self.episode_mode = str(rng.choice(("nearest", "mav_priority"))) if self.configured_mode == "mixed_episode" else self.configured_mode
-            return self.episode_mode
-        if self.configured_mode != "mixed_episode":
-            raise ValueError("nearest_probability is only valid for mixed_episode Blue mode")
-        probability = float(nearest_probability)
-        if not 0.0 <= probability <= 1.0:
-            raise ValueError("nearest_probability must lie in [0, 1]")
-        self.episode_mode = "nearest" if rng.random() < probability else "mav_priority"
-        return self.episode_mode
+    def reset(self, rng: np.random.Generator) -> str:
+        del rng
+        return self.TARGET_STRATEGY
 
     def select_target(self, blue: Aircraft, red: Mapping[str, Aircraft]) -> Aircraft | None:
-        alive = [entity for entity in red.values() if entity.state.alive]
-        if not alive:
+        alive_uavs = [red[aid] for aid in ("UAV1", "UAV2", "UAV3") if red[aid].state.alive]
+        if alive_uavs:
+            return min(alive_uavs, key=lambda target: compute_pairwise_geometry(blue.state, target.state).distance)
+        mav = red["MAV"]
+        if not mav.state.alive:
             return None
-        if self.episode_mode == "mav_priority" and red["MAV"].state.alive:
-            return red["MAV"]
-        return min(alive, key=lambda target: compute_pairwise_geometry(blue.state, target.state).distance)
+        return mav
+
+    def _within_battlefield(self, state: object) -> bool:
+        return (
+            self.battlefield["x"][0] <= state.x <= self.battlefield["x"][1]
+            and self.battlefield["y"][0] <= state.y <= self.battlefield["y"][1]
+            and self.battlefield["altitude"][0] <= state.h <= self.battlefield["altitude"][1]
+        )
 
     def action(self, blue: Aircraft, red: Mapping[str, Aircraft]) -> np.ndarray:
         if not blue.state.alive:
@@ -53,10 +52,14 @@ class BluePolicy:
         target = self.select_target(blue, red)
         if target is None:
             return np.zeros(3, dtype=np.float64)
-        best_action, best_score = BLUE_ACTION_CANDIDATES[0], -np.inf
+        best_action, best_score = None, -np.inf
         for candidate in BLUE_ACTION_CANDIDATES:
             predicted = integrate_interval(blue.state, candidate, blue.spec, self.physics_dt, self.substeps)
+            if not self._within_battlefield(predicted):
+                continue
             score = situation_reward(predicted, target.state)
             if score > best_score:
                 best_score, best_action = score, candidate
+        if best_action is None:
+            raise RuntimeError(f"Blue boundary controller invariant violated: no safe action for {blue.aircraft_id}")
         return best_action.copy()

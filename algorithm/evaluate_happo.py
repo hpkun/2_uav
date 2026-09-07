@@ -27,7 +27,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile", choices=("learnability", "main"), default="main")
     parser.add_argument("--episodes", type=int, default=100)
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--blue-mode", choices=("nearest", "mav_priority", "both"), default="both")
     parser.add_argument("--env-config", type=Path)
     return parser.parse_args()
 
@@ -53,7 +52,7 @@ def main(expected_critic_variant: str = "mlp") -> None:
     if actor_variant != "vanilla":
         raise RuntimeError("incompatible actor architecture: vanilla evaluator requires a vanilla checkpoint")
     method_variant = payload.get("method_variant", trainer_config.get("method_variant", "baseline"))
-    if method_variant not in ("baseline", "agp", "curriculum", "agp_curriculum"):
+    if method_variant not in ("baseline", "agp"):
         raise RuntimeError(f"unsupported HAPPO method_variant: {method_variant!r}")
     critic_variant = payload.get("critic_variant", trainer_config.get("critic_variant", "mlp"))
     if critic_variant != expected_critic_variant:
@@ -77,19 +76,15 @@ def main(expected_critic_variant: str = "mlp") -> None:
     else:
         env_config = load_environment_config(None)
     training_profile = str(payload["environment_profile"])
-    modes = ("nearest", "mav_priority") if args.blue_mode == "both" else (args.blue_mode,)
     rows = []
     algorithm = "rc_happo" if critic_variant == "relational" else "happo"
-    for mode in modes:
-        records = evaluate_actors(
-            actors, env_config, args.episodes, mode, args.profile, seed=1000, device=device,
-        )
-        rows.append({
+    records = evaluate_actors(actors, env_config, args.episodes, args.profile, seed=1000, device=device)
+    rows.append({
             "checkpoint": checkpoint.name, "sampled_steps": int(payload.get("sampled_steps", 0)),
             "algorithm": algorithm,
             "method_variant": method_variant,
             "critic_variant": critic_variant,
-            "blue_mode": mode, "training_profile": training_profile,
+            "blue_target_strategy": "nearest_red_uav", "training_profile": training_profile,
             "evaluation_profile": args.profile, "episodes": args.episodes,
             **summarize_records(records),
         })

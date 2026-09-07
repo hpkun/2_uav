@@ -1,4 +1,4 @@
-"""Deterministic HAPPO evaluation for one fixed Blue target mode."""
+"""Deterministic HAPPO evaluation against the canonical Blue strategy."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -28,8 +28,8 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, float]:
     }
 
 
-def evaluate_actors(actors: Any, env_config: str | Path | Mapping[str, Any] | None, episodes: int, blue_target_mode: str, profile: str, seed: int = 1000, device: str = "cpu", attention_records: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
-    records = []; env = HeterogeneousMAVUAVAirCombatEnv(env_config, blue_target_mode=blue_target_mode, profile=profile)
+def evaluate_actors(actors: Any, env_config: str | Path | Mapping[str, Any] | None, episodes: int, profile: str, seed: int = 1000, device: str = "cpu", attention_records: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    records = []; env = HeterogeneousMAVUAVAirCombatEnv(env_config, profile=profile)
     for episode in range(int(episodes)):
         observations, _ = env.reset(seed=seed + episode); done = False; decision_step = 0
         attention_start = len(attention_records) if attention_records is not None else 0
@@ -46,7 +46,7 @@ def evaluate_actors(actors: Any, env_config: str | Path | Mapping[str, Any] | No
                         observation = observations[aid]
                         row = {
                             "episode": episode, "decision_step": decision_step,
-                            "blue_mode": blue_target_mode, "agent": aid, "outcome": "",
+                            "blue_target_strategy": "nearest_red_uav", "agent": aid, "outcome": "",
                         }
                         row.update({f"friend_attention_friend{i + 1}": float(value) for i, value in enumerate(friend)})
                         for i, blue_id in enumerate(BLUE_IDS):
@@ -71,16 +71,13 @@ def evaluate_recurrent_actors(
     actors: Any,
     env_config: str | Path | Mapping[str, Any] | None,
     episodes: int,
-    blue_target_mode: str,
     profile: str,
     seed: int = 1000,
     device: str = "cpu",
 ) -> list[dict[str, Any]]:
     """Deterministically evaluate recurrent actors with episode-safe hidden masks."""
     records: list[dict[str, Any]] = []
-    env = HeterogeneousMAVUAVAirCombatEnv(
-        env_config, blue_target_mode=blue_target_mode, profile=profile,
-    )
+    env = HeterogeneousMAVUAVAirCombatEnv(env_config, profile=profile)
     for episode in range(int(episodes)):
         observations, _ = env.reset(seed=seed + episode)
         hidden = [actor.initial_hidden(1, device=device) for actor in actors.actors]
