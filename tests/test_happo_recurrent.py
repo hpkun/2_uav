@@ -164,9 +164,9 @@ def test_collection_resets_only_required_agent_hidden(monkeypatch, done, next_ma
     observations = trainer.observations.copy()
     states = trainer.global_states.copy()
 
-    def controlled_step(actions, reset_nearest_probability=None):
+    def controlled_step(actions):
         infos = [{"episode_summary": {"outcome": "draw"}, "auto_reset": True,
-                  "reset_info": {"blue_target_mode": "nearest"}}] if done else [{}]
+                  "reset_info": {"blue_target_strategy": "nearest_red_uav"}}] if done else [{}]
         return (
             observations.copy(), states.copy(), np.zeros((1, len(RED_IDS)), np.float32),
             np.asarray([done]), np.asarray([False]), np.asarray([next_masks], np.float32), infos,
@@ -233,7 +233,7 @@ def test_recurrent_sequential_factor_matches_sequence_log_probs_and_ignores_inac
 def test_recurrent_critic_and_architecture_contract_are_unchanged():
     trainer = HAPPOTrainer(config=_trainer_config(hidden_dim=128, recurrent_hidden_dim=128, rollout_steps=1))
     assert isinstance(trainer.critic, CentralizedCritic)
-    assert trainer.critic.network[0].in_features == GLOBAL_STATE_DIM == 119
+    assert trainer.critic.network[0].in_features == GLOBAL_STATE_DIM == 117
     assert trainer.actor_parameter_counts == {"per_agent": [128_902] * len(RED_IDS), "total": 515_608}
     assert trainer.actor_architecture == {
         "observation_dim": OBS_DIM, "encoder_dim": 128, "recurrent_hidden_dim": 128,
@@ -298,10 +298,10 @@ def test_recurrent_resume_rejects_missing_continuation_state(tmp_path, missing):
 def test_recurrent_evaluation_is_deterministic_and_episode_local():
     trainer = HAPPOTrainer(_short_env(2), _trainer_config(rollout_steps=1))
     first = evaluate_recurrent_actors(
-        trainer.actors, trainer.environment_config, 2, "nearest", "learnability", seed=1000,
+        trainer.actors, trainer.environment_config, 2, "learnability", seed=1000,
     )
     second = evaluate_recurrent_actors(
-        trainer.actors, trainer.environment_config, 2, "nearest", "learnability", seed=1000,
+        trainer.actors, trainer.environment_config, 2, "learnability", seed=1000,
     )
     assert first == second and len(first) == 2
     trainer.close()
@@ -346,7 +346,7 @@ def test_recurrent_training_and_evaluation_entrypoints_cpu_smoke(tmp_path):
         subprocess.run([
             sys.executable, "algorithm/evaluate_happo_recurrent.py",
             str(run_dir / "checkpoint_final.pt"), "--profile", "learnability",
-            "--episodes", "1", "--device", "cpu", "--blue-mode", "nearest",
+            "--episodes", "1", "--device", "cpu",
             "--env-config", str(env_path),
         ], cwd=root, check=True, capture_output=True, text=True, timeout=180)
         evaluation = json.loads(
@@ -371,7 +371,7 @@ def test_recurrent_cuda_one_update_checkpoint_and_eval_smoke(tmp_path):
     restored = HAPPOTrainer(env_config, config)
     restored.load_checkpoint(checkpoint)
     records = evaluate_recurrent_actors(
-        restored.actors, env_config, 1, "nearest", "learnability", device="cuda",
+        restored.actors, env_config, 1, "learnability", device="cuda",
     )
     assert len(records) == 1
     trainer.close()

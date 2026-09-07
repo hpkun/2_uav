@@ -96,7 +96,7 @@ def render_episode(
             seg = np.asarray(segments); attack_line.set_data_3d(seg[:, 0], seg[:, 1], seg[:, 2])
         else: attack_line.set_data_3d([], [], [])
         for death, artist in death_artists: artist.set_visible(t >= float(death["time_s"]))
-        title.set_text(f"{metadata['algorithm']} | Blue: {metadata['blue_target_mode']} | "
+        title.set_text(f"{metadata['algorithm']} | Blue: {metadata['blue_target_strategy']} | "
                        f"t={t:.1f}s, decision={visual['raw_step'][frame]} | {metadata['evaluation_profile']}")
         return [*lines, *points, *labels, *headings, attack_line, title, *(x[1] for x in death_artists)]
 

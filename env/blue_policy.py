@@ -22,6 +22,7 @@ class BluePolicy:
     TARGET_STRATEGY = "nearest_red_uav"
 
     def __init__(self, decision_dt: float, physics_dt: float, battlefield: Mapping[str, tuple[float, float]]) -> None:
+        self.decision_dt = float(decision_dt)
         self.physics_dt = float(physics_dt)
         self.substeps = int(round(float(decision_dt) / self.physics_dt))
         self.battlefield = {axis: tuple(float(v) for v in battlefield[axis]) for axis in ("x", "y", "altitude")}
@@ -46,6 +47,24 @@ class BluePolicy:
             and self.battlefield["altitude"][0] <= state.h <= self.battlefield["altitude"][1]
         )
 
+    def _has_safe_altitude_recovery(self, state: object, blue: Aircraft) -> bool:
+        """Exclude states whose current climb/dive cannot be arrested before an altitude bound."""
+        lower, upper = self.battlefield["altitude"]
+        guard = 10.0 * blue.spec.v_max * self.decision_dt
+        toward_lower = state.theta < 0.0 and state.h < lower + guard
+        toward_upper = state.theta > 0.0 and state.h > upper - guard
+        if not (toward_lower or toward_upper):
+            return True
+        command = np.asarray((-1.0, -1.0 if toward_upper else 1.0, 0.0), dtype=np.float64)
+        recovered = state
+        for _ in range(40):
+            recovered = integrate_interval(recovered, command, blue.spec, self.physics_dt, self.substeps)
+            if not lower <= recovered.h <= upper:
+                return False
+            if (toward_upper and recovered.theta <= 0.0) or (toward_lower and recovered.theta >= 0.0):
+                return True
+        return False
+
     def action(self, blue: Aircraft, red: Mapping[str, Aircraft]) -> np.ndarray:
         if not blue.state.alive:
             return np.zeros(3, dtype=np.float64)
@@ -55,7 +74,7 @@ class BluePolicy:
         best_action, best_score = None, -np.inf
         for candidate in BLUE_ACTION_CANDIDATES:
             predicted = integrate_interval(blue.state, candidate, blue.spec, self.physics_dt, self.substeps)
-            if not self._within_battlefield(predicted):
+            if not self._within_battlefield(predicted) or not self._has_safe_altitude_recovery(predicted, blue):
                 continue
             score = situation_reward(predicted, target.state)
             if score > best_score:

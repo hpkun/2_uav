@@ -15,10 +15,10 @@ def test_happo_trainer_propagates_environment_profile(profile):
     trainer.close()
 
 
-def test_v30_observation_contract_and_vanilla_parameter_count():
+def test_v31_observation_state_contract_and_vanilla_parameter_count():
     trainer = HAPPOTrainer(config={"num_envs": 1, "rollout_steps": 1, "hidden_dim": 128})
-    assert ENVIRONMENT_VERSION == "heterogeneous_mavuav_4v4_v3_0"
-    assert OBS_DIM == 100 and GLOBAL_STATE_DIM == 119
+    assert ENVIRONMENT_VERSION == "heterogeneous_mavuav_4v4_v3_1"
+    assert OBS_DIM == 100 and GLOBAL_STATE_DIM == 117
     assert all(actor.network[0].in_features == OBS_DIM for actor in trainer.actors.actors)
     assert all(sum(parameter.numel() for parameter in actor.parameters()) == 29830 for actor in trainer.actors.actors)
     assert sum(sum(parameter.numel() for parameter in actor.parameters()) for actor in trainer.actors.actors) == 119320

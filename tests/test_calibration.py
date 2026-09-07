@@ -118,7 +118,7 @@ def test_reward_diagnostic_decomposition_and_kill_trend():
         {"outcome": "red", "situation_reward_sum": 10.0, "event_reward_sum": 100.0, "safety_reward_sum": 0.0, "terminal_reward_sum": 100.0, "episode_return": 210.0, "red_attack_kills": 2},
         {"outcome": "draw", "situation_reward_sum": 21.0, "event_reward_sum": 0.0, "safety_reward_sum": -1.0, "terminal_reward_sum": 0.0, "episode_return": 20.0, "red_attack_kills": 0},
     ]
-    rows = reward_diagnostic_rows(records, "mappo", 1, 100, "nearest")
+    rows = reward_diagnostic_rows(records, "mappo", 1, 100)
     red = next(row for row in rows if row["outcome"] == "red"); draw = next(row for row in rows if row["outcome"] == "draw")
     assert red["mean_total_return"] == red["mean_situation_reward_sum"] + red["mean_event_reward_sum"] + red["mean_safety_reward_sum"] + red["mean_terminal_reward"]
     assert draw["mean_total_return"] == 20.0 and red["return_red_attack_kills_correlation"] > 0.99
@@ -129,7 +129,8 @@ def test_reward_diagnostic_decomposition_and_kill_trend():
 def test_zero_and_random_baseline_runner_writes_results(tmp_path: Path):
     config = deepcopy(load_environment_config(None)); config["simulation"]["max_decision_steps"] = 2
     rows = run_rule_baselines(tmp_path, episodes=1, env_config=config, profile="learnability")
-    assert {(row["baseline"], row["blue_mode"]) for row in rows} == {("zero", "nearest"), ("zero", "mav_priority"), ("random", "nearest"), ("random", "mav_priority")}
+    assert {row["baseline"] for row in rows} == {"zero", "random"}
+    assert {row["blue_target_strategy"] for row in rows} == {"nearest_red_uav"}
     assert {row["environment_profile"] for row in rows} == {"learnability"}
     assert (tmp_path / "rule_baselines" / "evaluations.csv").exists()
     assert (tmp_path / "rule_baselines" / "summary.json").exists()

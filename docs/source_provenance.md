@@ -14,27 +14,26 @@ This project deliberately combines sources and engineering choices; it is not a 
 
 ## C. Project multi-target extensions
 
-- Each Red agent uses the maximum situation score over currently Red-team-visible alive Blue aircraft, with no assigned target; no visible target contributes zero.
-- Team dense reward sums the four Red slots and always divides by four.
+- For each team-visible alive Blue, v3.1 takes the maximum Red-vs-Blue situation score over alive Red aircraft and averages those maxima across visible Blue aircraft.
 - All cross-team attacker-target pairs maintain independent streaks and resolve kills synchronously.
-- Fixed-slot multi-target observation and centralized state, using the v3.0 4v4 contract at 100D/119D; each Blue block includes three Red-relative-velocity values.
+- Fixed-slot multi-target observation and centralized state, using the v3.1 4v4 contract at 100D/117D; each Blue block includes three Red-relative-velocity values.
 
 ## D. Project engineering parameters
 
 - Physics step 0.1 s and RK4 integration inside the 1 s decision interval.
 - Exact mirrored 4v4 initial coordinates, interval-midpoint speeds and small seeded initial jitter.
 - +/-100 km horizontal volume, 1-20 km altitude, and +/-60-degree pitch guard.
-- Blue's 27-candidate overload lookahead and `mixed_episode` target mode.
+- Blue's boundary-aware 27-candidate overload lookahead and independent nearest-alive-Red-UAV targeting, with MAV fallback only after all UAVs are gone.
 - Multiprocessing vector environment with deterministic per-environment auto-reset and a serial reference mode for testing.
 - Distance-only heterogeneous sensor ranges (MAV 12 km, UAV 8 km).
 - Instantaneous reliable Red datalink and masking of unseen enemy geometry.
-- One-hot type fields and the explicit 100D actor-observation layout in v3.0.
-- The 119D centralized state containing all 8 entities, 32 directed attack streaks, Red kill history, actual Blue episode mode and time fraction.
+- One-hot type fields and the explicit 100D actor-observation layout in v3.1.
+- The 117D centralized state containing all 8 entities, 32 directed attack streaks, Red kill history and time fraction.
 - Actor normalization scales: 30 km self x/y, 12 km relative x/y and distance, 10 km relative altitude, and 800 m/s relative velocity. Centralized-state x/y instead map the full battlefield bounds linearly to `[-1,1]`.
 - Seeded `main` and `learnability` randomization profiles with team-level and slot-level offsets.
 - Explicit propagation and recording of the selected `main` or `learnability` profile across training, benchmark, evaluation and checkpoints.
 - The implementation choice of a once-per-step -1 team penalty below 100 m Red friendly distance, without collision physics.
 
-The sensor ranges, datalink assumptions, observation masking, one-hot encoding, normalization scales, randomization profiles and 100 m safety penalty are project engineering extensions. They are not claimed to be parameters reproduced verbatim from the cited papers.
+The v3.1 multi-target aggregation and Blue rule controller, along with the sensor ranges, datalink assumptions, observation masking, one-hot encoding, normalization scales, randomization profiles and 100 m safety penalty, are project engineering extensions. The single-pair five-component situation reward is the literature-derived part.
 
 Chen, Luo and Guo (2026), *A deep reinforcement learning cooperative air combat method with temporal feature and attention enhancement for heterogeneous flight vehicles*, supplies only the heterogeneous 3v2 scenario-size precedent. The local paper explicitly describes TAM-HAPPO with GRU, masking and multi-head attention; none of those extensions are included here.

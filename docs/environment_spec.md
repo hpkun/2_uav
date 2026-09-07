@@ -1,8 +1,8 @@
 # Canonical environment specification
 
-The active contract is `heterogeneous_mavuav_4v4_v3_0`: one armed MAV and three armed UAVs versus four homogeneous fixed-rule Blue aircraft. Entity order is `MAV, UAV1, UAV2, UAV3, Blue1, Blue2, Blue3, Blue4`. MAV loss is immediate Red mission failure; UAV loss alone does not terminate an episode.
+The active contract is `heterogeneous_mavuav_4v4_v3_1`: one armed MAV and three armed UAVs versus four homogeneous fixed-rule Blue aircraft. Entity order is `MAV, UAV1, UAV2, UAV3, Blue1, Blue2, Blue3, Blue4`. MAV loss is immediate Red mission failure; UAV loss alone does not terminate an episode.
 
-Dynamics and combat semantics are unchanged from the validated predecessor: overload-controlled 3DOF motion, trim-centred normalized actions, 1 s decisions, 0.1 s RK4 physics, 75 decisions, 1--3 km engagement distance, strict ATA below 30 degrees, strict AA below 90 degrees, three consecutive decision steps, pairwise streaks and synchronous kill resolution. Each Blue still uses the 27-candidate one-step policy with `nearest`, `mav_priority`, or seeded `mixed_episode` targeting.
+Dynamics and combat semantics are unchanged from the validated predecessor: overload-controlled 3DOF motion, trim-centred normalized actions, 1 s decisions, 0.1 s RK4 physics, 75 decisions, 1--3 km engagement distance, strict ATA below 30 degrees, strict AA below 90 degrees, three consecutive decision steps, pairwise streaks and synchronous kill resolution. Each Blue independently targets its nearest alive Red UAV, falling back to MAV only after all three UAVs are gone. Its 27-action one-step greedy controller filters boundary-unsafe candidates; Blue has no escape outcome and can still attack every Red through normal pairwise combat resolution.
 
 Nominal starts in metres are MAV `(-4500,0,5000)`, UAV1 `(-4000,-1200,5000)`, UAV2 `(-4000,0,5000)`, UAV3 `(-4000,1200,5000)`, Blue1 `(4000,-1800,5000)`, Blue2 `(4000,-600,5000)`, Blue3 `(4000,600,5000)`, and Blue4 `(4000,1800,5000)`. Red heads 0 degrees and Blue heads 180 degrees. Speeds remain 325, 225 and 325 m/s for MAV, UAV and Blue.
 
@@ -12,10 +12,10 @@ Each Red actor receives 100 values. Layout is self `[0:11]`; three friend blocks
 
 ## Centralized state
 
-The critic receives 119 values: eight 10D entity blocks `[0:80]`; 32 normalized directed cross-team attack streaks `[80:112]` ordered as all Red-to-Blue pairs followed by all Blue-to-Red pairs; four Red-kill-history flags `[112:116]`; actual Blue episode-mode one-hot `[116:118]`; and time fraction `[118]`. The active mask order is the four Red slots.
+The critic receives 117 values: eight 10D entity blocks `[0:80]`; 32 normalized directed cross-team attack streaks `[80:112]` ordered as all Red-to-Blue pairs followed by all Blue-to-Red pairs; four Red-kill-history flags `[112:116]`; and time fraction `[116]`. The active mask order is the four Red slots.
 
 ## Reward and termination
 
-Each alive Red contributes its maximum five-part situation score over currently team-visible alive Blue aircraft, or zero if none is visible. The sum is always divided by the four fixed Red slots. Event, terminal, safety, sensor/datalink and normalization semantics and coefficients are unchanged. A Red win requires all four Blue aircraft to have been destroyed by Red attacks while MAV remains alive.
+For each currently team-visible alive Blue, the reward uses the best five-part situation score achieved by any alive Red, then averages those scores across the visible Blue aircraft. It is zero when no alive Red or no visible alive Blue exists. Event, terminal, safety, sensor/datalink and normalization semantics and coefficients are unchanged. A Red win requires all four Blue aircraft to have been destroyed by Red attacks while MAV remains alive.
 
-HAPPO uses four independent actors; MAPPO uses one shared actor over four Red samples. R-HAPPO uses four independent GRUs. HRTA and Structured Uniform parse three friend blocks and four enemy blocks. All v3.0 checkpoints carry the 100D/119D contract and intentionally reject old 3v2 checkpoints.
+HAPPO uses four independent actors; MAPPO uses one shared actor over four Red samples. R-HAPPO uses four independent GRUs. HRTA and Structured Uniform parse three friend blocks and four enemy blocks. v3.1 checkpoints carry the 100D/117D contract and intentionally reject v3.0 and older checkpoints.

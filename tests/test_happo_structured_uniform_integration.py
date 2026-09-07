@@ -135,25 +135,23 @@ def test_structured_uniform_training_and_evaluation_entrypoints():
         ], cwd=PROJECT_ROOT, check=True, capture_output=True, text=True, timeout=240)
         assert torch.load(run_dir / "checkpoint_final.pt", map_location="cpu", weights_only=False)["sampled_steps"] == 4
 
-        for mode, expected_rows in (("nearest", 1), ("mav_priority", 1), ("both", 2)):
-            subprocess.run([
-                sys.executable, "algorithm/evaluate_happo_structured_uniform.py",
-                str(run_dir / "checkpoint_final.pt"), "--profile", "learnability",
-                "--episodes", "1", "--device", "cpu", "--blue-mode", mode,
-            ], cwd=PROJECT_ROOT, check=True, capture_output=True, text=True, timeout=240)
-            evaluation = json.loads((run_dir / "evaluation_structured_uniform_final_summary.json").read_text(encoding="utf-8"))
-            assert evaluation["algorithm"] == "happo_structured_uniform"
-            assert evaluation["actor_variant"] == "structured_uniform"
-            assert len(evaluation["results"]) == expected_rows
-            with (run_dir / "evaluation_structured_uniform_final.csv").open(newline="", encoding="utf-8") as stream:
-                rows = list(csv.DictReader(stream))
-            assert len(rows) == expected_rows
-            assert all(row["algorithm"] == "happo_structured_uniform" and row["actor_variant"] == "structured_uniform" for row in rows)
+        subprocess.run([
+            sys.executable, "algorithm/evaluate_happo_structured_uniform.py",
+            str(run_dir / "checkpoint_final.pt"), "--profile", "learnability",
+            "--episodes", "1", "--device", "cpu",
+        ], cwd=PROJECT_ROOT, check=True, capture_output=True, text=True, timeout=240)
+        evaluation = json.loads((run_dir / "evaluation_structured_uniform_final_summary.json").read_text(encoding="utf-8"))
+        assert evaluation["algorithm"] == "happo_structured_uniform"
+        assert evaluation["actor_variant"] == "structured_uniform"
+        assert len(evaluation["results"]) == 1
+        with (run_dir / "evaluation_structured_uniform_final.csv").open(newline="", encoding="utf-8") as stream:
+            rows = list(csv.DictReader(stream))
+        assert len(rows) == 1 and rows[0]["blue_target_strategy"] == "nearest_red_uav"
 
         for evaluator in ("algorithm/evaluate_happo.py", "algorithm/evaluate_happo_hrta.py"):
             rejected = subprocess.run([
                 sys.executable, evaluator, str(run_dir / "checkpoint_final.pt"),
-                "--episodes", "1", "--device", "cpu", "--blue-mode", "nearest",
+                "--episodes", "1", "--device", "cpu",
             ], cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=120)
             assert rejected.returncode != 0 and "incompatible actor architecture" in rejected.stderr
     finally:
@@ -172,7 +170,7 @@ def test_structured_uniform_evaluator_rejects_vanilla_and_hrta(tmp_path):
     for checkpoint in checkpoints:
         rejected = subprocess.run([
             sys.executable, "algorithm/evaluate_happo_structured_uniform.py", str(checkpoint),
-            "--episodes", "1", "--device", "cpu", "--blue-mode", "nearest",
+            "--episodes", "1", "--device", "cpu",
         ], cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=120)
         assert rejected.returncode != 0
         assert "structured_uniform evaluator requires a structured_uniform checkpoint" in rejected.stderr

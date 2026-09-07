@@ -31,8 +31,6 @@ def infer_method_display_name(actor_variant: str, method_variant: str = "baselin
     if actor_variant == "vanilla":
         names = {
             "baseline": "HAPPO", "agp": "HAPPO-AGP",
-            "curriculum": "HAPPO-Curriculum",
-            "agp_curriculum": "HAPPO-AGP-Curriculum",
         }
         if method_variant in names:
             return names[method_variant]
@@ -135,7 +133,7 @@ def load_replay_actors(checkpoint: str | Path, device: str | torch.device = "cpu
     if variant == "vanilla":
         if "hidden_dim" not in trainer_config:
             raise RuntimeError("incompatible vanilla checkpoint: trainer_config.hidden_dim is required")
-        if method not in ("baseline", "agp", "curriculum", "agp_curriculum"):
+        if method not in ("baseline", "agp"):
             raise RuntimeError(f"unsupported HAPPO method_variant: {method!r}")
         actors = IndependentActors(hidden_dim=int(trainer_config["hidden_dim"]))
         architecture = None

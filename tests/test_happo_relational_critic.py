@@ -18,7 +18,7 @@ EXPECTED_ARCHITECTURE = {
     "entity_input_dim": 10,
     "entity_embed_dim": 64,
     "attention_heads": 4,
-    "context_input_dim": 39,
+    "context_input_dim": 37,
     "context_embed_dim": 64,
     "value_hidden_dim": 128,
 }
@@ -53,7 +53,7 @@ def test_relational_critic_shapes_are_finite_and_parameter_count_is_locked():
     assert critic(_state(1)[0]).shape == ()
     assert torch.isfinite(critic(_state())).all()
     assert critic.architecture() == EXPECTED_ARCHITECTURE
-    assert sum(parameter.numel() for parameter in critic.parameters()) == 94017
+    assert sum(parameter.numel() for parameter in critic.parameters()) == 93889
 
 
 def test_entity_and_context_parsing_have_exact_boundaries():
@@ -71,7 +71,7 @@ def test_entity_and_context_parsing_have_exact_boundaries():
     state[:, 6:80:10] = 1.0
     critic(state)
     assert torch.equal(captured["entities"], state[:, :80].reshape(1, 8, 10))
-    assert torch.equal(captured["context"], state[:, 80:119])
+    assert torch.equal(captured["context"], state[:, 80:117])
 
 
 def test_entity_encoder_is_shared_and_dead_masks_are_finite_and_zero():
@@ -112,13 +112,13 @@ def test_rc_happo_trainer_smoke_update_checkpoint_resume_and_strict_contract(tmp
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
     assert payload["critic_variant"] == "relational"
     assert payload["critic_architecture"] == EXPECTED_ARCHITECTURE
-    assert payload["critic_parameter_count"] == 94017
+    assert payload["critic_parameter_count"] == 93889
 
     restored = HAPPOTrainer(_short_env(), _config())
     assert restored.load_checkpoint(checkpoint) == trainer.env_steps
     restored.collect_rollout(); restored.update()
     records = evaluate_actors(
-        restored.actors, restored.environment_config, episodes=1, blue_target_mode="nearest",
+        restored.actors, restored.environment_config, episodes=1,
         profile="main", seed=1000, device="cpu",
     )
     assert len(records) == 1 and np.isfinite(records[0]["episode_return"])

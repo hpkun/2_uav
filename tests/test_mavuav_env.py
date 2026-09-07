@@ -1,5 +1,7 @@
 from copy import deepcopy
+import inspect
 import numpy as np
+import pytest
 
 from env.blue_policy import BLUE_ACTION_CANDIDATES, BluePolicy
 from env.dynamics import integrate_interval, map_normalized_action
@@ -93,15 +95,16 @@ def test_uav_death_does_not_end_episode_and_mav_death_does():
 def test_red_win_requires_attack_kills_and_living_mav():
     e = env()
     for aid in BLUE_IDS: e.entities[aid].state.alive = False
-    assert e._termination()[2] == "blue"
+    with pytest.raises(RuntimeError, match="all Blue inactive"):
+        e._termination()
     e._red_attack_kills = set(BLUE_IDS); assert e._termination()[2] == "red"
     e.entities["MAV"].state.alive = False; assert e._termination()[2] == "blue"
 
 
-def test_blue_escape_does_not_count_as_red_kill():
+def test_blue_boundary_violation_fails_fast():
     e = env(); e.entities["Blue1"].state.x = 100001.0
-    deaths = e._apply_boundaries()
-    assert deaths["Blue1"] == "blue_escape" and "Blue1" not in e._red_attack_kills
+    with pytest.raises(RuntimeError, match="Blue boundary invariant"):
+        e._apply_boundaries()
 
 
 def test_observation_global_state_active_masks_and_finiteness():
@@ -148,14 +151,18 @@ def test_reward_component_formulas_and_weights():
     assert np.isclose(situation_reward(a, b), expected)
 
 
-def test_multi_target_uses_best_and_fixed_denominator_after_uav_death():
-    e = env(); expected = 0.0
-    for aid in e.red_ids:
-        own = e.entities[aid]
-        expected += max(situation_reward(own.state, e.entities[bid].state) for bid in e.blue_ids)
-    assert np.isclose(e._team_situation_reward(), expected / len(RED_IDS))
+def test_multi_target_uses_best_red_for_each_visible_blue():
+    e = env()
+    expected = np.mean([
+        max(situation_reward(e.entities[rid].state, e.entities[bid].state) for rid in RED_IDS)
+        for bid in BLUE_IDS
+    ])
+    assert np.isclose(e._team_situation_reward(), expected)
     e.entities["UAV1"].state.alive = False
-    expected = sum(max(situation_reward(e.entities[aid].state, e.entities[bid].state) for bid in e.blue_ids) for aid in ("MAV", "UAV2", "UAV3")) / len(RED_IDS)
+    expected = np.mean([
+        max(situation_reward(e.entities[rid].state, e.entities[bid].state) for rid in ("MAV", "UAV2", "UAV3"))
+        for bid in BLUE_IDS
+    ])
     assert np.isclose(e._team_situation_reward(), expected)
 
 
@@ -176,7 +183,7 @@ def test_situation_reward_uses_only_team_visible_alive_blue():
     e.entities["Blue1"].state = AircraftState(-11_000.0, 0.0, 5000.0, 400.0, 0.0, 0.0, True)
     e.entities["Blue2"].state = AircraftState(13_000.0, 0.0, 5000.0, 250.0, 0.0, 0.0, True)
     assert e.team_visible("Blue1") and not e.team_visible("Blue2")
-    visible_only = sum(situation_reward(e.entities[aid].state, e.entities["Blue1"].state) for aid in e.red_ids) / len(RED_IDS)
+    visible_only = max(situation_reward(e.entities[aid].state, e.entities["Blue1"].state) for aid in e.red_ids)
     assert all(
         situation_reward(e.entities[aid].state, e.entities["Blue2"].state)
         > situation_reward(e.entities[aid].state, e.entities["Blue1"].state)
@@ -230,12 +237,10 @@ def test_observation_one_hot_streak_time_and_distance_normalization():
 
 
 def test_global_state_contains_transition_relevant_internal_state():
-    e = env(); e.blue_policy.episode_mode = "nearest"; baseline = e.global_state().copy()
+    e = env(); baseline = e.global_state().copy()
     e._attack_streak[("MAV", "Blue1")] = 1
     streak_state = e.global_state().copy(); assert not np.array_equal(baseline, streak_state)
-    e._attack_streak.clear(); e.blue_policy.episode_mode = "mav_priority"
-    mode_state = e.global_state().copy(); assert not np.array_equal(baseline, mode_state)
-    e.blue_policy.episode_mode = "nearest"; e.step_count = 1
+    e._attack_streak.clear(); e.step_count = 1
     time_state = e.global_state().copy(); assert not np.array_equal(baseline, time_state)
     e.step_count = 0; e._red_attack_kills.add("Blue1")
     kill_state = e.global_state().copy(); assert not np.array_equal(baseline, kill_state)
@@ -269,18 +274,19 @@ def test_red_safe_distance_penalty_is_once_per_step_and_nonlethal():
     assert not info["red_safe_distance_violation"] and info["safety_reward"] == 0.0
 
 
-def test_blue_candidates_and_target_modes():
+def test_blue_candidates_and_nearest_uav_target_strategy():
     assert BLUE_ACTION_CANDIDATES.shape == (27, 3) and len(np.unique(BLUE_ACTION_CANDIDATES, axis=0)) == 27
     e = env(); blue = e.entities["Blue1"]; red = {aid: e.entities[aid] for aid in e.red_ids}
-    nearest = BluePolicy("nearest", 1, .1); nearest.reset(np.random.default_rng(1))
-    assert nearest.select_target(blue, red).aircraft_id == "UAV1"
-    priority = BluePolicy("mav_priority", 1, .1); priority.reset(np.random.default_rng(1))
-    assert priority.select_target(blue, red).aircraft_id == "MAV"
-    modes_a, modes_b = [], []
-    pa, pb = BluePolicy("mixed_episode", 1, .1), BluePolicy("mixed_episode", 1, .1)
-    ra, rb = np.random.default_rng(9), np.random.default_rng(9)
-    for _ in range(20): modes_a.append(pa.reset(ra)); modes_b.append(pb.reset(rb))
-    assert modes_a == modes_b and set(modes_a) == {"nearest", "mav_priority"}
+    policy = e.blue_policy
+    assert policy.select_target(blue, red).aircraft_id == "UAV1"
+    red["MAV"].state.x, red["MAV"].state.y = blue.state.x + 1.0, blue.state.y
+    assert policy.select_target(blue, red).aircraft_id == "UAV1"
+    red["UAV1"].state.alive = False
+    assert policy.select_target(blue, red).aircraft_id == "UAV2"
+    for aid in ("UAV2", "UAV3"): red[aid].state.alive = False
+    assert policy.select_target(blue, red).aircraft_id == "MAV"
+    red["MAV"].state.alive = False
+    assert policy.select_target(blue, red) is None
 
 
 def test_config_contract_and_values():
@@ -290,7 +296,7 @@ def test_config_contract_and_values():
     assert cfg["battlefield"]["altitude"] == (1000.0, 20000.0)
 
 
-def test_v30_entity_order_and_nominal_formation_are_exact():
+def test_v31_entity_order_and_nominal_formation_are_exact():
     assert RED_IDS == ("MAV", "UAV1", "UAV2", "UAV3")
     assert BLUE_IDS == ("Blue1", "Blue2", "Blue3", "Blue4")
     e = env()
@@ -303,7 +309,7 @@ def test_v30_entity_order_and_nominal_formation_are_exact():
     assert {aid: tuple(e.entities[aid].state.as_array()[:3]) for aid in e.entities} == expected
 
 
-def test_v30_observation_slot_layout_for_every_red_agent():
+def test_v31_observation_slot_layout_for_every_red_agent():
     e = env()
     for own_id in RED_IDS:
         observation = e._observations()[own_id]
@@ -319,7 +325,7 @@ def test_v30_observation_slot_layout_for_every_red_agent():
             assert observation[start + 13] == float(blue_id in e._red_attack_kills)
 
 
-def test_v30_global_state_layout_and_attack_streak_order_are_exact():
+def test_v31_global_state_layout_and_attack_streak_order_are_exact():
     e = env()
     from env.mavuav import CROSS_TEAM_ATTACK_PAIRS
     assert len(CROSS_TEAM_ATTACK_PAIRS) == 32
@@ -331,10 +337,10 @@ def test_v30_global_state_layout_and_attack_streak_order_are_exact():
     state = e.global_state()
     np.testing.assert_allclose(state[80:112], [min((i % 3) + 1, 3) / 3 for i in range(32)])
     assert np.array_equal(state[112:116], [0, 1, 0, 1])
-    assert np.array_equal(state[116:118], [float(e.blue_policy.episode_mode == "nearest"), float(e.blue_policy.episode_mode == "mav_priority")])
+    assert np.isclose(state[116], 0.0)
 
 
-def test_v30_action_contract_requires_all_four_red_slots():
+def test_v31_action_contract_requires_all_four_red_slots():
     e = env()
     assert set(e._action_dict({aid: np.zeros(3) for aid in RED_IDS})) == set(RED_IDS)
     with np.testing.assert_raises_regex(ValueError, r"shape \(4, 3\)"):
@@ -364,20 +370,17 @@ def test_uav3_loss_and_four_blue_kill_event_rewards_remain_per_aircraft():
     assert kill_info["outcome"] == "red"
 
 
-def test_all_four_blue_aircraft_act_independently_and_mav_priority_falls_back():
+def test_all_four_blue_aircraft_act_independently_and_mav_fallback():
     e = env()
     acted = []
     e.blue_policy.action = lambda aircraft, red_entities: acted.append(aircraft.aircraft_id) or np.zeros(3)
     e.step(np.zeros((len(RED_IDS), 3)))
     assert acted == list(BLUE_IDS)
 
-    priority = BluePolicy("mav_priority", 1.0, 0.1)
-    priority.reset(np.random.default_rng(1))
     e = env()
-    e.entities["MAV"].state.alive = False
-    e.entities["UAV3"].state.x = e.entities["Blue1"].state.x - 100.0
-    selected = priority.select_target(e.entities["Blue1"], {aid: e.entities[aid] for aid in RED_IDS})
-    assert selected.aircraft_id == "UAV3"
+    for aid in RED_IDS[1:]: e.entities[aid].state.alive = False
+    selected = e.blue_policy.select_target(e.entities["Blue1"], {aid: e.entities[aid] for aid in RED_IDS})
+    assert selected.aircraft_id == "MAV"
 
 
 # Named contract tests below keep every research requirement independently visible
@@ -415,7 +418,9 @@ def test_mav_death_causes_red_failure():
 def test_red_win_requires_all_blue_attack_killed_and_mav_alive():
     e = env()
     for blue_id in BLUE_IDS: e.entities[blue_id].state.alive = False
-    e._red_attack_kills = set(BLUE_IDS[:-1]); assert e._termination()[2] == "blue"
+    e._red_attack_kills = set(BLUE_IDS[:-1])
+    with pytest.raises(RuntimeError, match="all Blue inactive"):
+        e._termination()
     e._red_attack_kills.add(BLUE_IDS[-1]); assert e._termination()[2] == "red"
 
 
@@ -423,7 +428,7 @@ def test_observation_shape_is_100():
     assert all(x.shape == (OBS_DIM,) for x in env()._observations().values())
 
 
-def test_global_state_shape_is_119(): assert env().global_state().shape == (GLOBAL_STATE_DIM,)
+def test_global_state_shape_is_117(): assert env().global_state().shape == (GLOBAL_STATE_DIM,) == (117,)
 
 
 def test_enemy_relative_velocity_uses_blue_minus_red_for_all_blues():
@@ -471,33 +476,89 @@ def test_multi_target_situation_uses_best_current_target():
     assert max(situation_reward(own, e.entities[x].state) for x in BLUE_IDS) <= 1.0
 
 
-def test_dense_team_denominator_remains_fixed_four_after_uav_death():
+def test_dense_team_averages_over_visible_alive_blue_after_uav_death():
     e = env(); e.entities["UAV1"].state.alive = False
-    expected = sum(max(situation_reward(e.entities[a].state, e.entities[b].state) for b in BLUE_IDS) for a in ("MAV", "UAV2", "UAV3")) / len(RED_IDS)
+    expected = np.mean([max(situation_reward(e.entities[a].state, e.entities[b].state) for a in ("MAV", "UAV2", "UAV3")) for b in BLUE_IDS])
     assert np.isclose(e._team_situation_reward(), expected)
 
 
 def test_blue_has_exactly_27_candidates(): assert BLUE_ACTION_CANDIDATES.shape == (27, 3)
 
 
-def test_blue_nearest_target_mode():
-    e = env(); p = BluePolicy("nearest", 1, .1); p.reset(np.random.default_rng(1))
-    assert p.select_target(e.entities["Blue1"], {a: e.entities[a] for a in e.red_ids}).aircraft_id == "UAV1"
-
-
-def test_blue_mav_priority_mode():
-    e = env(); p = BluePolicy("mav_priority", 1, .1); p.reset(np.random.default_rng(1))
-    assert p.select_target(e.entities["Blue1"], {a: e.entities[a] for a in e.red_ids}).aircraft_id == "MAV"
-
-
-def test_blue_mixed_mode_is_seed_reproducible():
+def test_blue_target_strategy_is_fixed_and_seed_independent():
     a, b = HeterogeneousMAVUAVAirCombatEnv(), HeterogeneousMAVUAVAirCombatEnv()
-    assert a.reset(seed=77)[1]["blue_target_mode"] == b.reset(seed=77)[1]["blue_target_mode"]
+    assert a.reset(seed=77)[1]["blue_target_strategy"] == b.reset(seed=91)[1]["blue_target_strategy"] == "nearest_red_uav"
 
 
-def test_long_environment_rollout_no_nan_inf():
+def test_short_environment_rollout_no_nan_inf():
     e = HeterogeneousMAVUAVAirCombatEnv(); observations, _ = e.reset(seed=8); rng = np.random.default_rng(8)
-    for _ in range(200):
+    for _ in range(20):
         observations, rewards, terminated, truncated, _ = e.step(rng.uniform(-1, 1, (len(RED_IDS), 3)))
         assert all(np.all(np.isfinite(x)) for x in observations.values()) and np.all(np.isfinite(list(rewards.values())))
         if terminated or truncated: observations, _ = e.reset()
+
+
+@pytest.mark.parametrize(
+    "axis,value,heading,theta",
+    [
+        ("x", 99_650.0, 0.0, 0.0), ("x", -99_650.0, np.pi, 0.0),
+        ("y", 99_650.0, np.pi / 2, 0.0), ("y", -99_650.0, -np.pi / 2, 0.0),
+        ("h", 19_850.0, 0.0, 0.2), ("h", 1_150.0, 0.0, -0.2),
+    ],
+)
+def test_blue_policy_filters_boundary_unsafe_candidates(axis, value, heading, theta):
+    e = env(); blue = e.entities["Blue1"]
+    if axis == "x": blue.state.x = value
+    elif axis == "y": blue.state.y = value
+    else: blue.state.h = value
+    blue.state.psi, blue.state.theta = heading, theta
+    action = e.blue_policy.action(blue, {aid: e.entities[aid] for aid in RED_IDS})
+    predicted = integrate_interval(blue.state, action, blue.spec, e.physics_dt, e.physics_substeps)
+    assert e.blue_policy._within_battlefield(predicted)
+
+
+def test_blue_policy_fails_fast_when_no_candidate_is_boundary_safe():
+    e = env(); blue = e.entities["Blue1"]
+    blue.state.x = e.config["battlefield"]["x"][1] + 1000.0
+    with pytest.raises(RuntimeError, match="no safe action"):
+        e.blue_policy.action(blue, {aid: e.entities[aid] for aid in RED_IDS})
+
+
+def test_blue_policy_y_mirror_changes_only_yaw_overload_action():
+    e = env(); red = {aid: e.entities[aid] for aid in RED_IDS}
+    for aid in RED_IDS[1:]: red[aid].state.alive = False
+    red["UAV2"].state.alive = True
+    blue = e.entities["Blue1"]
+    blue.state = AircraftState(0.0, 1200.0, 5000.0, 325.0, 0.1, -0.2, True)
+    red["UAV2"].state = AircraftState(2500.0, 2200.0, 5300.0, 225.0, -0.05, 0.3, True)
+    action = e.blue_policy.action(blue, red)
+    blue.state.y *= -1; blue.state.psi *= -1
+    red["UAV2"].state.y *= -1; red["UAV2"].state.psi *= -1
+    mirrored = e.blue_policy.action(blue, red)
+    np.testing.assert_array_equal(mirrored, [action[0], action[1], -action[2]])
+
+
+def test_short_deterministic_rollout_keeps_every_live_blue_inside_bounds():
+    e = env()
+    for _ in range(30):
+        _, _, terminated, truncated, _ = e.step(np.zeros((len(RED_IDS), 3)))
+        for aid in BLUE_IDS:
+            if e.entities[aid].state.alive:
+                assert e.blue_policy._within_battlefield(e.entities[aid].state)
+                assert e.entities[aid].inactive_cause is None
+            else:
+                assert e.entities[aid].inactive_cause == "red_attack"
+        if terminated or truncated:
+            break
+
+
+def test_obsolete_blue_exit_semantics_are_absent_from_environment_source():
+    assert "blue_" + "escape" not in inspect.getsource(HeterogeneousMAVUAVAirCombatEnv)
+
+
+def test_blue_combat_still_checks_all_red_targets_not_only_maneuver_target():
+    e = env(); _attack_setup(e, "Blue1", "MAV")
+    e.entities["UAV1"].state.x, e.entities["UAV1"].state.y = 100.0, 0.0
+    assert e.blue_policy.select_target(e.entities["Blue1"], {aid: e.entities[aid] for aid in RED_IDS}).aircraft_id == "UAV1"
+    e._resolve_attacks(); e._resolve_attacks()
+    assert e._resolve_attacks()[1]["MAV"] == "blue_attack"

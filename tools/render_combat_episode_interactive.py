@@ -33,7 +33,7 @@ function esc(x) { return String(x).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&
 function eventText(e) {
   if (e.type === 'attack') return `${e.attacker} → ${e.target} ATTACK`;
   if (e.type === 'red_separation_warning') return `RED SEPARATION WARNING (${Number(e.minimum_distance).toFixed(0)} m)`;
-  const labels = {boundary:'BOUNDARY LOSS', blue_escape:'BLUE ESCAPE', red_attack:'DESTROYED [red_attack]', blue_attack:'DESTROYED [blue_attack]'};
+  const labels = {boundary:'BOUNDARY LOSS', red_attack:'DESTROYED [red_attack]', blue_attack:'DESTROYED [blue_attack]'};
   return `${e.entity} ${labels[e.cause] || `LOST [${e.cause}]`}`;
 }
 function frameAtOrBeforeTime(time) {
@@ -228,10 +228,10 @@ def render_interactive(input_dir: Path, output: Path | None = None, *, visual_dt
     outcome={"red":"RED WIN","blue":"BLUE WIN","draw":"DRAW"}.get(meta["outcome"],str(meta["outcome"]).upper())
     body=(f"{'MAV SURVIVED' if meta['mav_survived'] else 'MAV LOST'}<br>UAV Survivors {meta['red_uav_survivors']}/3<br>"
           f"Blue Survivors {meta['blue_survivors']}/4<br>Red Attack Kills {meta['red_attack_kills']}<br>Blue Attack Kills {meta['blue_attack_kills']}<br>"
-          f"Episode Return {meta['episode_return']:.3f}<br>Episode Length {meta['episode_length']}<br>Evaluation Profile {meta['evaluation_profile']}<br>Blue Policy {meta['blue_target_mode']}")
+          f"Episode Return {meta['episode_return']:.3f}<br>Episode Length {meta['episode_length']}<br>Evaluation Profile {meta['evaluation_profile']}<br>Blue Policy {meta['blue_target_strategy']}")
     html=HTML_TEMPLATE.replace("PLOTLY_JS",get_plotlyjs()).replace("PAYLOAD_JSON",_json(payload)).replace("APPLICATION_JS",APP_JS.replace("PAYLOAD","P"))
     # Undo the one placeholder reference: APP_JS expects global P assigned from PAYLOAD.
-    html=html.replace("const P = P;","const P = PAYLOAD;").replace("METHOD",str(meta["algorithm"])).replace("PROFILE",str(meta["evaluation_profile"])).replace("BLUE_MODE",str(meta["blue_target_mode"])).replace("LAST",str(len(visual["time_s"])-1)).replace("RESULT_TITLE",outcome).replace("RESULT_BODY",body)
+    html=html.replace("const P = P;","const P = PAYLOAD;").replace("METHOD",str(meta["algorithm"])).replace("PROFILE",str(meta["evaluation_profile"])).replace("BLUE_MODE",str(meta["blue_target_strategy"])).replace("LAST",str(len(visual["time_s"])-1)).replace("RESULT_TITLE",outcome).replace("RESULT_BODY",body)
     output.write_text(html,encoding="utf-8"); return output
 
 

@@ -153,14 +153,14 @@ def test_hrta_direct_training_resume_evaluation_and_attention_output_smoke():
         subprocess.run([
             sys.executable, "algorithm/evaluate_happo_hrta.py", str(run_dir / "checkpoint_final.pt"),
             "--profile", "learnability", "--episodes", "1", "--device", "cpu",
-            "--blue-mode", "nearest", "--attention-output", str(attention_path),
+            "--attention-output", str(attention_path),
         ], cwd=PROJECT_ROOT, check=True, capture_output=True, text=True, timeout=180)
         evaluation = json.loads((run_dir / "evaluation_hrta_final_summary.json").read_text(encoding="utf-8"))
         assert evaluation["algorithm"] == "happo_hrta"
         with attention_path.open(encoding="utf-8", newline="") as stream:
             rows = list(csv.DictReader(stream))
         required = {
-            "episode", "decision_step", "blue_mode", "agent", "outcome",
+            "episode", "decision_step", "blue_target_strategy", "agent", "outcome",
             "friend_attention_friend1", "friend_attention_friend2", "friend_attention_friend3",
             "enemy_attention_Blue1", "enemy_attention_Blue2", "enemy_attention_Blue3", "enemy_attention_Blue4",
             "Blue1_alive", "Blue2_alive", "Blue3_alive", "Blue4_alive",

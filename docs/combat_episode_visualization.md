@@ -7,15 +7,15 @@
 ```powershell
 conda run -n uav python -u tools/record_combat_episode.py `
   --checkpoint outputs/<run>/checkpoint_final.pt `
-  --profile main --blue-mode nearest --seed 424242 `
+  --profile main --seed 424242 `
   --device cuda --output-dir outputs/visualization/example
 ```
 
-`--blue-mode` 只接受 `nearest` 或 `mav_priority`，一条 trace 对应一种环境内部 Blue policy。输出目录默认必须不存在或为空；只有显式 `--overwrite` 才允许复用。种子 `424242` 是独立的 qualitative seed，不属于正式评估使用的 `1000+episode` 序列。元数据固定写入 `qualitative_visualization_only` 和 `used_for_quantitative_metrics: false`。
+v3.1 录像固定使用 canonical `nearest_red_uav` Blue strategy，元数据字段为 `blue_target_strategy`。输出目录默认必须不存在或为空；只有显式 `--overwrite` 才允许复用。种子 `424242` 是独立的 qualitative seed，不属于正式评估使用的 `1000+episode` 序列。
 
-loader 严格检查 environment version、100D observation 和 119D global state。支持：
+loader 严格检查 environment version、100D observation 和 117D global state。支持：
 
-- vanilla：从 `trainer_config/config.hidden_dim` 构造 `IndependentActors`，恢复 `payload["actors"]`；baseline、AGP、curriculum 和 AGP-curriculum 只影响方法显示名，不改变推理动作。
+- vanilla：从 `trainer_config/config.hidden_dim` 构造 `IndependentActors`，恢复 `payload["actors"]`；baseline 与 AGP 只影响方法显示名，不改变推理动作。
 - HRTA：必须有精确的 `actor_architecture` 四字段，构造 `HRTAIndependentActors`。
 - Structured Uniform：同样严格验证四字段并构造 `StructuredUniformIndependentActors`。
 - R-HAPPO recurrent：仅接受 `actor_variant=recurrent` 与 `method_variant=baseline`，严格验证 `observation_dim/encoder_dim/recurrent_hidden_dim/head_dim/action_dim` 五字段并构造 `RecurrentIndependentActors`。
@@ -24,7 +24,7 @@ loader 严格检查 environment version、100D observation 和 119D global state
 
 ## Trace 合同
 
-schema version 为 2。frame 0 是 `env.reset` 之后、第一次 actor action 之前的真实状态；每次 `env.step` 完成后追加一帧，所以 `F = episode_steps + 1`。transition `i` 的 attack/death/safety/reward 属于 `trace_frame=i+1`。
+schema version 为 3。frame 0 是 `env.reset` 之后、第一次 actor action 之前的真实状态；每次 `env.step` 完成后追加一帧，所以 `F = episode_steps + 1`。transition `i` 的 attack/death/safety/reward 属于 `trace_frame=i+1`。
 
 `kinematics` 是 `[F,8,6]`，顺序为 `[x,y,h,v,theta,psi]`；单位是 `[m,m,m,m/s,rad,rad]`。`h` 本身就是 positive-up altitude，渲染始终使用 `altitude=h`，绝不转换为 `-h`。`alive` 为 `[F,8]`，`red_actions` 为 `[F-1,4,3]`，并保存各 reward 分量、最小 Red 间距及 separation warning。
 

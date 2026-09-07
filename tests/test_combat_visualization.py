@@ -39,7 +39,7 @@ def synthetic_trace(frames: int = 3):
 def synthetic_metadata():
     config=load_environment_config(None)
     return {"trace_schema_version":HETERO_COMBAT_TRACE_SCHEMA_VERSION,"decision_dt":1.,"algorithm":"HAPPO","evaluation_profile":"main",
-            "blue_target_mode":"nearest","entity_types":{x:("MAV" if x=="MAV" else "UAV" if x in RED_IDS else "Blue") for x in ENTITY_IDS},
+            "blue_target_strategy":"nearest_red_uav","entity_types":{x:("MAV" if x=="MAV" else "UAV" if x in RED_IDS else "Blue") for x in ENTITY_IDS},
             "entity_teams":{x:("red" if x in RED_IDS else "blue") for x in ENTITY_IDS},
             "aircraft_specs":config["aircraft_specs"],"battlefield":config["battlefield"],
             "events":[{"trace_frame":2,"time_s":2.,"type":"attack","attacker":"MAV","target":"Blue1"},
@@ -209,7 +209,7 @@ def test_policy_loader_rejects_contract_and_unknown(tmp_path):
 
 def test_method_names():
     assert infer_method_display_name("vanilla","baseline")=="HAPPO"
-    assert infer_method_display_name("vanilla","agp_curriculum")=="HAPPO-AGP-Curriculum"
+    assert infer_method_display_name("vanilla","agp")=="HAPPO-AGP"
     assert infer_method_display_name("hrta")=="HAPPO-HRTA"
     assert infer_method_display_name("structured_uniform")=="HAPPO-Structured-Uniform"
     assert infer_method_display_name("recurrent")=="R-HAPPO"
@@ -222,8 +222,8 @@ def test_deterministic_short_recording(tmp_path):
              "environment_profile":"learnability","actors":actors.state_dict()}
     ckpt=tmp_path/"model.pt";torch.save(payload,ckpt);adapter=load_replay_actors(ckpt)
     cfg=load_environment_config(None);cfg["simulation"]["max_decision_steps"]=2
-    m1=record_episode(adapter,ckpt,tmp_path/"a",profile="learnability",blue_mode="nearest",seed=424242,env_config=cfg)
-    m2=record_episode(adapter,ckpt,tmp_path/"b",profile="learnability",blue_mode="nearest",seed=424242,env_config=cfg)
+    m1=record_episode(adapter,ckpt,tmp_path/"a",profile="learnability",seed=424242,env_config=cfg)
+    m2=record_episode(adapter,ckpt,tmp_path/"b",profile="learnability",seed=424242,env_config=cfg)
     with np.load(tmp_path/"a"/"episode_trace.npz") as a,np.load(tmp_path/"b"/"episode_trace.npz") as b:
         for key in ("red_actions","kinematics","alive"): assert np.array_equal(a[key],b[key])
         assert a["kinematics"].shape[0]==m1["episode_length"]+1
@@ -235,11 +235,11 @@ def test_recurrent_recording_matches_evaluator_and_repeats(tmp_path):
     torch.manual_seed(29);checkpoint=tmp_path/"recurrent.pt";_,payload=recurrent_checkpoint(checkpoint)
     adapter=load_replay_actors(checkpoint)
     cfg=load_environment_config(None);cfg["simulation"]["max_decision_steps"]=2
-    m1=record_episode(adapter,checkpoint,tmp_path/"a",profile="learnability",blue_mode="nearest",
+    m1=record_episode(adapter,checkpoint,tmp_path/"a",profile="learnability",
                       seed=424242,env_config=cfg)
-    m2=record_episode(adapter,checkpoint,tmp_path/"b",profile="learnability",blue_mode="nearest",
+    m2=record_episode(adapter,checkpoint,tmp_path/"b",profile="learnability",
                       seed=424242,env_config=cfg)
-    records=evaluate_recurrent_actors(adapter.actors,cfg,1,"nearest","learnability",seed=424242,device="cpu")
+    records=evaluate_recurrent_actors(adapter.actors,cfg,1,"learnability",seed=424242,device="cpu")
     with np.load(tmp_path/"a"/"episode_trace.npz") as a,np.load(tmp_path/"b"/"episode_trace.npz") as b:
         for key in ("red_actions","kinematics","alive"):assert np.array_equal(a[key],b[key])
     assert m1["events"]==m2["events"] and m1["outcome"]==m2["outcome"]

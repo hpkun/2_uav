@@ -40,13 +40,13 @@ def _event_rows(info: dict[str, Any], trace_frame: int, time_s: float) -> list[d
 
 def record_episode(
     adapter: ReplayPolicyAdapter, checkpoint: Path, output_dir: Path, *, profile: str,
-    blue_mode: str, seed: int, env_config: dict[str, Any], overwrite: bool = False,
+    seed: int, env_config: dict[str, Any], overwrite: bool = False,
 ) -> dict[str, Any]:
     output_dir = output_dir.expanduser().resolve()
     if output_dir.exists() and any(output_dir.iterdir()) and not overwrite:
         raise FileExistsError(f"output directory is not empty: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
-    env = HeterogeneousMAVUAVAirCombatEnv(env_config, seed=seed, blue_target_mode=blue_mode, profile=profile)
+    env = HeterogeneousMAVUAVAirCombatEnv(env_config, seed=seed, profile=profile)
     observations, reset_info = env.reset(seed=seed)
     adapter.reset_episode()
     states, alive = _snapshot(env)
@@ -95,7 +95,7 @@ def record_episode(
         "environment_version": adapter.payload["environment_version"],
         "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM,
         "training_profile": adapter.payload.get("environment_profile"), "evaluation_profile": profile,
-        "blue_target_mode": reset_info["blue_target_mode"], "episode_seed": seed,
+        "blue_target_strategy": reset_info["blue_target_strategy"], "episode_seed": seed,
         "episode_role": "qualitative_visualization_only", "used_for_quantitative_metrics": False,
         "decision_dt": env.decision_dt, "physics_dt": env.physics_dt,
         "max_decision_steps": env.max_decision_steps, "raw_trace_dt": env.decision_dt,
@@ -117,7 +117,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--profile", choices=("learnability", "main"), default="main")
-    parser.add_argument("--blue-mode", choices=("nearest", "mav_priority"), default="nearest")
     parser.add_argument("--seed", type=int, default=424242)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--env-config", type=Path)
@@ -128,7 +127,7 @@ def main() -> None:
     adapter = load_replay_actors(checkpoint, args.device)
     config = load_environment_config(args.env_config.expanduser().resolve() if args.env_config else adapter.payload.get("environment_config"))
     result = record_episode(adapter, checkpoint, args.output_dir, profile=args.profile,
-                            blue_mode=args.blue_mode, seed=args.seed, env_config=config, overwrite=args.overwrite)
+                            seed=args.seed, env_config=config, overwrite=args.overwrite)
     print(json.dumps(result, indent=2, ensure_ascii=False), flush=True)
 
 

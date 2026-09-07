@@ -2,7 +2,7 @@
 
 本项目包含异构 `1 MAV + 3 UAV vs 4 Blue` 环境、vanilla HAPPO/MAPPO 实现，以及独立的评估和诊断工具。正式研究代码位于 `env/` 与 `algorithm/`，不需要安装当前项目 package。
 
-当前 canonical contract 为 `heterogeneous_mavuav_4v4_v3_0`，actor observation 为 100D，centralized state 为 119D。旧 3v2/v2.2 checkpoint 与结果仅作为历史实验保留，不能续跑到 4v4，也不能与 4v4 baseline 直接合并比较。
+当前 canonical contract 为 `heterogeneous_mavuav_4v4_v3_1`，actor observation 为 100D，centralized state 为 117D。四架 Blue 独立选择最近的存活 Red UAV，全部 UAV 损失后才转向 MAV；规则控制器只采用边界安全的 27 候选动作。旧 v3.0 及更早 checkpoint 不能续跑或评估。
 
 ## 环境准备
 
@@ -48,7 +48,7 @@ python algorithm/train_happo.py \
 tail -f outputs/<run>/run.log
 ```
 
-训练完成后才分别对 `nearest` 和 `mav_priority` 做 final deterministic evaluation。checkpoint 保存频率和日志频率均不会触发额外评估。
+训练完成后只对 canonical `nearest_red_uav` 对手做 final deterministic evaluation。checkpoint 保存频率和日志频率均不会触发额外评估。
 
 如需中间评估，显式传入例如：
 
@@ -76,19 +76,18 @@ python algorithm/train_happo.py \
 python algorithm/evaluate_happo.py \
     outputs/<run>/checkpoint_final.pt \
     --profile main \
-    --episodes 100 \
-    --blue-mode both
+    --episodes 100
 ```
 
-评估允许训练 profile 与 evaluation profile 不同，用于跨 profile 泛化检查；环境版本、100D observation 和 119D global state contract 仍会严格校验。
+评估允许训练 profile 与 evaluation profile 不同，用于跨 profile 泛化检查；环境版本、100D observation 和 117D global state contract 仍会严格校验。
 
 ## R-HAPPO 基线
 
-R-HAPPO 使用四个独立 GRU Actor，并保持现有 119D centralized MLP Critic 与环境语义不变。训练和独立评估入口为：
+R-HAPPO 使用四个独立 GRU Actor，并保持现有 117D centralized MLP Critic 与环境语义不变。训练和独立评估入口为：
 
 ```bash
 python algorithm/train_happo_recurrent.py --steps 5000000 --profile main --seed 1 --device cuda --num-envs 16
-python algorithm/evaluate_happo_recurrent.py outputs/<run>/checkpoint_final.pt --profile main --episodes 100 --blue-mode both --device cuda
+python algorithm/evaluate_happo_recurrent.py outputs/<run>/checkpoint_final.pt --profile main --episodes 100 --device cuda
 ```
 
 其 recurrent mask、TBPTT、短尾 chunk 和 checkpoint continuation 语义见 `docs/recurrent_happo_spec.md`。
@@ -117,7 +116,7 @@ outputs/happo_main_seed1_5m_<timestamp>/
 python tools/audit_env.py --steps 1000 --num-envs 16
 python tools/benchmark_env.py --sample-steps 2000 --num-envs 16
 python tools/plot_trajectory.py outputs/<run>/checkpoint_final.pt \
-    --profile main --blue-mode nearest --seed 1000
+    --profile main --seed 1000
 ```
 
 轨迹图片默认直接写入 checkpoint 所在 run folder。诊断辅助函数集中在 `tools/diagnostics.py`，核心环境和 HAPPO trainer 不依赖 `tools/`。
@@ -126,7 +125,7 @@ python tools/plot_trajectory.py outputs/<run>/checkpoint_final.pt \
 
 ```bash
 python tools/record_combat_episode.py --checkpoint outputs/<run>/checkpoint_final.pt \
-    --profile main --blue-mode nearest --seed 424242 --output-dir outputs/visualization/example
+    --profile main --seed 424242 --output-dir outputs/visualization/example
 python tools/render_combat_episode.py --input-dir outputs/visualization/example
 python tools/render_combat_episode_interactive.py --input-dir outputs/visualization/example
 ```

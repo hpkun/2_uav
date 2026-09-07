@@ -183,8 +183,6 @@ def _terminal_cause(env: HeterogeneousMAVUAVAirCombatEnv, outcome: str, truncate
     mav = env.entities["MAV"]
     if not mav.state.alive:
         return f"MAV_{mav.inactive_cause or 'inactive'}"
-    if any(env.entities[blue].inactive_cause == "blue_escape" for blue in BLUE_IDS):
-        return "Blue_escape"
     if any(env.entities[red].inactive_cause == "boundary" for red in RED_IDS):
         return "Red_boundary"
     if truncated:
@@ -255,11 +253,7 @@ def evaluate_run(
     episode_rows: list[dict[str, Any]] = []
     early_rows: list[dict[str, Any]] = []
 
-    env = HeterogeneousMAVUAVAirCombatEnv(
-        environment_config,
-        blue_target_mode="nearest",
-        profile="main",
-    )
+    env = HeterogeneousMAVUAVAirCombatEnv(environment_config, profile="main")
     for episode_index in range(int(episodes)):
         evaluation_seed = 1000 + episode_index
         observations, _ = env.reset(seed=evaluation_seed, options={"profile": "main"})
@@ -518,7 +512,7 @@ def run_audit(
         "episodes_per_run": int(episodes),
         "evaluation_seed_range": [1000, 1000 + int(episodes) - 1],
         "profile": "main",
-        "blue_mode": "nearest",
+        "blue_target_strategy": "nearest_red_uav",
         "deterministic": True,
         "device": str(device),
         "combat_thresholds": combat_thresholds,

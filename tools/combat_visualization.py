@@ -7,7 +7,7 @@ from typing import Any
 
 import numpy as np
 
-HETERO_COMBAT_TRACE_SCHEMA_VERSION = 2
+HETERO_COMBAT_TRACE_SCHEMA_VERSION = 3
 MIN_HORIZONTAL_SPAN_KM = 10.0
 CUBE_SPAN_ROUNDING_KM = 0.5
 ENTITY_IDS = ("MAV", "UAV1", "UAV2", "UAV3", "Blue1", "Blue2", "Blue3", "Blue4")

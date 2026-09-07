@@ -24,14 +24,12 @@ def _run(*arguments: str) -> subprocess.CompletedProcess[str]:
 
 def test_direct_happo_entrypoints_show_help_without_package_install():
     assert "--steps" in _run("algorithm/train_happo.py", "--help").stdout
-    assert "--blue-mode" in _run("algorithm/evaluate_happo.py", "--help").stdout
+    assert "--episodes" in _run("algorithm/evaluate_happo.py", "--help").stdout
     assert "--steps" in _run("algorithm/train_happo_hrta.py", "--help").stdout
     assert "--attention-output" in _run("algorithm/evaluate_happo_hrta.py", "--help").stdout
     assert "--steps" in _run("algorithm/train_happo_agp.py", "--help").stdout
-    assert "--steps" in _run("algorithm/train_happo_curriculum.py", "--help").stdout
-    assert "--steps" in _run("algorithm/train_happo_agp_curriculum.py", "--help").stdout
     assert "--steps" in _run("algorithm/train_happo_relational_critic.py", "--help").stdout
-    assert "--blue-mode" in _run("algorithm/evaluate_happo_relational_critic.py", "--help").stdout
+    assert "--episodes" in _run("algorithm/evaluate_happo_relational_critic.py", "--help").stdout
 
 
 def _simulated_schedule(total: int, interval: int) -> tuple[list[int], list[int]]:
@@ -103,7 +101,7 @@ def test_flat_training_and_cross_profile_evaluation_smoke():
         with (run_dir / "training.csv").open(encoding="utf-8", newline="") as stream:
             assert int(list(csv.DictReader(stream))[-1]["sampled_steps"]) == 2
         with (run_dir / "evaluations.csv").open(encoding="utf-8", newline="") as stream:
-            assert len(list(csv.DictReader(stream))) == 2
+            assert len(list(csv.DictReader(stream))) == 1
         assert training.stdout == (run_dir / "run.log").read_text(encoding="utf-8")
 
         _run(
@@ -122,7 +120,6 @@ def test_flat_training_and_cross_profile_evaluation_smoke():
         _run(
             "algorithm/evaluate_happo.py", str(run_dir / "checkpoint_final.pt"),
             "--profile", "main", "--episodes", "1", "--device", "cpu",
-            "--blue-mode", "nearest",
         )
         evaluation = json.loads((run_dir / "evaluation_final_summary.json").read_text(encoding="utf-8"))
         assert evaluation["training_profile"] == "learnability"
@@ -131,32 +128,32 @@ def test_flat_training_and_cross_profile_evaluation_smoke():
         shutil.rmtree(run_dir, ignore_errors=True)
 
 
-def test_combined_entrypoint_and_vanilla_evaluator_method_metadata_smoke():
-    output_name = f"pytest_happo_agp_curriculum_{uuid.uuid4().hex}"
+def test_agp_entrypoint_and_vanilla_evaluator_method_metadata_smoke():
+    output_name = f"pytest_happo_agp_{uuid.uuid4().hex}"
     run_dir = PROJECT_ROOT / "outputs" / output_name
     try:
         _run(
-            "algorithm/train_happo_agp_curriculum.py", "--steps", "1",
+            "algorithm/train_happo_agp.py", "--steps", "1",
             "--profile", "learnability", "--device", "cpu", "--num-envs", "1",
             "--output-name", output_name, "--checkpoint-interval", "1",
             "--eval-interval", "0", "--log-interval", "1", "--final-eval-episodes", "1",
         )
         checkpoint = run_dir / "checkpoint_final.pt"
         summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
-        assert summary["algorithm"] == "happo_agp_curriculum"
+        assert summary["algorithm"] == "happo_agp"
         assert summary["actor_variant"] == "vanilla"
-        assert summary["method_variant"] == "agp_curriculum"
+        assert summary["method_variant"] == "agp"
         with (run_dir / "training.csv").open(encoding="utf-8", newline="") as stream:
             row = list(csv.DictReader(stream))[-1]
-        assert row["method_variant"] == "agp_curriculum"
+        assert row["method_variant"] == "agp"
         assert float(row["agp_shaping_mean_abs"]) >= 0.0
 
         _run(
             "algorithm/evaluate_happo.py", str(checkpoint), "--profile", "learnability",
-            "--episodes", "1", "--device", "cpu", "--blue-mode", "nearest",
+            "--episodes", "1", "--device", "cpu",
         )
         evaluation = json.loads((run_dir / "evaluation_final_summary.json").read_text(encoding="utf-8"))
-        assert evaluation["method_variant"] == "agp_curriculum"
-        assert evaluation["results"][0]["method_variant"] == "agp_curriculum"
+        assert evaluation["method_variant"] == "agp"
+        assert evaluation["results"][0]["method_variant"] == "agp"
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)
