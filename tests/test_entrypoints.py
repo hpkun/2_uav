@@ -8,6 +8,7 @@ import subprocess
 import sys
 import uuid
 import yaml
+import torch
 
 from algorithm.train_happo import MilestoneObserver, _append_csv, planned_rollout_horizon
 
@@ -20,6 +21,21 @@ def _run(*arguments: str) -> subprocess.CompletedProcess[str]:
         [sys.executable, *arguments], cwd=PROJECT_ROOT, check=True,
         capture_output=True, text=True, timeout=180,
     )
+
+
+def test_v31_checkpoint_is_rejected_by_v32_evaluator(tmp_path):
+    checkpoint = tmp_path / "v31.pt"
+    torch.save({
+        "environment_version": "heterogeneous_mavuav_4v4_v3_1",
+        "observation_dim": 100,
+        "global_state_dim": 117,
+    }, checkpoint)
+    result = subprocess.run(
+        [sys.executable, "algorithm/evaluate_happo.py", str(checkpoint), "--episodes", "1", "--device", "cpu"],
+        cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=180,
+    )
+    assert result.returncode != 0
+    assert "incompatible HAPPO checkpoint environment contract" in result.stderr
 
 
 def test_direct_happo_entrypoints_show_help_without_package_install():

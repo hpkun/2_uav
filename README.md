@@ -2,7 +2,7 @@
 
 本项目包含异构 `1 MAV + 3 UAV vs 4 Blue` 环境、vanilla HAPPO/MAPPO 实现，以及独立的评估和诊断工具。正式研究代码位于 `env/` 与 `algorithm/`，不需要安装当前项目 package。
 
-当前 canonical contract 为 `heterogeneous_mavuav_4v4_v3_1`，actor observation 为 100D，centralized state 为 117D。四架 Blue 独立选择最近的存活 Red UAV，全部 UAV 损失后才转向 MAV；规则控制器只采用边界安全的 27 候选动作。旧 v3.0 及更早 checkpoint 不能续跑或评估。
+当前 canonical contract 为 `heterogeneous_mavuav_4v4_v3_2`，actor observation 为 100D，centralized state 为 117D。场景为 1 MAV + 3 Red UAV 对 4 Blue-team UAV；红蓝 UAV 使用完全相同的动力学参数和 225 m/s 名义初速，MAV 保持异构高性能参数。“Blue”只是 Blue-team UAV 的代码标签，不代表第三种动力学平台。四架 Blue 独立选择最近的存活 Red UAV，全部 UAV 损失后才转向 MAV；规则控制器只采用边界安全的 27 候选动作。v3.1 及更早 checkpoint 不能续跑、评估或回放。
 
 ## 环境准备
 

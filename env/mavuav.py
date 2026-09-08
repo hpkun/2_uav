@@ -23,7 +23,7 @@ TYPE_ONE_HOT = {
     "UAV": (0.0, 1.0, 0.0),
     "Blue": (0.0, 0.0, 1.0),
 }
-ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_1"
+ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_2"
 OBS_DIM = 100
 GLOBAL_STATE_DIM = 117
 CROSS_TEAM_ATTACK_PAIRS = tuple((red, blue) for red in RED_IDS for blue in BLUE_IDS) + tuple(
@@ -73,6 +73,14 @@ def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
         if set(raw) != {"v_min", "v_max", "nx", "ny", "nz"}:
             raise ValueError(f"aircraft_specs.{aircraft_type} has unknown or missing fields")
         AircraftSpec(aircraft_type, float(raw["v_min"]), float(raw["v_max"]), _pair(raw["nx"], "nx"), _pair(raw["ny"], "ny"), _pair(raw["nz"], "nz"))
+    uav_spec = cfg["aircraft_specs"]["UAV"]
+    blue_spec = cfg["aircraft_specs"]["Blue"]
+    for field in ("v_min", "v_max"):
+        if float(blue_spec[field]) != float(uav_spec[field]):
+            raise ValueError(f"aircraft_specs.Blue.{field} must match aircraft_specs.UAV.{field}")
+    for field in ("nx", "ny", "nz"):
+        if _pair(blue_spec[field], f"aircraft_specs.Blue.{field}") != _pair(uav_spec[field], f"aircraft_specs.UAV.{field}"):
+            raise ValueError(f"aircraft_specs.Blue.{field} must match aircraft_specs.UAV.{field}")
     if set(cfg["scenario"]) != {"default_profile", "initial"} or set(cfg["scenario"]["initial"]) != set(ENTITY_IDS):
         raise ValueError("scenario must define default_profile and the eight fixed initial entity slots")
     profiles = cfg["randomization_profiles"]
@@ -509,4 +517,4 @@ class HeterogeneousMAVUAVAirCombatEnv:
 
 MAVSpec = AircraftSpec("MAV", 250.0, 400.0, (-1.0, 5.0), (-1.5, 2.0), (-3.0, 3.0))
 UAVSpec = AircraftSpec("UAV", 150.0, 300.0, (-1.0, 5.0), (-1.5, 1.5), (-2.0, 2.0))
-BlueSpec = AircraftSpec("Blue", 250.0, 400.0, (-1.0, 5.0), (-1.5, 3.0), (-3.0, 3.0))
+BlueSpec = AircraftSpec("Blue", 150.0, 300.0, (-1.0, 5.0), (-1.5, 1.5), (-2.0, 2.0))

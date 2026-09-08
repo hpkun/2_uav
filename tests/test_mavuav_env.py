@@ -39,8 +39,8 @@ def test_type_specific_action_mapping():
     mav = map_normalized_action(action, e.entities["MAV"].state, e.entities["MAV"].spec)
     uav = map_normalized_action(action, e.entities["UAV1"].state, e.entities["UAV1"].spec)
     blue = map_normalized_action(action, e.entities["Blue1"].state, e.entities["Blue1"].spec)
-    assert mav.ny == 2.0 and uav.ny == 1.5 and blue.ny == 3.0
-    assert mav.nz == blue.nz == 3.0 and uav.nz == 2.0
+    assert mav.ny == 2.0 and uav.ny == blue.ny == 1.5
+    assert mav.nz == 3.0 and uav.nz == blue.nz == 2.0
 
 
 def test_decision_step_contains_expected_physics_substeps():
@@ -296,9 +296,52 @@ def test_config_contract_and_values():
     assert cfg["battlefield"]["altitude"] == (1000.0, 20000.0)
 
 
-def test_v31_entity_order_and_nominal_formation_are_exact():
+@pytest.mark.parametrize("field", ["v_min", "v_max", "nx", "ny", "nz"])
+def test_config_rejects_blue_uav_dynamics_mismatch(field):
+    cfg = load_environment_config(None)
+    changed = deepcopy(cfg)
+    if field in ("v_min", "v_max"):
+        changed["aircraft_specs"]["Blue"][field] += 1.0
+    else:
+        changed["aircraft_specs"]["Blue"][field] = list(changed["aircraft_specs"]["Blue"][field])
+        changed["aircraft_specs"]["Blue"][field][1] += 0.1
+    with pytest.raises(ValueError, match=rf"aircraft_specs\.Blue\.{field} must match"):
+        load_environment_config(changed)
+
+
+def test_v32_uav_performance_and_nominal_speed_contract_are_exact():
     assert RED_IDS == ("MAV", "UAV1", "UAV2", "UAV3")
     assert BLUE_IDS == ("Blue1", "Blue2", "Blue3", "Blue4")
+    cfg = load_environment_config(None)
+    mav, uav, blue = (cfg["aircraft_specs"][kind] for kind in ("MAV", "UAV", "Blue"))
+    for field in ("v_min", "v_max", "nx", "ny", "nz"):
+        assert blue[field] == uav[field]
+    assert any(mav[field] != uav[field] for field in ("v_min", "v_max", "ny", "nz"))
+    initial = cfg["scenario"]["initial"]
+    assert initial["MAV"]["speed"] == 325.0
+    assert all(initial[aid]["speed"] == 225.0 for aid in RED_IDS[1:] + BLUE_IDS)
+
+
+@pytest.mark.parametrize("profile", ["learnability", "main"])
+def test_v32_randomization_preserves_shared_red_blue_uav_base_contract(profile):
+    e = HeterogeneousMAVUAVAirCombatEnv(randomize=True, profile=profile)
+    e.reset(seed=2026)
+    uav = e.entities["UAV1"].spec
+    for aid in RED_IDS[1:] + BLUE_IDS:
+        aircraft = e.entities[aid]
+        assert (aircraft.spec.v_min, aircraft.spec.v_max, aircraft.spec.nx, aircraft.spec.ny, aircraft.spec.nz) == (
+            uav.v_min, uav.v_max, uav.nx, uav.ny, uav.nz,
+        )
+        assert uav.v_min <= aircraft.state.v <= uav.v_max
+
+
+def test_v32_blue_altitude_recovery_guard_derives_to_3000_metres():
+    e = env()
+    blue = e.entities["Blue1"]
+    assert 10.0 * blue.spec.v_max * e.decision_dt == 3000.0
+
+
+def test_v32_entity_order_and_nominal_formation_are_exact():
     e = env()
     expected = {
         "MAV": (-4500.0, 0.0, 5000.0), "UAV1": (-4000.0, -1200.0, 5000.0),
@@ -309,7 +352,7 @@ def test_v31_entity_order_and_nominal_formation_are_exact():
     assert {aid: tuple(e.entities[aid].state.as_array()[:3]) for aid in e.entities} == expected
 
 
-def test_v31_observation_slot_layout_for_every_red_agent():
+def test_v32_observation_slot_layout_for_every_red_agent():
     e = env()
     for own_id in RED_IDS:
         observation = e._observations()[own_id]
@@ -325,7 +368,7 @@ def test_v31_observation_slot_layout_for_every_red_agent():
             assert observation[start + 13] == float(blue_id in e._red_attack_kills)
 
 
-def test_v31_global_state_layout_and_attack_streak_order_are_exact():
+def test_v32_global_state_layout_and_attack_streak_order_are_exact():
     e = env()
     from env.mavuav import CROSS_TEAM_ATTACK_PAIRS
     assert len(CROSS_TEAM_ATTACK_PAIRS) == 32
@@ -340,7 +383,7 @@ def test_v31_global_state_layout_and_attack_streak_order_are_exact():
     assert np.isclose(state[116], 0.0)
 
 
-def test_v31_action_contract_requires_all_four_red_slots():
+def test_v32_action_contract_requires_all_four_red_slots():
     e = env()
     assert set(e._action_dict({aid: np.zeros(3) for aid in RED_IDS})) == set(RED_IDS)
     with np.testing.assert_raises_regex(ValueError, r"shape \(4, 3\)"):
@@ -503,7 +546,7 @@ def test_short_environment_rollout_no_nan_inf():
     [
         ("x", 99_650.0, 0.0, 0.0), ("x", -99_650.0, np.pi, 0.0),
         ("y", 99_650.0, np.pi / 2, 0.0), ("y", -99_650.0, -np.pi / 2, 0.0),
-        ("h", 19_850.0, 0.0, 0.2), ("h", 1_150.0, 0.0, -0.2),
+        ("h", 19_850.0, 0.0, 0.2), ("h", 1_250.0, 0.0, -0.2),
     ],
 )
 def test_blue_policy_filters_boundary_unsafe_candidates(axis, value, heading, theta):

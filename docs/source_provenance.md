@@ -4,7 +4,7 @@ This project deliberately combines sources and engineering choices; it is not a 
 
 ## A. Directly adopted from a paper
 
-- Xiong et al. (2026), *Manned/unmanned aerial vehicle collaborative interpretable method for intelligent air combat*: overload-controlled 3DOF model; MAV/UAV/Blue performance ranges; stronger and higher-value MAV versus lower-value UAV task semantics. Locally checked against `熊威1 等 - 面向智能空战有人无人机协同可解释方法.pdf`.
+- Xiong et al. (2026), *Manned/unmanned aerial vehicle collaborative interpretable method for intelligent air combat*: overload-controlled 3DOF model; the MAV and UAV performance ranges used here; stronger and higher-value MAV versus lower-value UAV task semantics. The reference paper also defines a stronger, asymmetric Blue performance range. Locally checked against `熊威1 等 - 面向智能空战有人无人机协同可解释方法.pdf`.
 - Yang Shuheng, Zhang Dong, Xiong Wei, Ren Zhi, Tang Shuo. *Air combat maneuver decision-making method based on interpretable reinforcement learning*. Acta Aeronautica et Astronautica Sinica, 2024, 45(18): 329922. DOI: `10.7527/S1000-6893.2023.29922`. Chinese citation: 杨书恒，张栋，熊威，任智，唐硕．基于可解释性强化学习的空战机动决策方法．航空学报，2024，45(18)：329922．This project directly uses its 1 s decision interval, 1-3 km engagement distance, 30-degree attacker-angle threshold, 90-degree entering-angle threshold, three consecutive decision steps, five-part situation reward, reward weights `0.32 / 0.43 / 0.10 / 0.10 / 0.05`, and maximum episode length of 75 decision steps.
 
 ## B. Combined across papers
@@ -14,9 +14,10 @@ This project deliberately combines sources and engineering choices; it is not a 
 
 ## C. Project multi-target extensions
 
-- For each team-visible alive Blue, v3.1 takes the maximum Red-vs-Blue situation score over alive Red aircraft and averages those maxima across visible Blue aircraft.
+- For each team-visible alive Blue, v3.2 takes the maximum Red-vs-Blue situation score over alive Red aircraft and averages those maxima across visible Blue aircraft.
 - All cross-team attacker-target pairs maintain independent streaks and resolve kills synchronously.
-- Fixed-slot multi-target observation and centralized state, using the v3.1 4v4 contract at 100D/117D; each Blue block includes three Red-relative-velocity values.
+- Fixed-slot multi-target observation and centralized state, using the v3.2 4v4 contract at 100D/117D; each Blue block includes three Red-relative-velocity values.
+- The v3.2 scenario intentionally does not retain the reference paper's stronger asymmetric Blue platform. To construct fair same-type UAV combat, each Blue-team UAV reuses the Red UAV speed and overload limits. This equality is a project scenario-design choice, not a claim about the paper.
 
 ## D. Project engineering parameters
 
@@ -27,13 +28,13 @@ This project deliberately combines sources and engineering choices; it is not a 
 - Multiprocessing vector environment with deterministic per-environment auto-reset and a serial reference mode for testing.
 - Distance-only heterogeneous sensor ranges (MAV 12 km, UAV 8 km).
 - Instantaneous reliable Red datalink and masking of unseen enemy geometry.
-- One-hot type fields and the explicit 100D actor-observation layout in v3.1.
+- One-hot type fields and the explicit 100D actor-observation layout in v3.2. The `Blue` one-hot value denotes Blue-team UAV identity, not distinct flight performance.
 - The 117D centralized state containing all 8 entities, 32 directed attack streaks, Red kill history and time fraction.
 - Actor normalization scales: 30 km self x/y, 12 km relative x/y and distance, 10 km relative altitude, and 800 m/s relative velocity. Centralized-state x/y instead map the full battlefield bounds linearly to `[-1,1]`.
 - Seeded `main` and `learnability` randomization profiles with team-level and slot-level offsets.
 - Explicit propagation and recording of the selected `main` or `learnability` profile across training, benchmark, evaluation and checkpoints.
 - The implementation choice of a once-per-step -1 team penalty below 100 m Red friendly distance, without collision physics.
 
-The v3.1 multi-target aggregation and Blue rule controller, along with the sensor ranges, datalink assumptions, observation masking, one-hot encoding, normalization scales, randomization profiles and 100 m safety penalty, are project engineering extensions. The single-pair five-component situation reward is the literature-derived part.
+The v3.2 same-type Red/Blue UAV performance contract, multi-target aggregation and Blue rule controller, along with the sensor ranges, datalink assumptions, observation masking, one-hot encoding, normalization scales, randomization profiles and 100 m safety penalty, are project engineering extensions. The single-pair five-component situation reward is the literature-derived part.
 
 Chen, Luo and Guo (2026), *A deep reinforcement learning cooperative air combat method with temporal feature and attention enhancement for heterogeneous flight vehicles*, supplies only the heterogeneous 3v2 scenario-size precedent. The local paper explicitly describes TAM-HAPPO with GRU, masking and multi-head attention; none of those extensions are included here.

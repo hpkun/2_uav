@@ -200,7 +200,7 @@ def test_recurrent_adapter_history_reset_and_agent_masks(tmp_path):
 
 
 def test_policy_loader_rejects_contract_and_unknown(tmp_path):
-    base={"environment_version":"old","observation_dim":OBS_DIM,"global_state_dim":GLOBAL_STATE_DIM,"actors":{}}
+    base={"environment_version":"heterogeneous_mavuav_4v4_v3_1","observation_dim":OBS_DIM,"global_state_dim":GLOBAL_STATE_DIM,"actors":{}}
     p=tmp_path/"bad.pt";torch.save(base,p)
     with pytest.raises(RuntimeError,match="environment contract"):load_replay_actors(p)
     base.update(environment_version=ENVIRONMENT_VERSION,actor_variant="mystery",trainer_config={}) ;torch.save(base,p)
