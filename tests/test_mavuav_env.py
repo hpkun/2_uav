@@ -338,7 +338,17 @@ def test_v32_randomization_preserves_shared_red_blue_uav_base_contract(profile):
 def test_v32_blue_altitude_recovery_guard_derives_to_3000_metres():
     e = env()
     blue = e.entities["Blue1"]
-    assert 10.0 * blue.spec.v_max * e.decision_dt == 3000.0
+    assert e.blue_policy._altitude_recovery_guard(blue.state, blue) == 3000.0
+
+
+def test_v32_blue_recovery_guard_expands_for_steep_uav_descent():
+    e = env()
+    blue = e.entities["Blue1"]
+    blue.state.h = 5000.0
+    blue.state.v = blue.spec.v_max
+    blue.state.theta = -np.pi / 3.0
+    assert e.blue_policy._altitude_recovery_guard(blue.state, blue) > 6000.0
+    assert not e.blue_policy._has_safe_altitude_recovery(blue.state, blue)
 
 
 def test_v32_entity_order_and_nominal_formation_are_exact():
