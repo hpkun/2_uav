@@ -46,7 +46,7 @@ def evaluate_actors(actors: Any, env_config: str | Path | Mapping[str, Any] | No
                         observation = observations[aid]
                         row = {
                             "episode": episode, "decision_step": decision_step,
-                            "blue_target_strategy": "nearest_red_uav", "agent": aid, "outcome": "",
+                            "blue_target_strategy": "nearest_red_aircraft", "agent": aid, "outcome": "",
                         }
                         row.update({f"friend_attention_friend{i + 1}": float(value) for i, value in enumerate(friend)})
                         for i, blue_id in enumerate(BLUE_IDS):

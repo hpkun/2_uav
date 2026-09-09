@@ -291,7 +291,7 @@ def evaluate_policy(
             done = bool(terminated or truncated)
         summary = dict(info["episode_summary"])
         summary.update({
-            "algorithm": algorithm, "sampled_steps": int(sampled_steps), "blue_target_strategy": "nearest_red_uav",
+            "algorithm": algorithm, "sampled_steps": int(sampled_steps), "blue_target_strategy": "nearest_red_aircraft",
             "evaluation_seed": int(episode_seed), "action_mode": action_mode, "environment_profile": profile,
             "situation_reward_sum": float(situation_sum), "event_reward_sum": float(event_sum),
             "terminal_reward_sum": float(terminal_sum), "safety_reward_sum": float(safety_sum),
@@ -313,7 +313,7 @@ def evaluation_summary(records: list[Mapping[str, Any]], algorithm: str, seed: i
         raise ValueError("evaluation records cannot be empty")
     n = len(records)
     return {
-        "sampled_steps": sampled_steps, "algorithm": algorithm, "seed": seed, "blue_target_strategy": "nearest_red_uav",
+        "sampled_steps": sampled_steps, "algorithm": algorithm, "seed": seed, "blue_target_strategy": "nearest_red_aircraft",
         "environment_profile": records[0]["environment_profile"], "episodes": n,
         "red_win_rate": sum(r["outcome"] == "red" for r in records) / n,
         "blue_win_rate": sum(r["outcome"] == "blue" for r in records) / n,
@@ -329,7 +329,7 @@ def evaluation_summary(records: list[Mapping[str, Any]], algorithm: str, seed: i
 
 def geometry_summary(records: list[Mapping[str, Any]], algorithm: str, seed: int, sampled_steps: int) -> dict[str, Any]:
     return {
-        "sampled_steps": sampled_steps, "algorithm": algorithm, "seed": seed, "blue_target_strategy": "nearest_red_uav", "episodes": len(records),
+        "sampled_steps": sampled_steps, "algorithm": algorithm, "seed": seed, "blue_target_strategy": "nearest_red_aircraft", "episodes": len(records),
         "mean_minimum_cross_team_distance": float(np.mean([r["minimum_cross_team_distance"] for r in records])),
         "mean_minimum_friendly_red_distance": float(np.mean([r["minimum_friendly_red_distance"] for r in records])),
         "fraction_cross_team_below_100m": float(np.mean([r["minimum_cross_team_distance"] < 100.0 for r in records])),
@@ -342,7 +342,7 @@ def geometry_summary(records: list[Mapping[str, Any]], algorithm: str, seed: int
 def target_concentration_summary(records: list[Mapping[str, Any]], algorithm: str, seed: int, sampled_steps: int) -> dict[str, Any]:
     comparable = sum(int(r["target_comparable_steps"]) for r in records)
     row: dict[str, Any] = {
-        "sampled_steps": sampled_steps, "algorithm": algorithm, "seed": seed, "blue_target_strategy": "nearest_red_uav",
+        "sampled_steps": sampled_steps, "algorithm": algorithm, "seed": seed, "blue_target_strategy": "nearest_red_aircraft",
         "all_red_same_target_rate": sum(int(r["all_red_same_target_steps"]) for r in records) / max(1, comparable),
         "two_or_more_same_target_rate": sum(int(r["two_or_more_same_target_steps"]) for r in records) / max(1, comparable),
     }
@@ -360,7 +360,7 @@ def reward_diagnostic_rows(records: list[Mapping[str, Any]], algorithm: str, see
     for outcome in ("red", "blue", "draw"):
         selected = [r for r in records if r["outcome"] == outcome]
         rows.append({
-            "sampled_steps": sampled_steps, "algorithm": algorithm, "seed": seed, "blue_target_strategy": "nearest_red_uav",
+            "sampled_steps": sampled_steps, "algorithm": algorithm, "seed": seed, "blue_target_strategy": "nearest_red_aircraft",
             "outcome": outcome, "episodes": len(selected),
             "mean_situation_reward_sum": float(np.mean([r["situation_reward_sum"] for r in selected])) if selected else 0.0,
             "mean_event_reward_sum": float(np.mean([r["event_reward_sum"] for r in selected])) if selected else 0.0,

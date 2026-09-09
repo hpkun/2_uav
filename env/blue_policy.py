@@ -17,9 +17,9 @@ BLUE_ACTION_CANDIDATES = np.asarray(
 
 
 class BluePolicy:
-    """Independent nearest-Red-UAV 27-action boundary-safe lookahead."""
+    """Independent nearest-alive-Red 27-action boundary-safe lookahead."""
 
-    TARGET_STRATEGY = "nearest_red_uav"
+    TARGET_STRATEGY = "nearest_red_aircraft"
 
     def __init__(self, decision_dt: float, physics_dt: float, battlefield: Mapping[str, tuple[float, float]]) -> None:
         self.decision_dt = float(decision_dt)
@@ -32,13 +32,11 @@ class BluePolicy:
         return self.TARGET_STRATEGY
 
     def select_target(self, blue: Aircraft, red: Mapping[str, Aircraft]) -> Aircraft | None:
-        alive_uavs = [red[aid] for aid in ("UAV1", "UAV2", "UAV3") if red[aid].state.alive]
-        if alive_uavs:
-            return min(alive_uavs, key=lambda target: compute_pairwise_geometry(blue.state, target.state).distance)
-        mav = red["MAV"]
-        if not mav.state.alive:
-            return None
-        return mav
+        alive_red = [red[aid] for aid in ("MAV", "UAV1", "UAV2", "UAV3") if red[aid].state.alive]
+        return min(
+            alive_red,
+            key=lambda target: compute_pairwise_geometry(blue.state, target.state).distance,
+        ) if alive_red else None
 
     def _within_battlefield(self, state: object) -> bool:
         return (

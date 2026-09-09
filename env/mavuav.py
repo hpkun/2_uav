@@ -23,7 +23,7 @@ TYPE_ONE_HOT = {
     "UAV": (0.0, 1.0, 0.0),
     "Blue": (0.0, 0.0, 1.0),
 }
-ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_2"
+ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_3"
 OBS_DIM = 100
 GLOBAL_STATE_DIM = 117
 CROSS_TEAM_ATTACK_PAIRS = tuple((red, blue) for red in RED_IDS for blue in BLUE_IDS) + tuple(
@@ -128,6 +128,16 @@ def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError(f"{aircraft_id} initial altitude is outside battlefield")
         if not (float(spec["v_min"]) <= float(start["speed"]) <= float(spec["v_max"])):
             raise ValueError(f"{aircraft_id} initial speed is outside its limits")
+        for profile_name, profile in profiles.items():
+            jitter = float(profile["speed_jitter"])
+            if not (
+                float(spec["v_min"]) < float(start["speed"]) - jitter
+                and float(start["speed"]) + jitter < float(spec["v_max"])
+            ):
+                raise ValueError(
+                    f"{aircraft_id} nominal speed +/- {profile_name} speed jitter "
+                    "must lie strictly inside its speed limits"
+                )
     return cfg
 
 

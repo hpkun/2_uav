@@ -81,7 +81,7 @@ def main() -> None:
     rows.append({
             "checkpoint": checkpoint.name,
             "sampled_steps": int(payload.get("sampled_steps", 0)),
-            "algorithm": "happo_recurrent", "actor_variant": "recurrent", "blue_target_strategy": "nearest_red_uav",
+            "algorithm": "happo_recurrent", "actor_variant": "recurrent", "blue_target_strategy": "nearest_red_aircraft",
             "training_profile": training_profile, "evaluation_profile": args.profile,
             "episodes": args.episodes, **summarize_records(records),
         })

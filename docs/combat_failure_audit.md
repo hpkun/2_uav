@@ -1,6 +1,6 @@
 # Episode-level combat failure audit
 
-`tools/audit_combat_failures.py` is a read-only evaluator for canonical v3.2 Vanilla HAPPO baseline checkpoints. It validates the 100D/117D environment and vanilla/MLP/baseline method contract, then writes only `audit_episodes.csv` and `audit_summary.json` into a new or empty output directory.
+`tools/audit_combat_failures.py` is a read-only evaluator for canonical v3.3 Vanilla HAPPO baseline checkpoints. It validates the 100D/117D environment and vanilla/MLP/baseline method contract, then writes only `audit_episodes.csv` and `audit_summary.json` into a new or empty output directory. v3.2 and older checkpoints are rejected.
 
 Deterministic mode uses the formal evaluation action rule, Gaussian mean followed by `tanh`. Stochastic mode calls the actor's normal `sample(..., deterministic=False)` path, which uses a reparameterized sample followed by `tanh`; it never adds noise to deterministic actions. Episode `i` always resets the environment with `base_seed + i`. Stochastic Torch RNG is also reset to that episode seed for reproducible independent episodes.
 

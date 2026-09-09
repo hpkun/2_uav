@@ -130,7 +130,7 @@ def test_zero_and_random_baseline_runner_writes_results(tmp_path: Path):
     config = deepcopy(load_environment_config(None)); config["simulation"]["max_decision_steps"] = 2
     rows = run_rule_baselines(tmp_path, episodes=1, env_config=config, profile="learnability")
     assert {row["baseline"] for row in rows} == {"zero", "random"}
-    assert {row["blue_target_strategy"] for row in rows} == {"nearest_red_uav"}
+    assert {row["blue_target_strategy"] for row in rows} == {"nearest_red_aircraft"}
     assert {row["environment_profile"] for row in rows} == {"learnability"}
     assert (tmp_path / "rule_baselines" / "evaluations.csv").exists()
     assert (tmp_path / "rule_baselines" / "summary.json").exists()

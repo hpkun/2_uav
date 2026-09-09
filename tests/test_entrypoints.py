@@ -23,10 +23,10 @@ def _run(*arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_v31_checkpoint_is_rejected_by_v32_evaluator(tmp_path):
-    checkpoint = tmp_path / "v31.pt"
+def test_v32_checkpoint_is_rejected_by_v33_evaluator(tmp_path):
+    checkpoint = tmp_path / "v32.pt"
     torch.save({
-        "environment_version": "heterogeneous_mavuav_4v4_v3_1",
+        "environment_version": "heterogeneous_mavuav_4v4_v3_2",
         "observation_dim": 100,
         "global_state_dim": 117,
     }, checkpoint)

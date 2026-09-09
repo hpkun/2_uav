@@ -146,7 +146,7 @@ def test_structured_uniform_training_and_evaluation_entrypoints():
         assert len(evaluation["results"]) == 1
         with (run_dir / "evaluation_structured_uniform_final.csv").open(newline="", encoding="utf-8") as stream:
             rows = list(csv.DictReader(stream))
-        assert len(rows) == 1 and rows[0]["blue_target_strategy"] == "nearest_red_uav"
+        assert len(rows) == 1 and rows[0]["blue_target_strategy"] == "nearest_red_aircraft"
 
         for evaluator in ("algorithm/evaluate_happo.py", "algorithm/evaluate_happo_hrta.py"):
             rejected = subprocess.run([

@@ -251,12 +251,25 @@ def test_checkpoint_loader_rejects_nonbaseline_contract(tmp_path):
     actors = IndependentActors(hidden_dim=8)
     checkpoint = tmp_path / "bad.pt"
     torch.save({
-        "environment_version": "heterogeneous_mavuav_4v4_v3_2",
+        "environment_version": "heterogeneous_mavuav_4v4_v3_3",
         "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM,
         "actor_variant": "vanilla", "critic_variant": "mlp", "method_variant": "agp",
         "trainer_config": {"hidden_dim": 8}, "actors": actors.state_dict(),
     }, checkpoint)
     with pytest.raises(RuntimeError, match="method_variant='baseline'"):
+        load_vanilla_baseline_checkpoint(checkpoint, "cpu")
+
+
+def test_failure_audit_rejects_v32_checkpoint(tmp_path):
+    actors = IndependentActors(hidden_dim=8)
+    checkpoint = tmp_path / "v32.pt"
+    torch.save({
+        "environment_version": "heterogeneous_mavuav_4v4_v3_2",
+        "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM,
+        "actor_variant": "vanilla", "critic_variant": "mlp", "method_variant": "baseline",
+        "trainer_config": {"hidden_dim": 8}, "actors": actors.state_dict(),
+    }, checkpoint)
+    with pytest.raises(RuntimeError, match="incompatible checkpoint environment contract"):
         load_vanilla_baseline_checkpoint(checkpoint, "cpu")
 
 

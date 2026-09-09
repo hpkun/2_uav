@@ -236,7 +236,7 @@ def _evaluation_row(
         ),
         "method_variant": trainer.config["method_variant"],
         "seed": seed,
-        "blue_target_strategy": "nearest_red_uav", "training_profile": trainer.config["environment_profile"],
+        "blue_target_strategy": "nearest_red_aircraft", "training_profile": trainer.config["environment_profile"],
         "evaluation_profile": profile, "episodes": episodes, **summarize_records(records),
     }
 
@@ -307,7 +307,7 @@ def _progress_lines(
 
 def _evaluation_lines(prefix: str, row: Mapping[str, Any]) -> str:
     return "\n".join([
-        f"[{prefix}] step {int(row['sampled_steps']):,} | nearest_red_uav",
+        f"[{prefix}] step {int(row['sampled_steps']):,} | nearest_red_aircraft",
         f"       win {row['red_win_rate']:.1%} | blue {row['blue_win_rate']:.1%} | "
         f"draw {row['draw_rate']:.1%}",
         f"       return {row['mean_episode_return']:.2f} | "
@@ -528,7 +528,7 @@ def main(
             "actor_variant": actor_variant, "critic_variant": critic_variant,
             "method_variant": method_variant,
             "agp_lambda": float(trainer.config["agp_lambda"]),
-            "blue_target_strategy": "nearest_red_uav",
+            "blue_target_strategy": "nearest_red_aircraft",
             "actor_architecture": trainer.actor_architecture,
             "actor_parameter_count_per_agent": trainer.actor_parameter_counts["per_agent"],
             "actor_parameter_count_total": trainer.actor_parameter_counts["total"],

@@ -15,9 +15,9 @@ def test_happo_trainer_propagates_environment_profile(profile):
     trainer.close()
 
 
-def test_v32_observation_state_contract_and_vanilla_parameter_count():
+def test_v33_observation_state_contract_and_vanilla_parameter_count():
     trainer = HAPPOTrainer(config={"num_envs": 1, "rollout_steps": 1, "hidden_dim": 128})
-    assert ENVIRONMENT_VERSION == "heterogeneous_mavuav_4v4_v3_2"
+    assert ENVIRONMENT_VERSION == "heterogeneous_mavuav_4v4_v3_3"
     assert OBS_DIM == 100 and GLOBAL_STATE_DIM == 117
     assert all(actor.network[0].in_features == OBS_DIM for actor in trainer.actors.actors)
     assert all(sum(parameter.numel() for parameter in actor.parameters()) == 29830 for actor in trainer.actors.actors)
@@ -65,6 +65,20 @@ def test_happo_rejects_v31_checkpoint_contract(tmp_path):
     source.close()
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
     payload["environment_version"] = "heterogeneous_mavuav_4v4_v3_1"
+    torch.save(payload, checkpoint)
+    target = HAPPOTrainer(config={"num_envs": 1, "rollout_steps": 1, "hidden_dim": 8})
+    with pytest.raises(RuntimeError, match="incompatible checkpoint contract"):
+        target.load_checkpoint(checkpoint)
+    target.close()
+
+
+def test_happo_rejects_v32_checkpoint_contract(tmp_path):
+    source = HAPPOTrainer(config={"num_envs": 1, "rollout_steps": 1, "hidden_dim": 8})
+    checkpoint = tmp_path / "v32.pt"
+    source.save_checkpoint(checkpoint)
+    source.close()
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    payload["environment_version"] = "heterogeneous_mavuav_4v4_v3_2"
     torch.save(payload, checkpoint)
     target = HAPPOTrainer(config={"num_envs": 1, "rollout_steps": 1, "hidden_dim": 8})
     with pytest.raises(RuntimeError, match="incompatible checkpoint contract"):

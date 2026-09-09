@@ -166,7 +166,7 @@ def test_collection_resets_only_required_agent_hidden(monkeypatch, done, next_ma
 
     def controlled_step(actions):
         infos = [{"episode_summary": {"outcome": "draw"}, "auto_reset": True,
-                  "reset_info": {"blue_target_strategy": "nearest_red_uav"}}] if done else [{}]
+                  "reset_info": {"blue_target_strategy": "nearest_red_aircraft"}}] if done else [{}]
         return (
             observations.copy(), states.copy(), np.zeros((1, len(RED_IDS)), np.float32),
             np.asarray([done]), np.asarray([False]), np.asarray([next_masks], np.float32), infos,

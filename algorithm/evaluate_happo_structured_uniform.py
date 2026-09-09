@@ -82,7 +82,7 @@ def main() -> None:
             "sampled_steps": int(payload.get("sampled_steps", 0)),
             "algorithm": "happo_structured_uniform",
             "actor_variant": "structured_uniform",
-            "blue_target_strategy": "nearest_red_uav",
+            "blue_target_strategy": "nearest_red_aircraft",
             "training_profile": training_profile,
             "evaluation_profile": args.profile,
             "episodes": args.episodes,

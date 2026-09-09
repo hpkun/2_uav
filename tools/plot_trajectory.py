@@ -91,7 +91,7 @@ def main() -> None:
             killed_at.setdefault(aircraft_id, env.step_count)
         done = bool(terminated or truncated)
 
-    output = args.output.expanduser().resolve() if args.output else checkpoint.parent / f"trajectory_nearest_red_uav_seed{args.seed}.png"
+    output = args.output.expanduser().resolve() if args.output else checkpoint.parent / f"trajectory_nearest_red_aircraft_seed{args.seed}.png"
     output.parent.mkdir(parents=True, exist_ok=True)
     figure = plt.figure(figsize=(11, 8))
     axis = figure.add_subplot(111, projection="3d")
@@ -106,7 +106,7 @@ def main() -> None:
     summary = info["episode_summary"]
     axis.set(xlabel="X (km)", ylabel="Y (km)", zlabel="Altitude (km)")
     axis.set_title(
-        f"HAPPO deterministic trajectory | Blue=nearest_red_uav | seed={args.seed}\n"
+        f"HAPPO deterministic trajectory | Blue=nearest_red_aircraft | seed={args.seed}\n"
         f"outcome={summary['outcome']}, length={summary['episode_length']}, "
         f"Red kills={summary['red_attack_kills']}, Blue kills={summary['blue_attack_kills']}"
     )
@@ -117,7 +117,7 @@ def main() -> None:
     plt.close(figure)
     metadata = {
         "checkpoint": str(checkpoint), "training_profile": payload.get("environment_profile"),
-        "evaluation_profile": args.profile, "blue_target_strategy": "nearest_red_uav", "evaluation_seed": args.seed,
+        "evaluation_profile": args.profile, "blue_target_strategy": "nearest_red_aircraft", "evaluation_seed": args.seed,
         "output": str(output), **summary,
     }
     output.with_suffix(".json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")

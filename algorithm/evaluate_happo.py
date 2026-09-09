@@ -84,7 +84,7 @@ def main(expected_critic_variant: str = "mlp") -> None:
             "algorithm": algorithm,
             "method_variant": method_variant,
             "critic_variant": critic_variant,
-            "blue_target_strategy": "nearest_red_uav", "training_profile": training_profile,
+            "blue_target_strategy": "nearest_red_aircraft", "training_profile": training_profile,
             "evaluation_profile": args.profile, "episodes": args.episodes,
             **summarize_records(records),
         })

@@ -39,7 +39,7 @@ def synthetic_trace(frames: int = 3):
 def synthetic_metadata():
     config=load_environment_config(None)
     return {"trace_schema_version":HETERO_COMBAT_TRACE_SCHEMA_VERSION,"decision_dt":1.,"algorithm":"HAPPO","evaluation_profile":"main",
-            "blue_target_strategy":"nearest_red_uav","entity_types":{x:("MAV" if x=="MAV" else "UAV" if x in RED_IDS else "Blue") for x in ENTITY_IDS},
+            "blue_target_strategy":"nearest_red_aircraft","entity_types":{x:("MAV" if x=="MAV" else "UAV" if x in RED_IDS else "Blue") for x in ENTITY_IDS},
             "entity_teams":{x:("red" if x in RED_IDS else "blue") for x in ENTITY_IDS},
             "aircraft_specs":config["aircraft_specs"],"battlefield":config["battlefield"],
             "events":[{"trace_frame":2,"time_s":2.,"type":"attack","attacker":"MAV","target":"Blue1"},
@@ -200,7 +200,7 @@ def test_recurrent_adapter_history_reset_and_agent_masks(tmp_path):
 
 
 def test_policy_loader_rejects_contract_and_unknown(tmp_path):
-    base={"environment_version":"heterogeneous_mavuav_4v4_v3_1","observation_dim":OBS_DIM,"global_state_dim":GLOBAL_STATE_DIM,"actors":{}}
+    base={"environment_version":"heterogeneous_mavuav_4v4_v3_2","observation_dim":OBS_DIM,"global_state_dim":GLOBAL_STATE_DIM,"actors":{}}
     p=tmp_path/"bad.pt";torch.save(base,p)
     with pytest.raises(RuntimeError,match="environment contract"):load_replay_actors(p)
     base.update(environment_version=ENVIRONMENT_VERSION,actor_variant="mystery",trainer_config={}) ;torch.save(base,p)

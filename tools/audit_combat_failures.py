@@ -1,4 +1,4 @@
-"""Episode-level failure audit for canonical v3.2 Vanilla HAPPO checkpoints."""
+"""Episode-level failure audit for canonical v3.3 Vanilla HAPPO checkpoints."""
 from __future__ import annotations
 
 import argparse

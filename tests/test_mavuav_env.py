@@ -197,7 +197,7 @@ def test_initial_randomization_is_seed_reproducible_and_optional():
     a.reset(seed=42); b.reset(seed=42)
     assert all(np.array_equal(a.entities[x].state.as_array(), b.entities[x].state.as_array()) for x in a.entities)
     nominal = HeterogeneousMAVUAVAirCombatEnv(randomize=False); nominal.reset(seed=42)
-    assert np.allclose(nominal.entities["MAV"].state.as_array(), [-4500, 0, 5000, 325, 0, 0])
+    assert np.allclose(nominal.entities["MAV"].state.as_array(), [-5000, 0, 5000, 275, 0, 0])
 
 
 def test_sensor_heterogeneity_and_reliable_datalink_masking():
@@ -274,19 +274,27 @@ def test_red_safe_distance_penalty_is_once_per_step_and_nonlethal():
     assert not info["red_safe_distance_violation"] and info["safety_reward"] == 0.0
 
 
-def test_blue_candidates_and_nearest_uav_target_strategy():
+def test_blue_candidates_and_nearest_aircraft_target_strategy():
     assert BLUE_ACTION_CANDIDATES.shape == (27, 3) and len(np.unique(BLUE_ACTION_CANDIDATES, axis=0)) == 27
     e = env(); blue = e.entities["Blue1"]; red = {aid: e.entities[aid] for aid in e.red_ids}
     policy = e.blue_policy
     assert policy.select_target(blue, red).aircraft_id == "UAV1"
     red["MAV"].state.x, red["MAV"].state.y = blue.state.x + 1.0, blue.state.y
-    assert policy.select_target(blue, red).aircraft_id == "UAV1"
+    assert policy.select_target(blue, red).aircraft_id == "MAV"
+    red["MAV"].state.x = -5000.0
     red["UAV1"].state.alive = False
     assert policy.select_target(blue, red).aircraft_id == "UAV2"
     for aid in ("UAV2", "UAV3"): red[aid].state.alive = False
     assert policy.select_target(blue, red).aircraft_id == "MAV"
     red["MAV"].state.alive = False
     assert policy.select_target(blue, red) is None
+
+
+def test_nearest_aircraft_equal_distance_tie_uses_red_ids_order():
+    e = env(); blue = e.entities["Blue1"]; red = {aid: e.entities[aid] for aid in RED_IDS}
+    for aid in RED_IDS:
+        red[aid].state.x, red[aid].state.y = blue.state.x - 1000.0, blue.state.y
+    assert e.blue_policy.select_target(blue, red).aircraft_id == RED_IDS[0] == "MAV"
 
 
 def test_config_contract_and_values():
@@ -309,7 +317,7 @@ def test_config_rejects_blue_uav_dynamics_mismatch(field):
         load_environment_config(changed)
 
 
-def test_v32_uav_performance_and_nominal_speed_contract_are_exact():
+def test_v33_uav_performance_and_nominal_speed_contract_are_exact():
     assert RED_IDS == ("MAV", "UAV1", "UAV2", "UAV3")
     assert BLUE_IDS == ("Blue1", "Blue2", "Blue3", "Blue4")
     cfg = load_environment_config(None)
@@ -318,12 +326,17 @@ def test_v32_uav_performance_and_nominal_speed_contract_are_exact():
         assert blue[field] == uav[field]
     assert any(mav[field] != uav[field] for field in ("v_min", "v_max", "ny", "nz"))
     initial = cfg["scenario"]["initial"]
-    assert initial["MAV"]["speed"] == 325.0
-    assert all(initial[aid]["speed"] == 225.0 for aid in RED_IDS[1:] + BLUE_IDS)
+    assert all(initial[aid]["speed"] == 275.0 for aid in RED_IDS + BLUE_IDS)
+    for aid in RED_IDS + BLUE_IDS:
+        aircraft_type = "MAV" if aid == "MAV" else "UAV" if aid in RED_IDS else "Blue"
+        spec = cfg["aircraft_specs"][aircraft_type]
+        jitter = cfg["randomization_profiles"]["main"]["speed_jitter"]
+        assert spec["v_min"] < initial[aid]["speed"] - jitter
+        assert initial[aid]["speed"] + jitter < spec["v_max"]
 
 
 @pytest.mark.parametrize("profile", ["learnability", "main"])
-def test_v32_randomization_preserves_shared_red_blue_uav_base_contract(profile):
+def test_v33_randomization_preserves_shared_red_blue_uav_base_contract(profile):
     e = HeterogeneousMAVUAVAirCombatEnv(randomize=True, profile=profile)
     e.reset(seed=2026)
     uav = e.entities["UAV1"].spec
@@ -335,13 +348,13 @@ def test_v32_randomization_preserves_shared_red_blue_uav_base_contract(profile):
         assert uav.v_min <= aircraft.state.v <= uav.v_max
 
 
-def test_v32_blue_altitude_recovery_guard_derives_to_3000_metres():
+def test_v33_blue_altitude_recovery_guard_derives_to_3000_metres():
     e = env()
     blue = e.entities["Blue1"]
     assert e.blue_policy._altitude_recovery_guard(blue.state, blue) == 3000.0
 
 
-def test_v32_blue_recovery_guard_expands_for_steep_uav_descent():
+def test_v33_blue_recovery_guard_expands_for_steep_uav_descent():
     e = env()
     blue = e.entities["Blue1"]
     blue.state.h = 5000.0
@@ -351,18 +364,20 @@ def test_v32_blue_recovery_guard_expands_for_steep_uav_descent():
     assert not e.blue_policy._has_safe_altitude_recovery(blue.state, blue)
 
 
-def test_v32_entity_order_and_nominal_formation_are_exact():
+def test_v33_entity_order_and_nominal_formation_are_exact():
     e = env()
     expected = {
-        "MAV": (-4500.0, 0.0, 5000.0), "UAV1": (-4000.0, -1200.0, 5000.0),
+        "MAV": (-5000.0, 0.0, 5000.0), "UAV1": (-4000.0, -1200.0, 5000.0),
         "UAV2": (-4000.0, 0.0, 5000.0), "UAV3": (-4000.0, 1200.0, 5000.0),
         "Blue1": (4000.0, -1800.0, 5000.0), "Blue2": (4000.0, -600.0, 5000.0),
         "Blue3": (4000.0, 600.0, 5000.0), "Blue4": (4000.0, 1800.0, 5000.0),
     }
     assert {aid: tuple(e.entities[aid].state.as_array()[:3]) for aid in e.entities} == expected
+    slot_jitter = e.config["randomization_profiles"]["main"]["slot_xy_jitter"]
+    assert -5000.0 + slot_jitter < -4000.0 - slot_jitter
 
 
-def test_v32_observation_slot_layout_for_every_red_agent():
+def test_v33_observation_slot_layout_for_every_red_agent():
     e = env()
     for own_id in RED_IDS:
         observation = e._observations()[own_id]
@@ -378,7 +393,7 @@ def test_v32_observation_slot_layout_for_every_red_agent():
             assert observation[start + 13] == float(blue_id in e._red_attack_kills)
 
 
-def test_v32_global_state_layout_and_attack_streak_order_are_exact():
+def test_v33_global_state_layout_and_attack_streak_order_are_exact():
     e = env()
     from env.mavuav import CROSS_TEAM_ATTACK_PAIRS
     assert len(CROSS_TEAM_ATTACK_PAIRS) == 32
@@ -540,7 +555,7 @@ def test_blue_has_exactly_27_candidates(): assert BLUE_ACTION_CANDIDATES.shape =
 
 def test_blue_target_strategy_is_fixed_and_seed_independent():
     a, b = HeterogeneousMAVUAVAirCombatEnv(), HeterogeneousMAVUAVAirCombatEnv()
-    assert a.reset(seed=77)[1]["blue_target_strategy"] == b.reset(seed=91)[1]["blue_target_strategy"] == "nearest_red_uav"
+    assert a.reset(seed=77)[1]["blue_target_strategy"] == b.reset(seed=91)[1]["blue_target_strategy"] == "nearest_red_aircraft"
 
 
 def test_short_environment_rollout_no_nan_inf():

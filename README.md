@@ -2,7 +2,7 @@
 
 本项目包含异构 `1 MAV + 3 UAV vs 4 Blue` 环境、vanilla HAPPO/MAPPO 实现，以及独立的评估和诊断工具。正式研究代码位于 `env/` 与 `algorithm/`，不需要安装当前项目 package。
 
-当前 canonical contract 为 `heterogeneous_mavuav_4v4_v3_2`，actor observation 为 100D，centralized state 为 117D。场景为 1 MAV + 3 Red UAV 对 4 Blue-team UAV；红蓝 UAV 使用完全相同的动力学参数和 225 m/s 名义初速，MAV 保持异构高性能参数。“Blue”只是 Blue-team UAV 的代码标签，不代表第三种动力学平台。四架 Blue 独立选择最近的存活 Red UAV，全部 UAV 损失后才转向 MAV；规则控制器只采用边界安全的 27 候选动作。v3.1 及更早 checkpoint 不能续跑、评估或回放。
+当前 canonical contract 为 `heterogeneous_mavuav_4v4_v3_3`，actor observation 为 100D，centralized state 为 117D。场景为 1 MAV + 3 Red UAV 对 4 Blue-team UAV；红蓝 UAV 使用完全相同的动力学参数，八架飞机名义初速统一为 275 m/s，MAV 在三架 Red UAV 前线后方 1 km。四架 Blue 各自从所有存活 Red（包括 MAV）中选择距离最近者，再执行边界安全的确定性 27 候选一步贪心动作。Blue 使用 privileged true state；这与 Red 的 12/8 km sensing 和理想 datalink 是刻意保留的 benchmark 信息结构非对称。v3.2 及更早 checkpoint 不能续跑、评估、回放或审计。
 
 ## 环境准备
 
@@ -48,7 +48,7 @@ python algorithm/train_happo.py \
 tail -f outputs/<run>/run.log
 ```
 
-训练完成后只对 canonical `nearest_red_uav` 对手做 final deterministic evaluation。checkpoint 保存频率和日志频率均不会触发额外评估。
+训练完成后只对 canonical `nearest_red_aircraft` 对手做 final deterministic evaluation。checkpoint 保存频率和日志频率均不会触发额外评估。
 
 如需中间评估，显式传入例如：
 
@@ -115,6 +115,8 @@ outputs/happo_main_seed1_5m_<timestamp>/
 ```bash
 python tools/audit_env.py --steps 1000 --num-envs 16
 python tools/benchmark_env.py --sample-steps 2000 --num-envs 16
+python tools/audit_environment_foundations.py --profile main --samples 10000 --seed 1000 \
+    --output outputs/foundation_v33_main
 python tools/plot_trajectory.py outputs/<run>/checkpoint_final.pt \
     --profile main --seed 1000
 ```
