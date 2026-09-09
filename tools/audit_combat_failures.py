@@ -34,7 +34,8 @@ EPISODE_FIELDS = (
     "final_alive_blue_count", "final_alive_red_count", "remaining_blue_id",
     "post_first_remaining_blue_visible_fraction", "post_second_remaining_blue_visible_fraction",
     "post_third_remaining_blue_visible_fraction", "steps_after_last_kill",
-    "tail_visible_fraction", "tail_longest_all_invisible_streak", "tail_far_fraction",
+    "tail_visible_fraction", "tail_longest_all_invisible_streak", "tail_worst_visible_blue_id",
+    "tail_min_survivor_visible_fraction", "tail_max_survivor_invisible_streak", "tail_far_fraction",
     "tail_distance_window_fraction", "tail_ATA_ok_fraction", "tail_AA_ok_fraction",
     "tail_full_geometry_fraction", "tail_mean_best_ATA_deg", "tail_mean_best_AA_deg",
     "tail_mean_best_closing_rate", "tail_fraction_positive_closing", "tail_max_streak",
@@ -49,14 +50,19 @@ EPISODE_FIELDS = (
     "post_third_mean_speed", "post_third_min_speed", "post_third_max_speed",
     "post_third_mean_altitude", "post_third_min_altitude", "post_third_max_altitude",
     "post_third_mean_theta", "post_third_mean_heading",
-    "recovery_candidate_count", "recovery_one_step_rejected_count",
-    "recovery_altitude_rejected_count", "recovery_changed_choice_count",
-    "recovery_changed_choice_fraction", "max_recovery_guard",
+    "recovery_action_evaluation_count", "recovery_candidate_count",
+    "recovery_one_step_rejected_count", "recovery_altitude_rejected_count",
+    "recovery_safe_candidate_count", "recovery_changed_choice_count",
+    "recovery_changed_choice_fraction", "max_candidate_recovery_guard",
+    "max_current_state_recovery_guard", "max_selected_action_recovery_guard",
     "post_third_recovery_changed_choice_count", "post_third_recovery_changed_choice_fraction",
-    "post_third_max_recovery_guard", "reward_credit_samples",
+    "post_third_max_candidate_recovery_guard", "reward_credit_samples",
     "reward_best_equals_closest_count", "reward_best_equals_closest_fraction",
     "reward_best_closing_comparable_samples", "reward_best_equals_best_closing_count",
-    "reward_best_equals_best_closing_fraction", "post_last_reward_best_equals_closest_fraction",
+    "reward_best_equals_best_closing_fraction", "post_last_reward_credit_samples",
+    "post_last_reward_best_equals_closest_count", "post_last_reward_best_equals_closest_fraction",
+    "post_last_reward_best_closing_comparable_samples",
+    "post_last_reward_best_equals_best_closing_count",
     "post_last_reward_best_equals_best_closing_fraction", "failure_classification",
 )
 
@@ -86,6 +92,11 @@ def _longest_false_streak(flags: list[bool]) -> int:
     return longest
 
 
+def _max_present(values: list[float | None]) -> float | None:
+    present = [float(value) for value in values if value is not None]
+    return max(present) if present else None
+
+
 def _action_array(actors: Any, observations: Mapping[str, np.ndarray], device: str | torch.device,
                   policy_mode: str) -> np.ndarray:
     deterministic = policy_mode == "deterministic"
@@ -107,35 +118,51 @@ def blue_action_diagnostics(env: HeterogeneousMAVUAVAirCombatEnv, blue_id: str) 
         zero = np.zeros(3, dtype=np.float64)
         return {
             "raw_greedy_action": zero, "actual_safe_greedy_action": zero,
+            "evaluated_candidate_count": 0, "safe_candidate_count": 0,
             "one_step_rejected_count": 0, "altitude_rejected_count": 0,
             "recovery_changed_choice": False,
-            "recovery_guard": env.blue_policy._altitude_recovery_guard(blue.state, blue),
+            "current_state_recovery_guard": env.blue_policy._altitude_recovery_guard(blue.state, blue),
+            "max_candidate_recovery_guard": None, "selected_action_recovery_guard": None,
+            "raw_greedy_recovery_guard": None,
         }
     raw_action = safe_action = None
     raw_score = safe_score = -np.inf
-    one_step_rejected = altitude_rejected = 0
+    raw_guard = selected_guard = None
+    candidate_guards: list[float] = []
+    evaluated = one_step_rejected = altitude_rejected = safe_candidates = 0
     for candidate in BLUE_ACTION_CANDIDATES:
+        evaluated += 1
         predicted = integrate_interval(blue.state, candidate, blue.spec, env.physics_dt, env.physics_substeps)
         if not env.blue_policy._within_battlefield(predicted):
             one_step_rejected += 1
             continue
+        candidate_guard = env.blue_policy._altitude_recovery_guard(predicted, blue)
+        candidate_guards.append(candidate_guard)
         score = situation_reward(predicted, target.state)
         if score > raw_score:
-            raw_score, raw_action = score, candidate
+            raw_score, raw_action, raw_guard = score, candidate, candidate_guard
         if not env.blue_policy._has_safe_altitude_recovery(predicted, blue):
             altitude_rejected += 1
             continue
+        safe_candidates += 1
         if score > safe_score:
-            safe_score, safe_action = score, candidate
+            safe_score, safe_action, selected_guard = score, candidate, candidate_guard
     if raw_action is None or safe_action is None:
         raise RuntimeError(f"Blue audit found no valid candidate for {blue_id}")
+    if one_step_rejected + altitude_rejected + safe_candidates != evaluated:
+        raise AssertionError("Blue recovery candidate accounting is not closed")
     return {
         "raw_greedy_action": raw_action.copy(),
         "actual_safe_greedy_action": safe_action.copy(),
+        "evaluated_candidate_count": evaluated,
+        "safe_candidate_count": safe_candidates,
         "one_step_rejected_count": one_step_rejected,
         "altitude_rejected_count": altitude_rejected,
         "recovery_changed_choice": not np.array_equal(raw_action, safe_action),
-        "recovery_guard": env.blue_policy._altitude_recovery_guard(blue.state, blue),
+        "current_state_recovery_guard": env.blue_policy._altitude_recovery_guard(blue.state, blue),
+        "max_candidate_recovery_guard": max(candidate_guards),
+        "selected_action_recovery_guard": selected_guard,
+        "raw_greedy_recovery_guard": raw_guard,
     }
 
 
@@ -223,6 +250,28 @@ def _step_visible_fraction(records: list[dict[str, Any]]) -> float | None:
     return _mean([float(np.mean(flags)) for flags in by_step.values()])
 
 
+def _survivor_tail_visibility(
+    records: list[dict[str, Any]], final_blues: list[str], after_step: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    per_survivor: list[dict[str, Any]] = []
+    for blue_id in final_blues:
+        flags = [
+            bool(record["team_visible"])
+            for record in _phase_records(records, after_step, blue_id)
+        ]
+        per_survivor.append({
+            "blue_id": blue_id,
+            "visible_fraction": _fraction(flags),
+            "longest_invisible_streak": _longest_false_streak(flags),
+        })
+    worst = max(
+        per_survivor,
+        key=lambda item: (item["longest_invisible_streak"], -BLUE_IDS.index(item["blue_id"])),
+        default=None,
+    )
+    return per_survivor, worst
+
+
 def _classify_draw(row: Mapping[str, Any]) -> str:
     last_kill = max(
         [int(value) for value in (row.get("first_kill_step"), row.get("second_kill_step"),
@@ -233,7 +282,7 @@ def _classify_draw(row: Mapping[str, Any]) -> str:
         int(row["final_max_attack_streak"]) >= 2 or float(row.get("tail_full_geometry_fraction") or 0.0) > 0.0
     ):
         return "LATE_PROGRESS / POSSIBLE_HORIZON"
-    if int(row["tail_longest_all_invisible_streak"]) >= FAILURE_THRESHOLDS["target_loss_longest_invisible_streak"]:
+    if int(row["tail_max_survivor_invisible_streak"]) >= FAILURE_THRESHOLDS["target_loss_longest_invisible_streak"]:
         return "TARGET_LOSS"
     if (
         float(row.get("tail_visible_fraction") or 0.0) >= 0.5
@@ -272,6 +321,7 @@ def _episode_row(
     for record in tail:
         tail_by_step[int(record["decision_step"])].append(record)
     tail_step_visible = [any(record["team_visible"] for record in records) for records in tail_by_step.values()]
+    survivor_visibility, worst_survivor = _survivor_tail_visibility(step_records, final_blues, last_kill)
     closing = [record["best_closing_rate"] for record in tail if record["best_closing_rate"] is not None]
     comparable = [record for record in step_records if record["best_closing_red_id"] is not None]
     post_last_comparable = [record for record in tail if record["best_closing_red_id"] is not None]
@@ -308,6 +358,14 @@ def _episode_row(
         "post_third_remaining_blue_visible_fraction": _step_visible_fraction(_phase_records(step_records, padded_kills[2])) if padded_kills[2] is not None else None,
         "tail_visible_fraction": _step_visible_fraction(tail),
         "tail_longest_all_invisible_streak": _longest_false_streak(tail_step_visible),
+        "tail_worst_visible_blue_id": None if worst_survivor is None else worst_survivor["blue_id"],
+        "tail_min_survivor_visible_fraction": min(
+            (item["visible_fraction"] for item in survivor_visibility if item["visible_fraction"] is not None),
+            default=None,
+        ),
+        "tail_max_survivor_invisible_streak": max(
+            (item["longest_invisible_streak"] for item in survivor_visibility), default=0,
+        ),
         "tail_far_fraction": _fraction([record["min_distance"] > env.config["combat"]["distance"][1] for record in tail]),
         "tail_distance_window_fraction": _fraction([record["any_pair_in_distance_window"] for record in tail]),
         "tail_ATA_ok_fraction": _fraction([record["any_pair_ATA_ok"] for record in tail]),
@@ -344,26 +402,71 @@ def _episode_row(
         "post_third_max_altitude": max((record["altitude"] for record in post_third), default=None),
         "post_third_mean_theta": _mean([record["theta"] for record in post_third]),
         "post_third_mean_heading": _mean([record["heading"] for record in post_third]),
-        "recovery_candidate_count": len(recovery_records) * len(BLUE_ACTION_CANDIDATES),
+        "recovery_action_evaluation_count": sum(record["evaluated_candidate_count"] > 0 for record in recovery_records),
+        "recovery_candidate_count": sum(record["evaluated_candidate_count"] for record in recovery_records),
         "recovery_one_step_rejected_count": sum(record["one_step_rejected_count"] for record in recovery_records),
         "recovery_altitude_rejected_count": sum(record["altitude_rejected_count"] for record in recovery_records),
+        "recovery_safe_candidate_count": sum(record["safe_candidate_count"] for record in recovery_records),
         "recovery_changed_choice_count": sum(record["recovery_changed_choice"] for record in recovery_records),
         "recovery_changed_choice_fraction": _fraction([record["recovery_changed_choice"] for record in recovery_records]),
-        "max_recovery_guard": max((record["recovery_guard"] for record in recovery_records), default=None),
+        "max_candidate_recovery_guard": _max_present([record["max_candidate_recovery_guard"] for record in recovery_records]),
+        "max_current_state_recovery_guard": _max_present([record["current_state_recovery_guard"] for record in recovery_records]),
+        "max_selected_action_recovery_guard": _max_present([record["selected_action_recovery_guard"] for record in recovery_records]),
         "post_third_recovery_changed_choice_count": sum(record["recovery_changed_choice"] for record in post_third_recovery) if post_third_recovery else None,
         "post_third_recovery_changed_choice_fraction": _fraction([record["recovery_changed_choice"] for record in post_third_recovery]),
-        "post_third_max_recovery_guard": max((record["recovery_guard"] for record in post_third_recovery), default=None),
+        "post_third_max_candidate_recovery_guard": _max_present([record["max_candidate_recovery_guard"] for record in post_third_recovery]),
         "reward_credit_samples": len(step_records),
         "reward_best_equals_closest_count": sum(record["reward_best_equals_closest"] for record in step_records),
         "reward_best_equals_closest_fraction": _fraction([record["reward_best_equals_closest"] for record in step_records]),
         "reward_best_closing_comparable_samples": len(comparable),
         "reward_best_equals_best_closing_count": sum(record["reward_best_equals_best_closing"] for record in comparable),
         "reward_best_equals_best_closing_fraction": _fraction([record["reward_best_equals_best_closing"] for record in comparable]),
+        "post_last_reward_credit_samples": len(tail),
+        "post_last_reward_best_equals_closest_count": sum(record["reward_best_equals_closest"] for record in tail),
         "post_last_reward_best_equals_closest_fraction": _fraction([record["reward_best_equals_closest"] for record in tail]),
+        "post_last_reward_best_closing_comparable_samples": len(post_last_comparable),
+        "post_last_reward_best_equals_best_closing_count": sum(record["reward_best_equals_best_closing"] for record in post_last_comparable),
         "post_last_reward_best_equals_best_closing_fraction": _fraction([record["reward_best_equals_best_closing"] for record in post_last_comparable]),
     }
+    if summary["outcome"] == "draw" and int(summary["red_attack_kills"]) == 3:
+        if row["post_third_visible_fraction"] != row["tail_min_survivor_visible_fraction"]:
+            raise AssertionError("3-kill draw post-third and per-survivor tail visibility disagree")
+        if row["post_third_longest_invisible_streak"] != row["tail_max_survivor_invisible_streak"]:
+            raise AssertionError("3-kill draw post-third and per-survivor tail invisible streak disagree")
+    if row["recovery_candidate_count"] != (
+        row["recovery_one_step_rejected_count"]
+        + row["recovery_altitude_rejected_count"]
+        + row["recovery_safe_candidate_count"]
+    ):
+        raise AssertionError("Episode recovery candidate accounting is not closed")
     row["failure_classification"] = _classify_draw(row) if summary["outcome"] == "draw" else ""
     return row
+
+
+def _ratio(numerator: int, denominator: int) -> float | None:
+    return float(numerator / denominator) if denominator else None
+
+
+def actor_distribution_metadata(actors: Any) -> dict[str, Any]:
+    """Read the actors' actual Gaussian log-std parameters without mutating them."""
+    per_actor: list[dict[str, Any]] = []
+    all_std: list[float] = []
+    for agent_id, actor in zip(RED_IDS, actors.actors):
+        log_std = actor.log_std.detach().cpu().to(torch.float64)
+        std = log_std.clamp(-5.0, 2.0).exp()
+        std_values = [float(value) for value in std.tolist()]
+        per_actor.append({
+            "agent_id": agent_id,
+            "log_std": [float(value) for value in log_std.tolist()],
+            "std": std_values,
+            "mean_std_per_actor": float(std.mean().item()),
+        })
+        all_std.extend(std_values)
+    return {
+        "actors": per_actor,
+        "global_geometric_mean_std": float(np.exp(np.mean(np.log(all_std)))),
+        "global_mean_std": float(np.mean(all_std)),
+    }
 
 
 def summarize_audit(rows: list[dict[str, Any]], policy_mode: str, seed: int) -> dict[str, Any]:
@@ -379,9 +482,58 @@ def summarize_audit(rows: list[dict[str, Any]], policy_mode: str, seed: int) -> 
     if any(row["outcome"] == "red" and int(row["red_attack_kills"]) != 4 for row in rows):
         raise AssertionError("Red-win audit rows must contain exactly four Red attack kills")
     three_kill_draws = [row for row in rows if row["outcome"] == "draw" and int(row["red_attack_kills"]) == 3]
+    draws = [row for row in rows if row["outcome"] == "draw"]
     credit_samples = sum(int(row["reward_credit_samples"]) for row in rows)
     closing_samples = sum(int(row["reward_best_closing_comparable_samples"]) for row in rows)
-    recovery_samples = sum(int(row["recovery_candidate_count"]) // len(BLUE_ACTION_CANDIDATES) for row in rows)
+    post_last_credit_samples = sum(int(row["post_last_reward_credit_samples"]) for row in rows)
+    post_last_closing_samples = sum(int(row["post_last_reward_best_closing_comparable_samples"]) for row in rows)
+    recovery_samples = sum(int(row["recovery_action_evaluation_count"]) for row in rows)
+    ge_1 = sum(kill >= 1 for kill in kills)
+    ge_2 = sum(kill >= 2 for kill in kills)
+    ge_3 = sum(kill >= 3 for kill in kills)
+    eq_4 = sum(kill == 4 for kill in kills)
+
+    def reward_credit_group(group: list[dict[str, Any]]) -> dict[str, Any]:
+        samples = sum(int(row["post_last_reward_credit_samples"]) for row in group)
+        closing_group_samples = sum(int(row["post_last_reward_best_closing_comparable_samples"]) for row in group)
+        return {
+            "count": len(group),
+            "post_last_reward_best_equals_closest_fraction": _ratio(
+                sum(int(row["post_last_reward_best_equals_closest_count"]) for row in group), samples,
+            ),
+            "post_last_reward_best_equals_best_closing_fraction": _ratio(
+                sum(int(row["post_last_reward_best_equals_best_closing_count"]) for row in group),
+                closing_group_samples,
+            ),
+        }
+
+    visibility_by_kill = {}
+    reward_by_kill = {}
+    mean_steps_by_kill = {}
+    for kill in range(4):
+        group = [row for row in draws if int(row["red_attack_kills"]) == kill]
+        target_loss_count = sum(
+            int(row["tail_max_survivor_invisible_streak"])
+            >= FAILURE_THRESHOLDS["target_loss_longest_invisible_streak"]
+            for row in group
+        )
+        visibility_by_kill[str(kill)] = {
+            "count": len(group),
+            "mean_tail_min_survivor_visible_fraction": _mean([
+                row["tail_min_survivor_visible_fraction"] for row in group
+            ]),
+            "mean_tail_max_survivor_invisible_streak": _mean([
+                row["tail_max_survivor_invisible_streak"] for row in group
+            ]),
+            "target_loss_count": target_loss_count,
+            "target_loss_fraction": _ratio(target_loss_count, len(group)),
+        }
+        reward_by_kill[str(kill)] = reward_credit_group(group)
+        mean_steps_by_kill[str(kill)] = _mean([row["steps_after_last_kill"] for row in group])
+
+    recovery_candidate_guards = [row["max_candidate_recovery_guard"] for row in rows]
+    recovery_current_guards = [row["max_current_state_recovery_guard"] for row in rows]
+    recovery_selected_guards = [row["max_selected_action_recovery_guard"] for row in rows]
     return {
         "policy_mode": policy_mode, "episodes": n, "seed_start": seed, "seed_end": seed + n - 1,
         "red_win_rate": sum(row["outcome"] == "red" for row in rows) / n,
@@ -395,6 +547,9 @@ def summarize_audit(rows: list[dict[str, Any]], policy_mode: str, seed: int) -> 
         "mean_UAV_survivors": _mean([row["red_uav_survivors"] for row in rows]),
         "red_kill_histogram": {str(kill): histogram.get(kill, 0) for kill in range(5)},
         "draw_kill_histogram": by_outcome["draw"],
+        "draw_kill_distribution_fraction": {
+            str(kill): _ratio(by_outcome["draw"][str(kill)], len(draws)) for kill in range(4)
+        },
         "blue_win_kill_histogram": by_outcome["blue"],
         "red_win_kill_histogram": by_outcome["red"],
         "mean_first_kill_step": _mean([row["first_kill_step"] for row in rows]),
@@ -413,20 +568,42 @@ def summarize_audit(rows: list[dict[str, Any]], policy_mode: str, seed: int) -> 
             "mean_max_streak": _mean([row["post_third_max_streak"] for row in three_kill_draws]),
         },
         "recovery": {
-            "changed_choice_fraction": sum(int(row["recovery_changed_choice_count"]) for row in rows) / max(recovery_samples, 1),
-            "max_guard": max(float(row["max_recovery_guard"]) for row in rows if row["max_recovery_guard"] is not None),
+            "changed_choice_fraction": _ratio(
+                sum(int(row["recovery_changed_choice_count"]) for row in rows), recovery_samples,
+            ),
+            "max_candidate_guard": _max_present(recovery_candidate_guards),
+            "max_current_state_guard": _max_present(recovery_current_guards),
+            "max_selected_action_guard": _max_present(recovery_selected_guards),
         },
         "reward_credit": {
-            "reward_best_equals_closest_fraction": sum(int(row["reward_best_equals_closest_count"]) for row in rows) / max(credit_samples, 1),
-            "reward_best_equals_best_closing_fraction": sum(int(row["reward_best_equals_best_closing_count"]) for row in rows) / max(closing_samples, 1),
+            "reward_best_equals_closest_fraction": _ratio(
+                sum(int(row["reward_best_equals_closest_count"]) for row in rows), credit_samples,
+            ),
+            "reward_best_equals_best_closing_fraction": _ratio(
+                sum(int(row["reward_best_equals_best_closing_count"]) for row in rows), closing_samples,
+            ),
+            "post_last_reward_best_equals_closest_fraction": _ratio(
+                sum(int(row["post_last_reward_best_equals_closest_count"]) for row in rows),
+                post_last_credit_samples,
+            ),
+            "post_last_reward_best_equals_best_closing_fraction": _ratio(
+                sum(int(row["post_last_reward_best_equals_best_closing_count"]) for row in rows),
+                post_last_closing_samples,
+            ),
         },
+        "reward_credit_by_kill_count": reward_by_kill,
         "task_completion_structure": {
-            "P_K_ge_1": sum(kill >= 1 for kill in kills) / n,
-            "P_K_ge_2": sum(kill >= 2 for kill in kills) / n,
-            "P_K_ge_3": sum(kill >= 3 for kill in kills) / n,
-            "P_K_eq_4": sum(kill == 4 for kill in kills) / n,
+            "P_K_ge_1": ge_1 / n,
+            "P_K_ge_2": ge_2 / n,
+            "P_K_ge_3": ge_3 / n,
+            "P_K_eq_4": eq_4 / n,
+            "P_K_ge_2_given_K_ge_1": _ratio(ge_2, ge_1),
+            "P_K_ge_3_given_K_ge_2": _ratio(ge_3, ge_2),
+            "P_K_eq_4_given_K_ge_3": _ratio(eq_4, ge_3),
             "P_Blue_win": sum(row["outcome"] == "blue" for row in rows) / n,
         },
+        "visibility_by_kill_count": visibility_by_kill,
+        "mean_steps_after_last_kill_by_kill_count": mean_steps_by_kill,
         "failure_classification_counts": dict(sorted(Counter(
             row["failure_classification"] for row in rows if row["outcome"] == "draw"
         ).items())),
@@ -442,7 +619,13 @@ def summarize_audit(rows: list[dict[str, Any]], policy_mode: str, seed: int) -> 
             "closing_rate": "(previous pair distance - current pair distance) / decision_dt; positive means closing",
             "remaining_blue_visible_fraction": "mean per-decision fraction of currently alive Blue aircraft for which env.team_visible is true, strictly after the indexed Red kill",
             "tail": "decision steps strictly after the episode's last Red kill; the whole episode when no Red kill occurs",
+            "tail_longest_all_invisible_streak": "longest tail streak during which every remaining Blue is simultaneously invisible",
+            "tail_max_survivor_invisible_streak": "maximum per-target invisible streak among Blue aircraft alive at episode end",
+            "target_loss": "at least one final-surviving Blue is team-invisible for the configured consecutive tail-step threshold",
+            "failure_classification": "mutually exclusive mechanical diagnostic bucket, not a scientific causal conclusion",
             "full_geometry_ok": "one identical Red-Blue pair simultaneously satisfies distance, ATA and AA thresholds",
+            "geometry_scope": "ground-truth post-hoc state diagnostics; these values are not necessarily present in actor observations",
+            "steps_after_last_kill_for_zero_kill_draw": "the full episode length",
         },
     }
 
@@ -500,7 +683,9 @@ def audit_actors(
         rows.append(_episode_row(
             episode, episode_seed, policy_mode, env, final_info, kill_steps, step_records, recovery_records,
         ))
-    return rows, summarize_audit(rows, policy_mode, int(seed))
+    summary = summarize_audit(rows, policy_mode, int(seed))
+    summary["actor_policy_distribution"] = actor_distribution_metadata(actors)
+    return rows, summary
 
 
 def load_vanilla_baseline_checkpoint(

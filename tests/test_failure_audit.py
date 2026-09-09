@@ -11,11 +11,13 @@ import torch
 
 from algorithm.happo.evaluation import evaluate_actors
 from algorithm.happo.networks import IndependentActors
+from env.dynamics import integrate_interval
 from env.mavuav import BLUE_IDS, GLOBAL_STATE_DIM, OBS_DIM, RED_IDS, HeterogeneousMAVUAVAirCombatEnv, load_environment_config
 from env.models import AircraftState
 from env.reward import situation_reward
 from tools.audit_combat_failures import (
-    EPISODE_FIELDS, _classify_draw, _record_red_kill_steps, audit_actors,
+    EPISODE_FIELDS, _classify_draw, _phase_records, _record_red_kill_steps,
+    _survivor_tail_visibility, actor_distribution_metadata, audit_actors,
     blue_action_diagnostics, blue_geometry_diagnostics,
     load_vanilla_baseline_checkpoint, summarize_audit, write_audit,
 )
@@ -40,10 +42,22 @@ def synthetic_row(outcome: str, kills: int) -> dict:
         "post_third_final_distance": 2500.0 if kills == 3 else None,
         "post_third_mean_best_closing_rate": 10.0 if kills == 3 else None,
         "post_third_max_streak": 2 if kills == 3 else None,
-        "recovery_candidate_count": 27, "recovery_changed_choice_count": 0,
-        "max_recovery_guard": 3000.0, "reward_credit_samples": 4,
+        "steps_after_last_kill": 75 if kills == 0 else 75 - 10 * kills,
+        "tail_min_survivor_visible_fraction": 1.0,
+        "tail_max_survivor_invisible_streak": 0,
+        "recovery_action_evaluation_count": 1, "recovery_candidate_count": 27,
+        "recovery_one_step_rejected_count": 0, "recovery_altitude_rejected_count": 0,
+        "recovery_safe_candidate_count": 27, "recovery_changed_choice_count": 0,
+        "max_candidate_recovery_guard": 3000.0,
+        "max_current_state_recovery_guard": 2500.0,
+        "max_selected_action_recovery_guard": 2800.0,
+        "reward_credit_samples": 4,
         "reward_best_equals_closest_count": 3, "reward_best_closing_comparable_samples": 3,
-        "reward_best_equals_best_closing_count": 2, "failure_classification": "OTHER" if outcome == "draw" else "",
+        "reward_best_equals_best_closing_count": 2,
+        "post_last_reward_credit_samples": 4, "post_last_reward_best_equals_closest_count": 3,
+        "post_last_reward_best_closing_comparable_samples": 3,
+        "post_last_reward_best_equals_best_closing_count": 2,
+        "failure_classification": "OTHER" if outcome == "draw" else "",
     }
 
 
@@ -74,9 +88,13 @@ def test_kill_histograms_and_completion_probabilities_are_exact():
     assert summary["red_kill_histogram"] == {"0": 1, "1": 1, "2": 1, "3": 1, "4": 1}
     assert summary["draw_kill_histogram"] == {"0": 1, "1": 0, "2": 1, "3": 1, "4": 0}
     assert summary["red_win_kill_histogram"]["4"] == 1
-    assert summary["task_completion_structure"] == {
-        "P_K_ge_1": 0.8, "P_K_ge_2": 0.6, "P_K_ge_3": 0.4, "P_K_eq_4": 0.2, "P_Blue_win": 0.2,
+    completion = summary["task_completion_structure"]
+    assert completion == {
+        "P_K_ge_1": 0.8, "P_K_ge_2": 0.6, "P_K_ge_3": 0.4, "P_K_eq_4": 0.2,
+        "P_K_ge_2_given_K_ge_1": 0.75, "P_K_ge_3_given_K_ge_2": 2 / 3,
+        "P_K_eq_4_given_K_ge_3": 0.5, "P_Blue_win": 0.2,
     }
+    assert summary["draw_kill_distribution_fraction"] == {"0": 1 / 3, "1": 0.0, "2": 1 / 3, "3": 1 / 3}
 
 
 def test_full_geometry_requires_one_identical_pair_and_reads_real_streak():
@@ -125,7 +143,14 @@ def test_recovery_audit_safe_greedy_matches_formal_blue_policy(altitude, theta):
     diagnostic = blue_action_diagnostics(env, "Blue1")
     actual = env.blue_policy.action(blue, {red_id: env.entities[red_id] for red_id in RED_IDS})
     np.testing.assert_array_equal(diagnostic["actual_safe_greedy_action"], actual)
-    assert diagnostic["one_step_rejected_count"] + diagnostic["altitude_rejected_count"] <= 27
+    assert diagnostic["evaluated_candidate_count"] == 27
+    assert diagnostic["one_step_rejected_count"] + diagnostic["altitude_rejected_count"] + diagnostic["safe_candidate_count"] == 27
+    selected = integrate_interval(
+        blue.state, diagnostic["actual_safe_greedy_action"], blue.spec, env.physics_dt, env.physics_substeps,
+    )
+    assert diagnostic["selected_action_recovery_guard"] == pytest.approx(
+        env.blue_policy._altitude_recovery_guard(selected, blue)
+    )
 
 
 def test_output_csv_json_fields_are_complete_and_finite(tmp_path):
@@ -166,7 +191,7 @@ def test_checkpoint_loader_rejects_nonbaseline_contract(tmp_path):
     "updates,expected",
     [
         ({"third_kill_step": 65, "final_max_attack_streak": 2}, "LATE_PROGRESS / POSSIBLE_HORIZON"),
-        ({"tail_longest_all_invisible_streak": 12}, "TARGET_LOSS"),
+        ({"tail_max_survivor_invisible_streak": 12}, "TARGET_LOSS"),
         ({"tail_visible_fraction": 1.0, "tail_far_fraction": 0.8, "tail_fraction_positive_closing": 0.2}, "CANNOT_CLOSE"),
         ({"tail_distance_window_fraction": 0.5, "tail_full_geometry_fraction": 0.0}, "BAD_GEOMETRY"),
         ({"tail_max_streak": 1}, "STREAK_INTERRUPTED"),
@@ -176,9 +201,100 @@ def test_failure_classification_priority_is_mechanical(updates, expected):
     row = {
         "first_kill_step": None, "second_kill_step": None, "third_kill_step": None, "fourth_kill_step": None,
         "final_max_attack_streak": 0, "tail_full_geometry_fraction": 0.0,
-        "tail_longest_all_invisible_streak": 0, "tail_visible_fraction": 0.0,
+        "tail_longest_all_invisible_streak": 0, "tail_max_survivor_invisible_streak": 0,
+        "tail_visible_fraction": 0.0,
         "tail_far_fraction": 0.0, "tail_fraction_positive_closing": 0.0,
         "tail_distance_window_fraction": 0.0, "tail_max_streak": 0,
     }
     row.update(updates)
     assert _classify_draw(row) == expected
+
+
+def test_per_survivor_visibility_detects_partial_target_loss_and_stable_tie_break():
+    records = []
+    for step in range(1, 13):
+        records.extend([
+            {"decision_step": step, "blue_id": "Blue1", "team_visible": True},
+            {"decision_step": step, "blue_id": "Blue2", "team_visible": False},
+        ])
+    per_survivor, worst = _survivor_tail_visibility(records, ["Blue1", "Blue2"], 0)
+    assert per_survivor[0]["visible_fraction"] == 1.0
+    assert per_survivor[1]["longest_invisible_streak"] == 12
+    assert worst["blue_id"] == "Blue2"
+    row = {
+        "first_kill_step": None, "second_kill_step": None, "third_kill_step": None,
+        "fourth_kill_step": None, "final_max_attack_streak": 0,
+        "tail_full_geometry_fraction": 0.0, "tail_longest_all_invisible_streak": 0,
+        "tail_max_survivor_invisible_streak": 12, "tail_visible_fraction": 0.5,
+        "tail_far_fraction": 0.0, "tail_fraction_positive_closing": 0.0,
+        "tail_distance_window_fraction": 0.0, "tail_max_streak": 0,
+    }
+    assert _classify_draw(row) == "TARGET_LOSS"
+
+
+def test_phase_starts_strictly_after_kill_and_three_kill_visibility_definitions_match():
+    records = [
+        {"decision_step": step, "blue_id": "Blue4", "team_visible": step != 22}
+        for step in range(19, 24)
+    ]
+    post_kill = _phase_records(records, 20, "Blue4")
+    assert [record["decision_step"] for record in post_kill] == [21, 22, 23]
+    per_survivor, _ = _survivor_tail_visibility(records, ["Blue4"], 20)
+    assert per_survivor[0]["visible_fraction"] == pytest.approx(2 / 3)
+    assert per_survivor[0]["longest_invisible_streak"] == 1
+
+
+def test_candidate_recovery_guard_uses_predicted_state_and_counts_close():
+    env = HeterogeneousMAVUAVAirCombatEnv(randomize=False)
+    env.reset(seed=11)
+    blue = env.entities["Blue1"]
+    blue.state.theta = -0.8
+    diagnostic = blue_action_diagnostics(env, "Blue1")
+    assert diagnostic["max_candidate_recovery_guard"] > diagnostic["current_state_recovery_guard"]
+    assert diagnostic["evaluated_candidate_count"] == (
+        diagnostic["one_step_rejected_count"]
+        + diagnostic["altitude_rejected_count"]
+        + diagnostic["safe_candidate_count"]
+    )
+
+
+def test_post_last_reward_credit_is_sample_weighted_and_grouped_by_kill_count():
+    short = synthetic_row("draw", 0)
+    long = synthetic_row("draw", 2)
+    short.update({
+        "post_last_reward_credit_samples": 1, "post_last_reward_best_equals_closest_count": 1,
+        "post_last_reward_best_closing_comparable_samples": 1,
+        "post_last_reward_best_equals_best_closing_count": 1,
+    })
+    long.update({
+        "post_last_reward_credit_samples": 9, "post_last_reward_best_equals_closest_count": 0,
+        "post_last_reward_best_closing_comparable_samples": 3,
+        "post_last_reward_best_equals_best_closing_count": 0,
+    })
+    summary = summarize_audit([short, long], "deterministic", 1000)
+    assert summary["reward_credit"]["post_last_reward_best_equals_closest_fraction"] == 0.1
+    assert summary["reward_credit"]["post_last_reward_best_equals_best_closing_fraction"] == 0.25
+    assert summary["reward_credit_by_kill_count"]["0"]["post_last_reward_best_equals_closest_fraction"] == 1.0
+    assert summary["reward_credit_by_kill_count"]["2"]["post_last_reward_best_equals_closest_fraction"] == 0.0
+
+
+def test_stochastic_audit_is_reproducible_for_same_seed_and_reports_actor_std():
+    torch.manual_seed(29)
+    actors = IndependentActors(hidden_dim=8)
+    config = short_config(2)
+    rows_a, summary_a = audit_actors(actors, config, 2, "main", seed=77, device="cpu", policy_mode="stochastic")
+    rows_b, summary_b = audit_actors(actors, config, 2, "main", seed=77, device="cpu", policy_mode="stochastic")
+    keys = ("outcome", "episode_length", "red_attack_kills", "blue_attack_kills", "episode_return")
+    assert [[row[key] for key in keys] for row in rows_a] == [[row[key] for key in keys] for row in rows_b]
+    assert summary_a["actor_policy_distribution"] == summary_b["actor_policy_distribution"]
+    metadata = actor_distribution_metadata(actors)
+    assert [entry["agent_id"] for entry in metadata["actors"]] == list(RED_IDS)
+    assert all(len(entry["log_std"]) == len(entry["std"]) == 3 for entry in metadata["actors"])
+
+
+def test_first_pair_appearance_is_omitted_from_closing_denominator():
+    env = HeterogeneousMAVUAVAirCombatEnv(randomize=False)
+    env.reset(seed=31)
+    first = blue_geometry_diagnostics(env, "Blue1", {})
+    assert first["best_closing_red_id"] is None
+    assert first["best_closing_rate"] is None
