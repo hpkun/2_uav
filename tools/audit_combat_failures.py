@@ -243,6 +243,10 @@ def _phase_records(records: list[dict[str, Any]], after_step: int, blue_id: str 
     ]
 
 
+def _reward_credit_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [record for record in records if bool(record["team_visible"])]
+
+
 def _step_visible_fraction(records: list[dict[str, Any]]) -> float | None:
     by_step: dict[int, list[bool]] = defaultdict(list)
     for record in records:
@@ -323,8 +327,12 @@ def _episode_row(
     tail_step_visible = [any(record["team_visible"] for record in records) for records in tail_by_step.values()]
     survivor_visibility, worst_survivor = _survivor_tail_visibility(step_records, final_blues, last_kill)
     closing = [record["best_closing_rate"] for record in tail if record["best_closing_rate"] is not None]
-    comparable = [record for record in step_records if record["best_closing_red_id"] is not None]
-    post_last_comparable = [record for record in tail if record["best_closing_red_id"] is not None]
+    visible_reward_records = _reward_credit_records(step_records)
+    visible_tail_reward_records = _reward_credit_records(tail)
+    comparable = [record for record in visible_reward_records if record["best_closing_red_id"] is not None]
+    post_last_comparable = [
+        record for record in visible_tail_reward_records if record["best_closing_red_id"] is not None
+    ]
     remaining_blue = final_blues[0] if len(final_blues) == 1 else None
     post_third = _phase_records(step_records, padded_kills[2], remaining_blue) if padded_kills[2] is not None and remaining_blue else []
     post_third_recovery = [
@@ -415,15 +423,15 @@ def _episode_row(
         "post_third_recovery_changed_choice_count": sum(record["recovery_changed_choice"] for record in post_third_recovery) if post_third_recovery else None,
         "post_third_recovery_changed_choice_fraction": _fraction([record["recovery_changed_choice"] for record in post_third_recovery]),
         "post_third_max_candidate_recovery_guard": _max_present([record["max_candidate_recovery_guard"] for record in post_third_recovery]),
-        "reward_credit_samples": len(step_records),
-        "reward_best_equals_closest_count": sum(record["reward_best_equals_closest"] for record in step_records),
-        "reward_best_equals_closest_fraction": _fraction([record["reward_best_equals_closest"] for record in step_records]),
+        "reward_credit_samples": len(visible_reward_records),
+        "reward_best_equals_closest_count": sum(record["reward_best_equals_closest"] for record in visible_reward_records),
+        "reward_best_equals_closest_fraction": _fraction([record["reward_best_equals_closest"] for record in visible_reward_records]),
         "reward_best_closing_comparable_samples": len(comparable),
         "reward_best_equals_best_closing_count": sum(record["reward_best_equals_best_closing"] for record in comparable),
         "reward_best_equals_best_closing_fraction": _fraction([record["reward_best_equals_best_closing"] for record in comparable]),
-        "post_last_reward_credit_samples": len(tail),
-        "post_last_reward_best_equals_closest_count": sum(record["reward_best_equals_closest"] for record in tail),
-        "post_last_reward_best_equals_closest_fraction": _fraction([record["reward_best_equals_closest"] for record in tail]),
+        "post_last_reward_credit_samples": len(visible_tail_reward_records),
+        "post_last_reward_best_equals_closest_count": sum(record["reward_best_equals_closest"] for record in visible_tail_reward_records),
+        "post_last_reward_best_equals_closest_fraction": _fraction([record["reward_best_equals_closest"] for record in visible_tail_reward_records]),
         "post_last_reward_best_closing_comparable_samples": len(post_last_comparable),
         "post_last_reward_best_equals_best_closing_count": sum(record["reward_best_equals_best_closing"] for record in post_last_comparable),
         "post_last_reward_best_equals_best_closing_fraction": _fraction([record["reward_best_equals_best_closing"] for record in post_last_comparable]),
@@ -625,6 +633,8 @@ def summarize_audit(rows: list[dict[str, Any]], policy_mode: str, seed: int) -> 
             "failure_classification": "mutually exclusive mechanical diagnostic bucket, not a scientific causal conclusion",
             "full_geometry_ok": "one identical Red-Blue pair simultaneously satisfies distance, ATA and AA thresholds",
             "geometry_scope": "ground-truth post-hoc state diagnostics; these values are not necessarily present in actor observations",
+            "reward_credit_sample": "an alive Blue sample for which env.team_visible(blue_id) is true, matching the Blue set that contributes to the formal team situation reward",
+            "reward_credit_visibility_scope": "ground-truth geometry may still be recorded for invisible Blue, but invisible Blue does not enter reward-credit denominators",
             "steps_after_last_kill_for_zero_kill_draw": "the full episode length",
         },
     }

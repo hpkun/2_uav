@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 import torch
 
+import tools.audit_combat_failures as failure_audit
 from algorithm.happo.evaluation import evaluate_actors
 from algorithm.happo.networks import IndependentActors
 from env.dynamics import integrate_interval
@@ -17,7 +18,7 @@ from env.models import AircraftState
 from env.reward import situation_reward
 from tools.audit_combat_failures import (
     EPISODE_FIELDS, _classify_draw, _phase_records, _record_red_kill_steps,
-    _survivor_tail_visibility, actor_distribution_metadata, audit_actors,
+    _reward_credit_records, _survivor_tail_visibility, actor_distribution_metadata, audit_actors,
     blue_action_diagnostics, blue_geometry_diagnostics,
     load_vanilla_baseline_checkpoint, summarize_audit, write_audit,
 )
@@ -132,6 +133,78 @@ def test_reward_best_closest_and_closing_identities_are_pairwise_correct():
     assert diagnostic["reward_best_red_id"] == expected_reward_best
     assert diagnostic["reward_best_equals_closest"] == (expected_reward_best == "MAV")
     assert diagnostic["reward_best_equals_best_closing"] == (expected_reward_best == "UAV1")
+
+
+def test_invisible_blue_keeps_ground_truth_geometry_but_is_not_reward_credit():
+    env = HeterogeneousMAVUAVAirCombatEnv(randomize=False)
+    env.reset(seed=2)
+    env.team_visible = lambda blue_id: False
+    diagnostic = blue_geometry_diagnostics(env, "Blue1", {})
+    assert not diagnostic["team_visible"]
+    assert diagnostic["pairs"] and diagnostic["min_distance"] > 0.0
+    assert diagnostic["reward_best_red_id"] in RED_IDS
+    assert _reward_credit_records([diagnostic]) == []
+
+
+def test_reward_credit_records_filter_visibility_for_closest_and_closing_samples():
+    records = [
+        {
+            "decision_step": 1, "blue_id": "Blue1", "team_visible": True,
+            "reward_best_red_id": "MAV", "closest_red_id": "MAV",
+            "best_closing_red_id": "UAV1", "reward_best_equals_closest": True,
+            "reward_best_equals_best_closing": False,
+        },
+        {
+            "decision_step": 1, "blue_id": "Blue2", "team_visible": False,
+            "reward_best_red_id": "UAV2", "closest_red_id": "MAV",
+            "best_closing_red_id": "UAV2", "reward_best_equals_closest": False,
+            "reward_best_equals_best_closing": True,
+        },
+    ]
+    visible = _reward_credit_records(records)
+    comparable = [record for record in visible if record["best_closing_red_id"] is not None]
+    assert len(visible) == 1
+    assert sum(record["reward_best_equals_closest"] for record in visible) == 1
+    assert len(comparable) == 1
+    assert sum(record["reward_best_equals_best_closing"] for record in comparable) == 0
+    assert np.mean([record["reward_best_equals_closest"] for record in visible]) == 1.0
+
+
+def test_post_last_reward_credit_filters_invisible_records():
+    records = [
+        {"decision_step": 4, "team_visible": True},
+        {"decision_step": 6, "team_visible": True},
+        {"decision_step": 6, "team_visible": False},
+        {"decision_step": 7, "team_visible": False},
+    ]
+    tail = _phase_records(records, 5)
+    assert len(tail) == 3
+    assert _reward_credit_records(tail) == [records[1]]
+
+
+def test_episode_reward_credit_fields_match_formal_visible_blue_set(monkeypatch):
+    class Blue1VisibleEnv(HeterogeneousMAVUAVAirCombatEnv):
+        def team_visible(self, blue_id):
+            return blue_id == "Blue1" and self.entities[blue_id].state.alive
+
+    monkeypatch.setattr(failure_audit, "HeterogeneousMAVUAVAirCombatEnv", Blue1VisibleEnv)
+    actors = IndependentActors(hidden_dim=8)
+    rows, _ = audit_actors(
+        actors, short_config(1), 1, "main", seed=41,
+        device="cpu", policy_mode="deterministic",
+    )
+    row = rows[0]
+    assert row["red_attack_kills"] == 0
+    assert row["reward_credit_samples"] == 1
+    assert row["post_last_reward_credit_samples"] == 1
+
+    env = Blue1VisibleEnv(short_config(1), profile="main")
+    env.reset(seed=41)
+    expected = max(
+        situation_reward(env.entities[red_id].state, env.entities["Blue1"].state)
+        for red_id in RED_IDS
+    )
+    assert env._team_situation_reward() == pytest.approx(expected)
 
 
 @pytest.mark.parametrize("altitude,theta", [(5000.0, 0.0), (5000.0, -0.8), (18000.0, 0.6)])
@@ -276,6 +349,20 @@ def test_post_last_reward_credit_is_sample_weighted_and_grouped_by_kill_count():
     assert summary["reward_credit"]["post_last_reward_best_equals_best_closing_fraction"] == 0.25
     assert summary["reward_credit_by_kill_count"]["0"]["post_last_reward_best_equals_closest_fraction"] == 1.0
     assert summary["reward_credit_by_kill_count"]["2"]["post_last_reward_best_equals_closest_fraction"] == 0.0
+
+
+def test_reward_credit_group_with_no_visible_post_last_samples_is_null():
+    row = synthetic_row("draw", 3)
+    row.update({
+        "post_last_reward_credit_samples": 0,
+        "post_last_reward_best_equals_closest_count": 0,
+        "post_last_reward_best_closing_comparable_samples": 0,
+        "post_last_reward_best_equals_best_closing_count": 0,
+    })
+    summary = summarize_audit([row], "deterministic", 1000)
+    group = summary["reward_credit_by_kill_count"]["3"]
+    assert group["post_last_reward_best_equals_closest_fraction"] is None
+    assert group["post_last_reward_best_equals_best_closing_fraction"] is None
 
 
 def test_stochastic_audit_is_reproducible_for_same_seed_and_reports_actor_std():
