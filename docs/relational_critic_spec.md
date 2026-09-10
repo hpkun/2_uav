@@ -2,7 +2,7 @@
 
 RC-HAPPO changes only the centralized training-time value function. Execution still uses the four independent, feed-forward vanilla HAPPO actors with their unchanged 100→128→128→3 squashed-Gaussian policy.
 
-The canonical v3.3 4v4 global state has 117 dimensions. Dimensions 0:80 contain eight fixed-order 10D entity slots (MAV, UAV1, UAV2, UAV3, Blue1, Blue2, Blue3, Blue4). Dimensions 80:117 contain 32 bidirectional attack streaks, four Blue killed-by-Red flags, and the episode time fraction.
+The canonical v3.4 4v4 global state has 117 dimensions. Dimensions 0:80 contain eight fixed-order 10D entity slots (MAV, UAV1, UAV2, UAV3, Blue1, Blue2, Blue3, Blue4). Dimensions 80:117 contain 32 bidirectional attack streaks, four Blue killed-by-Red flags, and the episode time fraction.
 
 The relational critic applies one shared 10→64 Tanh encoder to all entity slots, followed by one four-head 64D self-attention block, residual connection, and LayerNorm. Dead entities are masked as keys/values and their post-attention query tokens are zeroed. The eight tokens retain their fixed order and are flattened to 512 dimensions; no mean pooling or identity embedding is used.
 

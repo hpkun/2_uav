@@ -1,0 +1,237 @@
+{
+  "policy_mode": "stochastic",
+  "episodes": 1,
+  "seed_start": 7,
+  "seed_end": 7,
+  "red_win_rate": 0.0,
+  "blue_win_rate": 0.0,
+  "draw_rate": 1.0,
+  "mean_red_kills": 0.0,
+  "mean_blue_kills": 0.0,
+  "mean_episode_length": 2.0,
+  "mean_return": 0.8634506523838259,
+  "MAV_survival": 1.0,
+  "mean_UAV_survivors": 3.0,
+  "red_kill_histogram": {
+    "0": 1,
+    "1": 0,
+    "2": 0,
+    "3": 0,
+    "4": 0
+  },
+  "draw_kill_histogram": {
+    "0": 1,
+    "1": 0,
+    "2": 0,
+    "3": 0,
+    "4": 0
+  },
+  "draw_kill_distribution_fraction": {
+    "0": 1.0,
+    "1": 0.0,
+    "2": 0.0,
+    "3": 0.0
+  },
+  "blue_win_kill_histogram": {
+    "0": 0,
+    "1": 0,
+    "2": 0,
+    "3": 0,
+    "4": 0
+  },
+  "red_win_kill_histogram": {
+    "0": 0,
+    "1": 0,
+    "2": 0,
+    "3": 0,
+    "4": 0
+  },
+  "mean_first_kill_step": null,
+  "mean_second_kill_step": null,
+  "mean_third_kill_step": null,
+  "mean_fourth_kill_step": null,
+  "three_kill_draw": {
+    "count": 0,
+    "mean_third_kill_step": null,
+    "mean_steps_after_third": null,
+    "mean_post_third_visible_fraction": null,
+    "mean_longest_invisible_streak": null,
+    "mean_min_distance": null,
+    "mean_final_distance": null,
+    "mean_best_closing_rate": null,
+    "mean_max_streak": null
+  },
+  "blue_controller": {
+    "target_MAV_fraction": 0.0,
+    "boundary_recovery_fraction": 0.0,
+    "horizontal_recovery_fraction": 0.0
+  },
+  "reward_credit": {
+    "reward_best_equals_closest_fraction": 0.375,
+    "reward_best_equals_best_closing_fraction": 0.5,
+    "post_last_reward_best_equals_closest_fraction": 0.375,
+    "post_last_reward_best_equals_best_closing_fraction": 0.5
+  },
+  "reward_credit_by_kill_count": {
+    "0": {
+      "count": 1,
+      "post_last_reward_best_equals_closest_fraction": 0.375,
+      "post_last_reward_best_equals_best_closing_fraction": 0.5
+    },
+    "1": {
+      "count": 0,
+      "post_last_reward_best_equals_closest_fraction": null,
+      "post_last_reward_best_equals_best_closing_fraction": null
+    },
+    "2": {
+      "count": 0,
+      "post_last_reward_best_equals_closest_fraction": null,
+      "post_last_reward_best_equals_best_closing_fraction": null
+    },
+    "3": {
+      "count": 0,
+      "post_last_reward_best_equals_closest_fraction": null,
+      "post_last_reward_best_equals_best_closing_fraction": null
+    }
+  },
+  "task_completion_structure": {
+    "P_K_ge_1": 0.0,
+    "P_K_ge_2": 0.0,
+    "P_K_ge_3": 0.0,
+    "P_K_eq_4": 0.0,
+    "P_K_ge_2_given_K_ge_1": null,
+    "P_K_ge_3_given_K_ge_2": null,
+    "P_K_eq_4_given_K_ge_3": null,
+    "P_Blue_win": 0.0
+  },
+  "visibility_by_kill_count": {
+    "0": {
+      "count": 1,
+      "mean_tail_min_survivor_visible_fraction": 1.0,
+      "mean_tail_max_survivor_invisible_streak": 0.0,
+      "target_loss_count": 0,
+      "target_loss_fraction": 0.0
+    },
+    "1": {
+      "count": 0,
+      "mean_tail_min_survivor_visible_fraction": null,
+      "mean_tail_max_survivor_invisible_streak": null,
+      "target_loss_count": 0,
+      "target_loss_fraction": null
+    },
+    "2": {
+      "count": 0,
+      "mean_tail_min_survivor_visible_fraction": null,
+      "mean_tail_max_survivor_invisible_streak": null,
+      "target_loss_count": 0,
+      "target_loss_fraction": null
+    },
+    "3": {
+      "count": 0,
+      "mean_tail_min_survivor_visible_fraction": null,
+      "mean_tail_max_survivor_invisible_streak": null,
+      "target_loss_count": 0,
+      "target_loss_fraction": null
+    }
+  },
+  "mean_steps_after_last_kill_by_kill_count": {
+    "0": 2.0,
+    "1": null,
+    "2": null,
+    "3": null
+  },
+  "failure_classification_counts": {
+    "OTHER": 1
+  },
+  "failure_classification_by_kill_count": {
+    "0": {
+      "OTHER": 1
+    },
+    "1": {},
+    "2": {},
+    "3": {}
+  },
+  "failure_classification_thresholds": {
+    "late_kill_step": 60,
+    "target_loss_longest_invisible_streak": 10,
+    "cannot_close_far_fraction": 0.5,
+    "cannot_close_positive_closing_fraction": 0.5,
+    "bad_geometry_distance_window_fraction": 0.25
+  },
+  "definitions": {
+    "closing_rate": "(previous pair distance - current pair distance) / decision_dt; positive means closing",
+    "remaining_blue_visible_fraction": "mean per-decision fraction of currently alive Blue aircraft for which env.team_visible is true, strictly after the indexed Red kill",
+    "tail": "decision steps strictly after the episode's last Red kill; the whole episode when no Red kill occurs",
+    "tail_longest_all_invisible_streak": "longest tail streak during which every remaining Blue is simultaneously invisible",
+    "tail_max_survivor_invisible_streak": "maximum per-target invisible streak among Blue aircraft alive at episode end",
+    "target_loss": "at least one final-surviving Blue is team-invisible for the configured consecutive tail-step threshold",
+    "failure_classification": "mutually exclusive mechanical diagnostic bucket, not a scientific causal conclusion",
+    "full_geometry_ok": "one identical Red-Blue pair simultaneously satisfies distance, ATA and AA thresholds",
+    "geometry_scope": "ground-truth post-hoc state diagnostics; these values are not necessarily present in actor observations",
+    "reward_credit_sample": "an alive Blue sample for which env.team_visible(blue_id) is true, matching the Blue set that contributes to the formal team situation reward",
+    "reward_credit_visibility_scope": "ground-truth geometry may still be recorded for invisible Blue, but invisible Blue does not enter reward-credit denominators",
+    "steps_after_last_kill_for_zero_kill_draw": "the full episode length"
+  },
+  "actor_policy_distribution": {
+    "actors": [
+      {
+        "agent_id": "MAV",
+        "log_std": [
+          -0.5,
+          -0.5,
+          -0.5
+        ],
+        "std": [
+          0.6065306597126334,
+          0.6065306597126334,
+          0.6065306597126334
+        ],
+        "mean_std_per_actor": 0.6065306597126334
+      },
+      {
+        "agent_id": "UAV1",
+        "log_std": [
+          -0.5,
+          -0.5,
+          -0.5
+        ],
+        "std": [
+          0.6065306597126334,
+          0.6065306597126334,
+          0.6065306597126334
+        ],
+        "mean_std_per_actor": 0.6065306597126334
+      },
+      {
+        "agent_id": "UAV2",
+        "log_std": [
+          -0.5,
+          -0.5,
+          -0.5
+        ],
+        "std": [
+          0.6065306597126334,
+          0.6065306597126334,
+          0.6065306597126334
+        ],
+        "mean_std_per_actor": 0.6065306597126334
+      },
+      {
+        "agent_id": "UAV3",
+        "log_std": [
+          -0.5,
+          -0.5,
+          -0.5
+        ],
+        "std": [
+          0.6065306597126334,
+          0.6065306597126334,
+          0.6065306597126334
+        ],
+        "mean_std_per_actor": 0.6065306597126334
+      }
+    ],
+    "global_geometric_mean_std": 0.6065306597126334,
+    "global_mean_std": 0.6065306597126333
+  }
+}

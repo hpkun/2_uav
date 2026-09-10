@@ -34,6 +34,10 @@ TRAINING_FIELDS = (
     "critic_loss", "entropy", "method_variant",
     "agp_raw_mean", "agp_raw_mean_abs", "agp_shaping_mean", "agp_shaping_mean_abs",
 )
+PCTA_FIELDS = (
+    "pcta_consistency_loss", "pcta_consistency_weighted_loss",
+    "pcta_valid_temporal_pairs", "pcta_attention_entropy", "pcta_target_switch_rate",
+)
 LOSS_FIELDS = (*(f"actor_{i}_loss" for i in range(len(RED_IDS))), "critic_loss", "entropy")
 
 
@@ -61,6 +65,7 @@ def _algorithm_name(
         "hrta": "happo_hrta",
         "structured_uniform": "happo_structured_uniform",
         "recurrent": "happo_recurrent",
+        "pcta": "pcta_happo",
     }
     try:
         return names[actor_variant]
@@ -302,6 +307,16 @@ def _progress_lines(
         f"        actor loss [{actor_loss_text}]",
         f"        critic loss {losses['critic_loss']:.3f} | entropy {losses['entropy']:.3f}",
     ])
+    if window.updates and "pcta_consistency_loss" in window.updates[0]:
+        valid_pairs = sum(int(update["pcta_valid_temporal_pairs"]) for update in window.updates)
+        lines.append(
+            "        PCTA consistency "
+            f"{np.mean([update['pcta_consistency_loss'] for update in window.updates]):.6f} "
+            f"(weighted {np.mean([update['pcta_consistency_weighted_loss'] for update in window.updates]):.6f}) | "
+            f"valid pairs {valid_pairs} | "
+            f"attention entropy {np.mean([update['pcta_attention_entropy'] for update in window.updates]):.3f} | "
+            f"target switch {np.mean([update['pcta_target_switch_rate'] for update in window.updates]):.1%}"
+        )
     return "\n".join(lines)
 
 
@@ -342,6 +357,8 @@ def _initial_resolved(
         "checkpoint_interval": args.checkpoint_interval, "evaluation_interval": args.eval_interval,
         "log_interval": args.log_interval, "evaluation_episodes": args.eval_episodes,
         "final_evaluation_episodes": args.final_eval_episodes, "resume_history": [],
+        **({"pcta_consistency_coef": float(trainer.config["pcta_consistency_coef"])}
+           if trainer.config["actor_variant"] == "pcta" else {}),
     }
 
 
@@ -424,8 +441,11 @@ def main(
         )
 
         separator = "=" * 60
+        display_algorithm = {"rc_happo": "RC-HAPPO", "pcta_happo": "PCTA-HAPPO"}.get(
+            algorithm, algorithm.upper(),
+        )
         start_lines = [
-            separator, f"{'RC-HAPPO' if algorithm == 'rc_happo' else algorithm.upper()} TRAINING",
+            separator, f"{display_algorithm} TRAINING",
             f"Run: {run_dir.name}", f"Profile: {args.profile}",
             f"Seed: {args.seed}", f"Device: {device}", f"Envs: {args.num_envs}",
             f"Method: {method_variant}",
@@ -450,6 +470,7 @@ def main(
         log_observer = MilestoneObserver(args.log_interval, trainer.env_steps)
         completed = _last_completed_episodes(run_dir / "training.csv")
         evaluation_fields: tuple[str, ...] | None = None
+        training_fields = TRAINING_FIELDS + PCTA_FIELDS if actor_variant == "pcta" else TRAINING_FIELDS
         configured_horizon = int(trainer.config["rollout_steps"])
         num_envs = int(trainer.config["num_envs"])
         window = ProgressWindow()
@@ -475,9 +496,9 @@ def main(
                 **{f"actor_{i}_loss": metrics[f"actor_{i}_loss"] for i in range(len(RED_IDS))},
                 "critic_loss": metrics["critic_loss"],
                 "entropy": metrics["entropy"],
-                **{field: metrics[field] for field in TRAINING_FIELDS if field in metrics},
+                **{field: metrics[field] for field in training_fields if field in metrics},
             }
-            _append_csv(run_dir / "training.csv", row, TRAINING_FIELDS)
+            _append_csv(run_dir / "training.csv", row, training_fields)
 
             crossed_logs = log_observer.consume(trainer.env_steps)
             if crossed_logs:
@@ -540,6 +561,8 @@ def main(
             "training_elapsed_seconds": training_elapsed,
             "final_evaluation_elapsed_seconds": final_evaluation_elapsed,
             "final_evaluations": final_rows, "checkpoint_final": "checkpoint_final.pt",
+            **({"pcta_consistency_coef": float(trainer.config["pcta_consistency_coef"])}
+               if actor_variant == "pcta" else {}),
         }
         with (run_dir / "summary.json").open("w", encoding="utf-8") as stream:
             json.dump(summary, stream, indent=2, ensure_ascii=False)

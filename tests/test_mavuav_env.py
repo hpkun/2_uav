@@ -3,8 +3,8 @@ import inspect
 import numpy as np
 import pytest
 
-from env.blue_policy import BLUE_ACTION_CANDIDATES, BluePolicy
-from env.dynamics import integrate_interval, map_normalized_action
+from env.blue_policy import BluePolicy
+from env.dynamics import integrate_interval, inverse_trim_map, map_normalized_action
 from env.geometry import compute_pairwise_geometry
 from env.mavuav import BLUE_IDS, GLOBAL_STATE_DIM, OBS_DIM, RED_IDS, ENVIRONMENT_VERSION, HeterogeneousMAVUAVAirCombatEnv, load_environment_config
 from env.models import AircraftState
@@ -274,8 +274,7 @@ def test_red_safe_distance_penalty_is_once_per_step_and_nonlethal():
     assert not info["red_safe_distance_violation"] and info["safety_reward"] == 0.0
 
 
-def test_blue_candidates_and_nearest_aircraft_target_strategy():
-    assert BLUE_ACTION_CANDIDATES.shape == (27, 3) and len(np.unique(BLUE_ACTION_CANDIDATES, axis=0)) == 27
+def test_blue_nearest_aircraft_target_strategy():
     e = env(); blue = e.entities["Blue1"]; red = {aid: e.entities[aid] for aid in e.red_ids}
     policy = e.blue_policy
     assert policy.select_target(blue, red).aircraft_id == "UAV1"
@@ -361,7 +360,9 @@ def test_v33_blue_recovery_guard_expands_for_steep_uav_descent():
     blue.state.v = blue.spec.v_max
     blue.state.theta = -np.pi / 3.0
     assert e.blue_policy._altitude_recovery_guard(blue.state, blue) > 6000.0
-    assert not e.blue_policy._has_safe_altitude_recovery(blue.state, blue)
+    np.testing.assert_array_equal(
+        e.blue_policy.action(blue, {aid: e.entities[aid] for aid in RED_IDS}), [-1.0, 1.0, 0.0],
+    )
 
 
 def test_v33_entity_order_and_nominal_formation_are_exact():
@@ -550,7 +551,9 @@ def test_dense_team_averages_over_visible_alive_blue_after_uav_death():
     assert np.isclose(e._team_situation_reward(), expected)
 
 
-def test_blue_has_exactly_27_candidates(): assert BLUE_ACTION_CANDIDATES.shape == (27, 3)
+def test_blue_policy_source_has_no_candidate_rollout_or_situation_scoring():
+    source = inspect.getsource(BluePolicy.action)
+    assert "integrate_interval" not in source and "situation_reward" not in source and "candidate" not in source
 
 
 def test_blue_target_strategy_is_fixed_and_seed_independent():
@@ -574,7 +577,7 @@ def test_short_environment_rollout_no_nan_inf():
         ("h", 19_850.0, 0.0, 0.2), ("h", 1_250.0, 0.0, -0.2),
     ],
 )
-def test_blue_policy_filters_boundary_unsafe_candidates(axis, value, heading, theta):
+def test_blue_policy_emergency_rule_keeps_one_step_state_in_bounds(axis, value, heading, theta):
     e = env(); blue = e.entities["Blue1"]
     if axis == "x": blue.state.x = value
     elif axis == "y": blue.state.y = value
@@ -585,11 +588,13 @@ def test_blue_policy_filters_boundary_unsafe_candidates(axis, value, heading, th
     assert e.blue_policy._within_battlefield(predicted)
 
 
-def test_blue_policy_fails_fast_when_no_candidate_is_boundary_safe():
+def test_blue_policy_outside_horizontal_boundary_uses_finite_center_recovery():
     e = env(); blue = e.entities["Blue1"]
     blue.state.x = e.config["battlefield"]["x"][1] + 1000.0
-    with pytest.raises(RuntimeError, match="no safe action"):
-        e.blue_policy.action(blue, {aid: e.entities[aid] for aid in RED_IDS})
+    blue.state.psi = 0.0
+    diagnostics = e.blue_policy.diagnostics(blue, {aid: e.entities[aid] for aid in RED_IDS})
+    action = e.blue_policy.action(blue, {aid: e.entities[aid] for aid in RED_IDS})
+    assert diagnostics["blue_horizontal_recovery_active"] and np.isfinite(action).all()
 
 
 def test_blue_policy_y_mirror_changes_only_yaw_overload_action():

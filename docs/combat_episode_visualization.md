@@ -11,7 +11,7 @@ conda run -n uav python -u tools/record_combat_episode.py `
   --device cuda --output-dir outputs/visualization/example
 ```
 
-v3.3 录像固定使用 canonical `nearest_red_aircraft` Blue strategy，元数据字段为 `blue_target_strategy`。输出目录默认必须不存在或为空；只有显式 `--overwrite` 才允许复用。种子 `424242` 是独立的 qualitative seed，不属于正式评估使用的 `1000+episode` 序列。
+v3.4 录像固定使用 canonical `nearest_red_aircraft` Blue strategy 与直接几何追击控制器，元数据字段为 `blue_target_strategy`。输出目录默认必须不存在或为空；只有显式 `--overwrite` 才允许复用。种子 `424242` 是独立的 qualitative seed，不属于正式评估使用的 `1000+episode` 序列。
 
 loader 严格检查 environment version、100D observation 和 117D global state。支持：
 

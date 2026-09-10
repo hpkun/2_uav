@@ -12,6 +12,7 @@ from algorithm.happo.networks import IndependentActors
 from algorithm.happo.recurrent import RecurrentIndependentActors
 from algorithm.modules.hrta import HRTAIndependentActors
 from algorithm.modules.structured_uniform import StructuredUniformIndependentActors
+from algorithm.modules.pcta import PCTAIndependentActors
 from env.mavuav import ENVIRONMENT_VERSION, GLOBAL_STATE_DIM, OBS_DIM, RED_IDS
 
 ARCHITECTURE_KEYS = {"entity_dim", "role_dim", "fusion_hidden_dim", "action_dim"}
@@ -19,6 +20,11 @@ RECURRENT_ARCHITECTURE_FIELDS = (
     "observation_dim", "encoder_dim", "recurrent_hidden_dim", "head_dim", "action_dim",
 )
 RECURRENT_ARCHITECTURE_KEYS = set(RECURRENT_ARCHITECTURE_FIELDS)
+PCTA_ARCHITECTURE_FIELDS = (
+    "observation_dim", "context_input_dim", "context_dim", "enemy_block_dim",
+    "enemy_dim", "enemy_slots", "head_hidden_dim", "action_dim",
+)
+PCTA_ARCHITECTURE_KEYS = set(PCTA_ARCHITECTURE_FIELDS)
 
 
 def infer_method_display_name(actor_variant: str, method_variant: str = "baseline") -> str:
@@ -28,6 +34,8 @@ def infer_method_display_name(actor_variant: str, method_variant: str = "baselin
         return "HAPPO-HRTA"
     if actor_variant == "structured_uniform":
         return "HAPPO-Structured-Uniform"
+    if actor_variant == "pcta":
+        return "PCTA-HAPPO"
     if actor_variant == "vanilla":
         names = {
             "baseline": "HAPPO", "agp": "HAPPO-AGP",
@@ -178,6 +186,30 @@ def load_replay_actors(checkpoint: str | Path, device: str | torch.device = "cpu
             observation_dim=architecture["observation_dim"], action_dim=architecture["action_dim"],
             hidden_dim=architecture["encoder_dim"],
             recurrent_hidden_dim=architecture["recurrent_hidden_dim"],
+        )
+    elif variant == "pcta":
+        if method != "baseline":
+            raise RuntimeError("PCTA replay supports only method_variant='baseline'")
+        if not isinstance(architecture, dict) or set(architecture) != PCTA_ARCHITECTURE_KEYS:
+            raise RuntimeError(
+                "incompatible PCTA actor architecture metadata: "
+                f"expected keys={sorted(PCTA_ARCHITECTURE_KEYS)!r}, actual={architecture!r}"
+            )
+        architecture = {key: int(architecture[key]) for key in PCTA_ARCHITECTURE_FIELDS}
+        if (
+            architecture["observation_dim"] != OBS_DIM
+            or architecture["context_input_dim"] != 44
+            or architecture["enemy_block_dim"] != 14
+            or architecture["enemy_slots"] != 4
+            or architecture["action_dim"] != 3
+        ):
+            raise RuntimeError("incompatible PCTA actor architecture dimensions")
+        actors = PCTAIndependentActors(
+            observation_dim=architecture["observation_dim"],
+            action_dim=architecture["action_dim"],
+            context_dim=architecture["context_dim"],
+            enemy_dim=architecture["enemy_dim"],
+            hidden_dim=architecture["head_hidden_dim"],
         )
     else:
         raise RuntimeError(

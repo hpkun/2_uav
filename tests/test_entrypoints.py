@@ -23,19 +23,16 @@ def _run(*arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_v32_checkpoint_is_rejected_by_v33_evaluator(tmp_path):
-    checkpoint = tmp_path / "v32.pt"
-    torch.save({
-        "environment_version": "heterogeneous_mavuav_4v4_v3_2",
-        "observation_dim": 100,
-        "global_state_dim": 117,
-    }, checkpoint)
-    result = subprocess.run(
-        [sys.executable, "algorithm/evaluate_happo.py", str(checkpoint), "--episodes", "1", "--device", "cpu"],
-        cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=180,
-    )
-    assert result.returncode != 0
-    assert "incompatible HAPPO checkpoint environment contract" in result.stderr
+def test_pre_v34_checkpoints_are_rejected_by_v34_evaluator(tmp_path):
+    for version in ("heterogeneous_mavuav_4v4_v3_2", "heterogeneous_mavuav_4v4_v3_3"):
+        checkpoint = tmp_path / f"{version}.pt"
+        torch.save({"environment_version": version, "observation_dim": 100, "global_state_dim": 117}, checkpoint)
+        result = subprocess.run(
+            [sys.executable, "algorithm/evaluate_happo.py", str(checkpoint), "--episodes", "1", "--device", "cpu"],
+            cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=180,
+        )
+        assert result.returncode != 0
+        assert "incompatible HAPPO checkpoint environment contract" in result.stderr
 
 
 def test_direct_happo_entrypoints_show_help_without_package_install():
@@ -44,6 +41,8 @@ def test_direct_happo_entrypoints_show_help_without_package_install():
     assert "--steps" in _run("algorithm/train_happo_hrta.py", "--help").stdout
     assert "--attention-output" in _run("algorithm/evaluate_happo_hrta.py", "--help").stdout
     assert "--steps" in _run("algorithm/train_happo_agp.py", "--help").stdout
+    assert "--steps" in _run("algorithm/train_happo_pcta.py", "--help").stdout
+    assert "--episodes" in _run("algorithm/evaluate_happo_pcta.py", "--help").stdout
     assert "--steps" in _run("algorithm/train_happo_relational_critic.py", "--help").stdout
     assert "--episodes" in _run("algorithm/evaluate_happo_relational_critic.py", "--help").stdout
 

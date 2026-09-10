@@ -35,6 +35,23 @@ def map_normalized_action(action: np.ndarray, state: AircraftState, spec: Aircra
     )
 
 
+def inverse_trim_map(command: OverloadCommand | np.ndarray, state: AircraftState, spec: AircraftSpec) -> np.ndarray:
+    """Invert the local trim-centred overload map into a normalized action."""
+    values = command.as_array() if isinstance(command, OverloadCommand) else np.asarray(command, dtype=np.float64)
+    if values.shape != (3,):
+        raise ValueError(f"overload command must have shape (3,), got {values.shape}")
+    if not np.all(np.isfinite(values)):
+        raise ValueError("overload command must be finite")
+    trims = np.asarray((np.sin(state.theta), np.cos(state.theta), 0.0), dtype=np.float64)
+    limits = (spec.nx, spec.ny, spec.nz)
+    result = np.empty(3, dtype=np.float64)
+    for index, (value, trim, (lower, upper)) in enumerate(zip(values, trims, limits)):
+        clipped = float(np.clip(value, lower, upper))
+        denominator = (upper - trim) if clipped >= trim else (trim - lower)
+        result[index] = 0.0 if denominator <= 0.0 else (clipped - trim) / denominator
+    return np.clip(result, -1.0, 1.0)
+
+
 def derivatives(values: np.ndarray, command: OverloadCommand, gravity: float = GRAVITY) -> np.ndarray:
     """Evaluate the overload-controlled 3DOF equations."""
     _, _, _, v, theta, psi = np.asarray(values, dtype=np.float64)
@@ -81,4 +98,3 @@ class PointMassDynamics:
 
     def derivatives(self, state: AircraftState, command: OverloadCommand) -> np.ndarray:
         return derivatives(state.as_array(), command)
-

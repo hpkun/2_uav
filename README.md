@@ -2,7 +2,7 @@
 
 本项目包含异构 `1 MAV + 3 UAV vs 4 Blue` 环境、vanilla HAPPO/MAPPO 实现，以及独立的评估和诊断工具。正式研究代码位于 `env/` 与 `algorithm/`，不需要安装当前项目 package。
 
-当前 canonical contract 为 `heterogeneous_mavuav_4v4_v3_3`，actor observation 为 100D，centralized state 为 117D。场景为 1 MAV + 3 Red UAV 对 4 Blue-team UAV；红蓝 UAV 使用完全相同的动力学参数，八架飞机名义初速统一为 275 m/s，MAV 在三架 Red UAV 前线后方 1 km。四架 Blue 各自从所有存活 Red（包括 MAV）中选择距离最近者，再执行边界安全的确定性 27 候选一步贪心动作。Blue 使用 privileged true state；这与 Red 的 12/8 km sensing 和理想 datalink 是刻意保留的 benchmark 信息结构非对称。v3.2 及更早 checkpoint 不能续跑、评估、回放或审计。
+当前最终冻结的 canonical contract 为 `heterogeneous_mavuav_4v4_v3_4`，actor observation 为 100D，centralized state 为 117D。场景为 1 MAV + 3 Red UAV 对 4 Blue-team UAV；红蓝 UAV 使用完全相同的动力学参数，八架飞机名义初速统一为 275 m/s，MAV 在三架 Red UAV 前线后方 1 km。四架 Blue 各自从所有存活 Red（包括 MAV）中选择距离最近者，再执行边界安全、物理一致的确定性直接几何追击。Blue 使用 privileged true state；这与 Red 的 12/8 km sensing 和理想 datalink 是刻意保留的 benchmark 信息结构非对称。v3.3 及更早 checkpoint 不能续跑、评估、回放或审计。
 
 ## 环境准备
 
@@ -92,6 +92,17 @@ python algorithm/evaluate_happo_recurrent.py outputs/<run>/checkpoint_final.pt -
 
 其 recurrent mask、TBPTT、短尾 chunk 和 checkpoint continuation 语义见 `docs/recurrent_happo_spec.md`。
 
+## PCTA-HAPPO
+
+PCTA-HAPPO 在四个 Blue 固定槽上加入 target-aware attention，并仅在前一主要目标仍存活且 team-visible 时施加 temporal pursuit-consistency regularization；critic、HAPPO sequential update 与环境均不变：
+
+```bash
+python algorithm/train_happo_pcta.py --steps 5000000 --profile main --seed 1 --device cuda --num-envs 16
+python algorithm/evaluate_happo_pcta.py outputs/<run>/checkpoint_final.pt --profile main --episodes 100 --device cuda
+```
+
+结构、损失与诊断字段见 `docs/pcta_happo_spec.md`。
+
 ## 输出结构
 
 `outputs/` 下每次训练只对应一个自包含 run folder：
@@ -116,7 +127,7 @@ outputs/happo_main_seed1_5m_<timestamp>/
 python tools/audit_env.py --steps 1000 --num-envs 16
 python tools/benchmark_env.py --sample-steps 2000 --num-envs 16
 python tools/audit_environment_foundations.py --profile main --samples 10000 --seed 1000 \
-    --output outputs/foundation_v33_main
+    --output outputs/foundation_v34_main
 python tools/plot_trajectory.py outputs/<run>/checkpoint_final.pt \
     --profile main --seed 1000
 ```
@@ -134,7 +145,7 @@ python tools/render_combat_episode_interactive.py --input-dir outputs/visualizat
 
 前者只记录真实 decision-boundary 状态；后两者分别生成固定视角 MP4/preview 和可离线双击打开的交互 3D HTML。原有 `plot_trajectory.py` 静态 PNG 用法保持不变。详见 `docs/combat_episode_visualization.md`。
 
-Combat replay loader 支持 vanilla HAPPO、HRTA、Structured Uniform 和 baseline R-HAPPO recurrent checkpoint。R-HAPPO 录像从独立 episode 的 zero hidden/zero mask 开始，使用 deterministic `sample_step`，仅按 Red `active_masks` 做 agent-level hidden reset；它仍是定性可视化，不替代正式 recurrent evaluation。
+Combat replay loader 支持 vanilla HAPPO、PCTA-HAPPO、HRTA、Structured Uniform 和 baseline R-HAPPO recurrent checkpoint。R-HAPPO 录像从独立 episode 的 zero hidden/zero mask 开始，使用 deterministic `sample_step`，仅按 Red `active_masks` 做 agent-level hidden reset；它仍是定性可视化，不替代正式 recurrent evaluation。
 
 ## 测试
 

@@ -24,3 +24,7 @@ training:
   hrta_entity_dim: 32
   hrta_role_dim: 16
   hrta_fusion_hidden_dim: 64
+  pcta_context_dim: 64
+  pcta_enemy_dim: 32
+  pcta_hidden_dim: 128
+  pcta_consistency_coef: 0.05

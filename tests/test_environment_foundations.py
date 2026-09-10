@@ -13,9 +13,9 @@ from env.mavuav import (
 from tools.audit_environment_foundations import audit_foundations, write_summary
 
 
-def test_v33_foundation_contract_is_exact_and_frozen_fields_are_unchanged():
+def test_v34_foundation_contract_is_exact_and_frozen_fields_are_unchanged():
     config = load_environment_config(None)
-    assert ENVIRONMENT_VERSION == config["environment_version"] == "heterogeneous_mavuav_4v4_v3_3"
+    assert ENVIRONMENT_VERSION == config["environment_version"] == "heterogeneous_mavuav_4v4_v3_4"
     assert (OBS_DIM, GLOBAL_STATE_DIM) == (100, 117)
     assert config["sensing"] == {"MAV_range": 12000.0, "UAV_range": 8000.0}
     assert config["simulation"] == {"decision_dt": 1.0, "physics_dt": 0.1, "max_decision_steps": 75}

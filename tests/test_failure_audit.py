@@ -12,8 +12,10 @@ import torch
 import tools.audit_combat_failures as failure_audit
 from algorithm.happo.evaluation import evaluate_actors
 from algorithm.happo.networks import IndependentActors
-from env.dynamics import integrate_interval
-from env.mavuav import BLUE_IDS, GLOBAL_STATE_DIM, OBS_DIM, RED_IDS, HeterogeneousMAVUAVAirCombatEnv, load_environment_config
+from env.mavuav import (
+    BLUE_IDS, ENVIRONMENT_VERSION, GLOBAL_STATE_DIM, OBS_DIM, RED_IDS,
+    HeterogeneousMAVUAVAirCombatEnv, load_environment_config,
+)
 from env.models import AircraftState
 from env.reward import situation_reward
 from tools.audit_combat_failures import (
@@ -46,12 +48,8 @@ def synthetic_row(outcome: str, kills: int) -> dict:
         "steps_after_last_kill": 75 if kills == 0 else 75 - 10 * kills,
         "tail_min_survivor_visible_fraction": 1.0,
         "tail_max_survivor_invisible_streak": 0,
-        "recovery_action_evaluation_count": 1, "recovery_candidate_count": 27,
-        "recovery_one_step_rejected_count": 0, "recovery_altitude_rejected_count": 0,
-        "recovery_safe_candidate_count": 27, "recovery_changed_choice_count": 0,
-        "max_candidate_recovery_guard": 3000.0,
-        "max_current_state_recovery_guard": 2500.0,
-        "max_selected_action_recovery_guard": 2800.0,
+        "blue_target_id": '{"UAV1": 1}', "blue_target_is_MAV": 0.0,
+        "blue_boundary_recovery_active": 0.0, "blue_horizontal_recovery_active": 0.0,
         "reward_credit_samples": 4,
         "reward_best_equals_closest_count": 3, "reward_best_closing_comparable_samples": 3,
         "reward_best_equals_best_closing_count": 2,
@@ -207,23 +205,22 @@ def test_episode_reward_credit_fields_match_formal_visible_blue_set(monkeypatch)
     assert env._team_situation_reward() == pytest.approx(expected)
 
 
-@pytest.mark.parametrize("altitude,theta", [(5000.0, 0.0), (5000.0, -0.8), (18000.0, 0.6)])
-def test_recovery_audit_safe_greedy_matches_formal_blue_policy(altitude, theta):
+@pytest.mark.parametrize(
+    "altitude,theta,expected_recovery",
+    [(5000.0, 0.0, False), (1500.0, -0.8, True), (19_500.0, 0.6, True)],
+)
+def test_blue_action_audit_matches_formal_direct_controller_state(altitude, theta, expected_recovery):
     env = HeterogeneousMAVUAVAirCombatEnv(randomize=False)
     env.reset(seed=3)
     blue = env.entities["Blue1"]
     blue.state.h, blue.state.theta = altitude, theta
     diagnostic = blue_action_diagnostics(env, "Blue1")
     actual = env.blue_policy.action(blue, {red_id: env.entities[red_id] for red_id in RED_IDS})
-    np.testing.assert_array_equal(diagnostic["actual_safe_greedy_action"], actual)
-    assert diagnostic["evaluated_candidate_count"] == 27
-    assert diagnostic["one_step_rejected_count"] + diagnostic["altitude_rejected_count"] + diagnostic["safe_candidate_count"] == 27
-    selected = integrate_interval(
-        blue.state, diagnostic["actual_safe_greedy_action"], blue.spec, env.physics_dt, env.physics_substeps,
-    )
-    assert diagnostic["selected_action_recovery_guard"] == pytest.approx(
-        env.blue_policy._altitude_recovery_guard(selected, blue)
-    )
+    assert diagnostic["blue_target_id"] == env.blue_policy.select_target(
+        blue, {red_id: env.entities[red_id] for red_id in RED_IDS},
+    ).aircraft_id
+    assert diagnostic["blue_boundary_recovery_active"] is expected_recovery
+    assert np.isfinite(actual).all()
 
 
 def test_output_csv_json_fields_are_complete_and_finite(tmp_path):
@@ -251,7 +248,7 @@ def test_checkpoint_loader_rejects_nonbaseline_contract(tmp_path):
     actors = IndependentActors(hidden_dim=8)
     checkpoint = tmp_path / "bad.pt"
     torch.save({
-        "environment_version": "heterogeneous_mavuav_4v4_v3_3",
+        "environment_version": ENVIRONMENT_VERSION,
         "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM,
         "actor_variant": "vanilla", "critic_variant": "mlp", "method_variant": "agp",
         "trainer_config": {"hidden_dim": 8}, "actors": actors.state_dict(),
@@ -260,11 +257,12 @@ def test_checkpoint_loader_rejects_nonbaseline_contract(tmp_path):
         load_vanilla_baseline_checkpoint(checkpoint, "cpu")
 
 
-def test_failure_audit_rejects_v32_checkpoint(tmp_path):
+@pytest.mark.parametrize("version", ["heterogeneous_mavuav_4v4_v3_2", "heterogeneous_mavuav_4v4_v3_3"])
+def test_failure_audit_rejects_pre_v34_checkpoint(tmp_path, version):
     actors = IndependentActors(hidden_dim=8)
     checkpoint = tmp_path / "v32.pt"
     torch.save({
-        "environment_version": "heterogeneous_mavuav_4v4_v3_2",
+        "environment_version": version,
         "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM,
         "actor_variant": "vanilla", "critic_variant": "mlp", "method_variant": "baseline",
         "trainer_config": {"hidden_dim": 8}, "actors": actors.state_dict(),
@@ -330,18 +328,19 @@ def test_phase_starts_strictly_after_kill_and_three_kill_visibility_definitions_
     assert per_survivor[0]["longest_invisible_streak"] == 1
 
 
-def test_candidate_recovery_guard_uses_predicted_state_and_counts_close():
+def test_blue_controller_audit_reports_target_and_emergency_flags():
     env = HeterogeneousMAVUAVAirCombatEnv(randomize=False)
     env.reset(seed=11)
     blue = env.entities["Blue1"]
+    blue.state.h = 1500.0
     blue.state.theta = -0.8
     diagnostic = blue_action_diagnostics(env, "Blue1")
-    assert diagnostic["max_candidate_recovery_guard"] > diagnostic["current_state_recovery_guard"]
-    assert diagnostic["evaluated_candidate_count"] == (
-        diagnostic["one_step_rejected_count"]
-        + diagnostic["altitude_rejected_count"]
-        + diagnostic["safe_candidate_count"]
-    )
+    assert set(diagnostic) == {
+        "blue_target_id", "blue_target_is_MAV",
+        "blue_boundary_recovery_active", "blue_horizontal_recovery_active",
+    }
+    assert diagnostic["blue_target_id"] in RED_IDS
+    assert diagnostic["blue_boundary_recovery_active"]
 
 
 def test_post_last_reward_credit_is_sample_weighted_and_grouped_by_kill_count():
