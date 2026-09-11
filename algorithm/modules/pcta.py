@@ -41,17 +41,21 @@ class PCTAActor(nn.Module):
         enemy_dim: int = 32,
         hidden_dim: int = 128,
         log_std_init: float = -0.5,
+        attention_mode: str = "learned",
     ) -> None:
         super().__init__()
         if observation_dim != OBS_DIM:
             raise ValueError(f"PCTAActor requires the existing {OBS_DIM}D observation contract")
         if min(action_dim, context_dim, enemy_dim, hidden_dim) <= 0:
             raise ValueError("network dimensions must be positive")
+        if attention_mode not in ("learned", "uniform"):
+            raise ValueError("attention_mode must be 'learned' or 'uniform'")
         self.observation_dim = int(observation_dim)
         self.action_dim = int(action_dim)
         self.context_dim = int(context_dim)
         self.enemy_dim = int(enemy_dim)
         self.hidden_dim = int(hidden_dim)
+        self.attention_mode = attention_mode
         self.context_encoder = nn.Sequential(
             nn.Linear(44, context_dim), nn.Tanh(),
         )
@@ -79,18 +83,27 @@ class PCTAActor(nn.Module):
         context = self.context_encoder(observations[..., SELF_FRIEND_SLICE])
         enemies = self.enemy_blocks(observations)
         embeddings = self.enemy_encoder(enemies)
-        query = self.query(context)
-        scores = torch.einsum("...d,...nd->...n", query, embeddings) / math.sqrt(self.enemy_dim)
         valid = enemy_valid_mask(observations)
-        masked_scores = scores.masked_fill(~valid, torch.finfo(scores.dtype).min)
-        attention = torch.softmax(masked_scores, dim=-1)
-        attention = torch.where(valid, attention, torch.zeros_like(attention))
-        denominator = attention.sum(dim=-1, keepdim=True)
-        attention = torch.where(
-            denominator > 0.0,
-            attention / denominator.clamp_min(torch.finfo(attention.dtype).eps),
-            torch.zeros_like(attention),
-        )
+        if self.attention_mode == "learned":
+            query = self.query(context)
+            scores = torch.einsum("...d,...nd->...n", query, embeddings) / math.sqrt(self.enemy_dim)
+            masked_scores = scores.masked_fill(~valid, torch.finfo(scores.dtype).min)
+            attention = torch.softmax(masked_scores, dim=-1)
+            attention = torch.where(valid, attention, torch.zeros_like(attention))
+            denominator = attention.sum(dim=-1, keepdim=True)
+            attention = torch.where(
+                denominator > 0.0,
+                attention / denominator.clamp_min(torch.finfo(attention.dtype).eps),
+                torch.zeros_like(attention),
+            )
+        else:
+            valid_weights = valid.to(dtype=embeddings.dtype)
+            valid_count = valid_weights.sum(dim=-1, keepdim=True)
+            attention = torch.where(
+                valid_count > 0.0,
+                valid_weights / valid_count.clamp_min(1.0),
+                torch.zeros_like(valid_weights),
+            )
         aggregate = torch.einsum("...n,...nd->...d", attention, embeddings)
         features = torch.cat((context, aggregate), dim=-1)
         return features, {"enemy_attention": attention, "enemy_valid_mask": valid}

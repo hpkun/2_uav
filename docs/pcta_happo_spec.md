@@ -18,7 +18,15 @@ Training CSV diagnostics are `pcta_consistency_loss`, `pcta_consistency_weighted
 
 ## Checkpoint contract
 
-PCTA checkpoints retain `happo_training_checkpoint_v1` and record `actor_variant=pcta`, architecture dimensions and `pcta_consistency_coef`. Vanilla and PCTA checkpoints are mutually rejected by their loaders. Resume restores the same complete trainer/vector/RNG state contract as vanilla HAPPO.
+PCTA-family checkpoints retain `happo_training_checkpoint_v1` and record the exact `actor_variant`, architecture dimensions, `attention_mode`, and effective `pcta_consistency_coef`. Full PCTA, attention-only, uniform, and Vanilla checkpoints are mutually rejected by mismatched loaders. Existing Full PCTA checkpoints without an explicit attention-mode field remain compatible and are interpreted as learned attention. Resume restores the same complete trainer/vector/RNG state contract as vanilla HAPPO.
+
+## Ablation variants
+
+- **Full PCTA** (`pcta`) uses learned masked target attention plus pursuit-consistency auxiliary optimization with the configured coefficient (formally `0.05`).
+- **PCTA-Attention-only** (`pcta_attention_only`) uses exactly the same learned-attention architecture but has an effective consistency coefficient of zero and performs no consistency backward or optimizer step. Temporal quantities are diagnostics only.
+- **PCTA-Uniform** (`pcta_uniform`) retains the same PCTA encoders, query module, action head, `log_std`, parameter structure, and initialization consumption, but replaces learned attention weights with masked uniform pooling. It performs no consistency backward or optimizer step.
+
+The latter two variants are mechanism ablations, not new primary methods. The unused query module remains present in PCTA-Uniform so all three PCTA-family actors have identical state-dict keys, parameter shapes, parameter counts, and same-seed initialization.
 
 ## Design provenance
 

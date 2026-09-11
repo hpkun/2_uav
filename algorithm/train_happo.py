@@ -20,6 +20,7 @@ import torch
 import yaml
 
 from algorithm.happo import HAPPOTrainer
+from algorithm.happo.trainer import PCTA_FAMILY
 from algorithm.happo.evaluation import evaluate_actors, evaluate_recurrent_actors, summarize_records
 from env.mavuav import RED_IDS, load_environment_config
 
@@ -66,6 +67,8 @@ def _algorithm_name(
         "structured_uniform": "happo_structured_uniform",
         "recurrent": "happo_recurrent",
         "pcta": "pcta_happo",
+        "pcta_attention_only": "pcta_attention_only_happo",
+        "pcta_uniform": "pcta_uniform_happo",
     }
     try:
         return names[actor_variant]
@@ -357,8 +360,11 @@ def _initial_resolved(
         "checkpoint_interval": args.checkpoint_interval, "evaluation_interval": args.eval_interval,
         "log_interval": args.log_interval, "evaluation_episodes": args.eval_episodes,
         "final_evaluation_episodes": args.final_eval_episodes, "resume_history": [],
-        **({"pcta_consistency_coef": float(trainer.config["pcta_consistency_coef"])}
-           if trainer.config["actor_variant"] == "pcta" else {}),
+        **({
+            "attention_mode": trainer.pcta_attention_mode,
+            "pcta_consistency_coef": float(trainer.config["pcta_consistency_coef"]),
+            "effective_pcta_consistency_coef": float(trainer.config["pcta_consistency_coef"]),
+        } if trainer.config["actor_variant"] in PCTA_FAMILY else {}),
     }
 
 
@@ -441,7 +447,11 @@ def main(
         )
 
         separator = "=" * 60
-        display_algorithm = {"rc_happo": "RC-HAPPO", "pcta_happo": "PCTA-HAPPO"}.get(
+        display_algorithm = {
+            "rc_happo": "RC-HAPPO", "pcta_happo": "PCTA-HAPPO",
+            "pcta_attention_only_happo": "PCTA-ATTENTION-ONLY HAPPO",
+            "pcta_uniform_happo": "PCTA-UNIFORM HAPPO",
+        }.get(
             algorithm, algorithm.upper(),
         )
         start_lines = [
@@ -470,7 +480,7 @@ def main(
         log_observer = MilestoneObserver(args.log_interval, trainer.env_steps)
         completed = _last_completed_episodes(run_dir / "training.csv")
         evaluation_fields: tuple[str, ...] | None = None
-        training_fields = TRAINING_FIELDS + PCTA_FIELDS if actor_variant == "pcta" else TRAINING_FIELDS
+        training_fields = TRAINING_FIELDS + PCTA_FIELDS if actor_variant in PCTA_FAMILY else TRAINING_FIELDS
         configured_horizon = int(trainer.config["rollout_steps"])
         num_envs = int(trainer.config["num_envs"])
         window = ProgressWindow()
@@ -561,8 +571,11 @@ def main(
             "training_elapsed_seconds": training_elapsed,
             "final_evaluation_elapsed_seconds": final_evaluation_elapsed,
             "final_evaluations": final_rows, "checkpoint_final": "checkpoint_final.pt",
-            **({"pcta_consistency_coef": float(trainer.config["pcta_consistency_coef"])}
-               if actor_variant == "pcta" else {}),
+            **({
+                "attention_mode": trainer.pcta_attention_mode,
+                "pcta_consistency_coef": float(trainer.config["pcta_consistency_coef"]),
+                "effective_pcta_consistency_coef": float(trainer.config["pcta_consistency_coef"]),
+            } if actor_variant in PCTA_FAMILY else {}),
         }
         with (run_dir / "summary.json").open("w", encoding="utf-8") as stream:
             json.dump(summary, stream, indent=2, ensure_ascii=False)

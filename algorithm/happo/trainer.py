@@ -35,6 +35,8 @@ DEFAULTS = {
     "pcta_consistency_coef": 0.05,
 }
 
+PCTA_FAMILY = frozenset(("pcta", "pcta_attention_only", "pcta_uniform"))
+
 RESUME_CONFIG_FIELDS = (
     "environment_profile", "seed", "num_envs", "rollout_steps", "gamma", "gae_lambda",
     "ppo_epochs", "minibatch_size", "clip_coef", "actor_learning_rate",
@@ -58,6 +60,8 @@ class HAPPOTrainer:
         self.config = deepcopy(DEFAULTS)
         if config: self.config.update(dict(config.get("training", config)))
         c = self.config
+        if c["actor_variant"] in ("pcta_attention_only", "pcta_uniform"):
+            c["pcta_consistency_coef"] = 0.0
         if c["environment_profile"] not in ("learnability", "main"):
             raise ValueError("environment_profile must be 'learnability' or 'main'")
         if c["method_variant"] not in ("baseline", "agp"):
@@ -101,15 +105,19 @@ class HAPPOTrainer:
                 observation_dim=OBS_DIM, action_dim=3, hidden_dim=int(c["hidden_dim"]),
                 recurrent_hidden_dim=int(c["recurrent_hidden_dim"]),
             ).to(self.device)
-        elif c["actor_variant"] == "pcta":
+        elif c["actor_variant"] in PCTA_FAMILY:
             self.actors = PCTAIndependentActors(
                 observation_dim=OBS_DIM, action_dim=3,
                 context_dim=int(c["pcta_context_dim"]),
                 enemy_dim=int(c["pcta_enemy_dim"]),
                 hidden_dim=int(c["pcta_hidden_dim"]),
+                attention_mode="uniform" if c["actor_variant"] == "pcta_uniform" else "learned",
             ).to(self.device)
         else:
-            raise ValueError("actor_variant must be 'vanilla', 'hrta', 'structured_uniform', 'recurrent' or 'pcta'")
+            raise ValueError(
+                "actor_variant must be 'vanilla', 'hrta', 'structured_uniform', 'recurrent', "
+                "'pcta', 'pcta_attention_only' or 'pcta_uniform'"
+            )
         if float(c["pcta_consistency_coef"]) < 0.0:
             raise ValueError("pcta_consistency_coef cannot be negative")
         if c["critic_variant"] == "relational":
@@ -139,14 +147,15 @@ class HAPPOTrainer:
         }
 
     @property
-    def actor_architecture(self) -> dict[str, int]:
-        if self.config["actor_variant"] == "pcta":
+    def actor_architecture(self) -> dict[str, Any]:
+        if self.config["actor_variant"] in PCTA_FAMILY:
             return {
                 "observation_dim": OBS_DIM, "context_input_dim": 44,
                 "context_dim": int(self.config["pcta_context_dim"]),
                 "enemy_block_dim": 14, "enemy_dim": int(self.config["pcta_enemy_dim"]),
                 "enemy_slots": 4, "head_hidden_dim": int(self.config["pcta_hidden_dim"]),
                 "action_dim": 3,
+                "attention_mode": self.pcta_attention_mode,
             }
         if self.config["actor_variant"] == "recurrent":
             return {
@@ -184,6 +193,12 @@ class HAPPOTrainer:
     def is_recurrent(self) -> bool:
         return self.config["actor_variant"] == "recurrent"
 
+    @property
+    def pcta_attention_mode(self) -> str | None:
+        if self.config["actor_variant"] not in PCTA_FAMILY:
+            return None
+        return "uniform" if self.config["actor_variant"] == "pcta_uniform" else "learned"
+
     def make_buffer(self, horizon: int) -> RolloutBuffer:
         if self.is_recurrent:
             return RecurrentRolloutBuffer(
@@ -199,7 +214,10 @@ class HAPPOTrainer:
                 f"incompatible actor architecture: checkpoint={checkpoint_variant!r} "
                 f"current={self.config['actor_variant']!r}"
             )
-        if checkpoint_variant in ("hrta", "structured_uniform", "recurrent", "pcta") and checkpoint_architecture != self.actor_architecture:
+        if checkpoint_variant == "pcta" and checkpoint_architecture is not None:
+            checkpoint_architecture = dict(checkpoint_architecture)
+            checkpoint_architecture.setdefault("attention_mode", "learned")
+        if checkpoint_variant in ("hrta", "structured_uniform", "recurrent", *PCTA_FAMILY) and checkpoint_architecture != self.actor_architecture:
             raise RuntimeError(
                 f"incompatible actor architecture: checkpoint={checkpoint_architecture!r} "
                 f"current={self.actor_architecture!r}"
@@ -344,7 +362,7 @@ class HAPPOTrainer:
         pcta_pairs = 0
         pcta_attention_entropy_sum = 0.0
         pcta_switches = 0
-        if c["actor_variant"] == "pcta":
+        if c["actor_variant"] in PCTA_FAMILY:
             self.last_pcta_factor_history = [factor.detach().cpu().numpy().copy()]
         clip = float(c["clip_coef"]); mini = int(c["minibatch_size"]); total = len(advantages)
         for agent in order:
@@ -367,7 +385,7 @@ class HAPPOTrainer:
                     optimizer.zero_grad(); loss.backward()
                     nn.utils.clip_grad_norm_(self.actors.actors[agent].parameters(), float(c["max_grad_norm"])); optimizer.step()
                     actor_losses[agent].append(float(policy_loss.item())); entropies.append(float(entropy.mean().item()))
-            if c["actor_variant"] == "pcta":
+            if c["actor_variant"] in PCTA_FAMILY:
                 temporal = pursuit_consistency(
                     self.actors.actors[agent],
                     observations.reshape(self.buffer.horizon, self.buffer.num_envs, num_agents, OBS_DIM)[:, :, agent],
@@ -376,10 +394,11 @@ class HAPPOTrainer:
                     active_masks.reshape(self.buffer.horizon, self.buffer.num_envs, num_agents)[:, :, agent],
                 )
                 if temporal.valid_pairs:
-                    weighted_consistency = float(c["pcta_consistency_coef"]) * temporal.raw_loss
-                    optimizer.zero_grad(); weighted_consistency.backward()
-                    nn.utils.clip_grad_norm_(self.actors.actors[agent].parameters(), float(c["max_grad_norm"]))
-                    optimizer.step()
+                    if c["actor_variant"] == "pcta":
+                        weighted_consistency = float(c["pcta_consistency_coef"]) * temporal.raw_loss
+                        optimizer.zero_grad(); weighted_consistency.backward()
+                        nn.utils.clip_grad_norm_(self.actors.actors[agent].parameters(), float(c["max_grad_norm"]))
+                        optimizer.step()
                     pcta_loss_sum += float(temporal.raw_loss.detach().item()) * temporal.valid_pairs
                     pcta_pairs += temporal.valid_pairs
                     pcta_attention_entropy_sum += temporal.attention_entropy_sum
@@ -387,7 +406,7 @@ class HAPPOTrainer:
             with torch.no_grad():
                 new_all, _ = self.actors.actors[agent].evaluate_actions(observations[:, agent], actions[:, agent])
                 factor = preceding_factor_update(factor, old_log_probs[:, agent], new_all, active_masks[:, agent])
-            if c["actor_variant"] == "pcta":
+            if c["actor_variant"] in PCTA_FAMILY:
                 self.last_pcta_factor_history.append(factor.detach().cpu().numpy().copy())
         critic_losses = []
         for _ in range(int(c["ppo_epochs"])):
@@ -400,7 +419,7 @@ class HAPPOTrainer:
                 critic_losses.append(float(value_loss.item()))
         metrics: dict[str, Any] = {f"actor_{i}_loss": float(np.mean(actor_losses[i])) if actor_losses[i] else 0.0 for i in range(num_agents)}
         metrics.update({"actor_loss": float(np.mean([v for rows in actor_losses for v in rows])), "critic_loss": float(np.mean(critic_losses)), "entropy": float(np.mean(entropies)), "agent_update_order": order})
-        if c["actor_variant"] == "pcta":
+        if c["actor_variant"] in PCTA_FAMILY:
             raw_consistency = pcta_loss_sum / pcta_pairs if pcta_pairs else 0.0
             metrics.update({
                 "pcta_consistency_loss": raw_consistency,
@@ -546,8 +565,12 @@ class HAPPOTrainer:
     def save(self, path: str | Path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         payload = {"environment_version": ENVIRONMENT_VERSION, "environment_profile": self.config["environment_profile"], "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM, "actor_variant": self.config["actor_variant"], "critic_variant": self.config["critic_variant"], "method_variant": self.config["method_variant"], "actor_architecture": self.actor_architecture, "critic_architecture": self.critic_architecture, "critic_parameter_count": self.critic_parameter_count, "actors": self.actors.state_dict(), "critic": self.critic.state_dict(), "config": self.config}
-        if self.config["actor_variant"] == "pcta":
-            payload["pcta_consistency_coef"] = float(self.config["pcta_consistency_coef"])
+        if self.config["actor_variant"] in PCTA_FAMILY:
+            payload.update({
+                "attention_mode": self.pcta_attention_mode,
+                "pcta_consistency_coef": float(self.config["pcta_consistency_coef"]),
+                "effective_pcta_consistency_coef": float(self.config["pcta_consistency_coef"]),
+            })
         torch.save(payload, path)
 
     def checkpoint_state(self) -> dict[str, Any]:
@@ -584,8 +607,12 @@ class HAPPOTrainer:
                 "vector_base_seed": self.vector_env.base_seed,
             },
         }
-        if self.config["actor_variant"] == "pcta":
-            state["pcta_consistency_coef"] = float(self.config["pcta_consistency_coef"])
+        if self.config["actor_variant"] in PCTA_FAMILY:
+            state.update({
+                "attention_mode": self.pcta_attention_mode,
+                "pcta_consistency_coef": float(self.config["pcta_consistency_coef"]),
+                "effective_pcta_consistency_coef": float(self.config["pcta_consistency_coef"]),
+            })
         if self.is_recurrent:
             state["rollout_state"]["actor_hidden_states"] = self.actor_hidden_states.copy()
             state["rollout_state"]["actor_recurrent_masks"] = self.actor_recurrent_masks.copy()
@@ -605,7 +632,7 @@ class HAPPOTrainer:
         self._validate_actor_architecture(data)
         self._validate_critic_architecture(data)
         saved_config = data.get("trainer_config", data.get("config", {}))
-        if self.config["actor_variant"] == "pcta":
+        if self.config["actor_variant"] in PCTA_FAMILY:
             checkpoint_coef = data.get("pcta_consistency_coef", saved_config.get("pcta_consistency_coef"))
             if checkpoint_coef is None or float(checkpoint_coef) != float(self.config["pcta_consistency_coef"]):
                 raise RuntimeError("resume PCTA consistency coefficient mismatch")
@@ -615,6 +642,15 @@ class HAPPOTrainer:
                         f"resume config mismatch: {field} checkpoint={saved_config.get(field)!r} "
                         f"current={self.config.get(field)!r}"
                     )
+            checkpoint_attention_mode = data.get(
+                "attention_mode",
+                (data.get("actor_architecture") or {}).get("attention_mode", "learned"),
+            )
+            if checkpoint_attention_mode != self.pcta_attention_mode:
+                raise RuntimeError(
+                    f"resume PCTA attention mode mismatch: checkpoint={checkpoint_attention_mode!r} "
+                    f"current={self.pcta_attention_mode!r}"
+                )
         checkpoint_method = data.get("method_variant", saved_config.get("method_variant", "baseline"))
         if checkpoint_method != self.config["method_variant"]:
             raise RuntimeError(

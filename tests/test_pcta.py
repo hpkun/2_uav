@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 
 from algorithm.modules.pcta import PCTAActor, PCTAIndependentActors, pursuit_consistency
@@ -43,6 +44,68 @@ def test_no_valid_blue_has_zero_attention_and_finite_action():
     actions, log_prob = actor.sample(obs)
     assert torch.equal(weights, torch.zeros_like(weights))
     assert torch.isfinite(actions).all() and torch.isfinite(log_prob).all()
+
+
+@pytest.mark.parametrize(
+    ("valid_slots", "expected"),
+    [
+        ((0, 1, 2, 3), (0.25, 0.25, 0.25, 0.25)),
+        ((0, 2), (0.5, 0.0, 0.5, 0.0)),
+        ((3,), (0.0, 0.0, 0.0, 1.0)),
+        ((), (0.0, 0.0, 0.0, 0.0)),
+    ],
+)
+def test_uniform_attention_is_exact_for_every_valid_count(valid_slots, expected):
+    actor = PCTAActor(attention_mode="uniform")
+    obs = observations(1)
+    for slot, start in enumerate((44, 58, 72, 86)):
+        obs[..., start + 9] = float(slot in valid_slots)
+        obs[..., start + 10] = float(slot in valid_slots)
+        obs[..., start + 11] = 0.0
+    weights = actor.attention_weights(obs)
+    assert torch.equal(weights, torch.tensor([expected], dtype=weights.dtype))
+
+
+def test_uniform_masked_embeddings_make_no_aggregate_contribution():
+    actor = PCTAActor(attention_mode="uniform")
+    obs = observations(2)
+    for start in (58, 72, 86):
+        obs[..., start + 9] = 0.0
+        obs[..., start + 10] = obs[..., start + 11] = 0.0
+    features_before, details = actor.encode(obs)
+    changed = obs.clone()
+    changed[..., 58:100] = 1.0e6
+    for start in (58, 72, 86):
+        changed[..., start + 9] = 0.0
+        changed[..., start + 10] = changed[..., start + 11] = 0.0
+    features_after, _ = actor.encode(changed)
+    assert torch.equal(details["enemy_attention"], torch.tensor([[1.0, 0.0, 0.0, 0.0]]).expand(2, -1))
+    assert torch.equal(features_before, features_after)
+
+
+def test_pcta_attention_modes_share_initial_parameters_and_learned_forward():
+    actors = []
+    for mode in ("learned", "learned", "uniform"):
+        torch.manual_seed(4821)
+        actors.append(PCTAActor(attention_mode=mode))
+    states = [actor.state_dict() for actor in actors]
+    assert states[0].keys() == states[1].keys() == states[2].keys()
+    assert all(
+        states[0][key].shape == states[index][key].shape
+        and torch.equal(states[0][key], states[index][key])
+        for index in (1, 2) for key in states[0]
+    )
+    assert all(sum(parameter.numel() for parameter in actor.parameters()) == 34758 for actor in actors)
+    assert any(name.startswith("query.") for name in states[2])
+    obs = observations(7)
+    full_actions, _ = actors[0].sample(obs, deterministic=True)
+    attention_only_actions, _ = actors[1].sample(obs, deterministic=True)
+    assert torch.equal(full_actions, attention_only_actions)
+
+
+def test_pcta_rejects_unknown_attention_mode():
+    with pytest.raises(ValueError, match="attention_mode"):
+        PCTAActor(attention_mode="other")
 
 
 def test_enemy_slots_share_one_encoder_and_red_actors_are_parameter_independent():

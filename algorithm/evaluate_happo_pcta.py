@@ -48,8 +48,14 @@ def main() -> None:
         "observation_dim", "context_input_dim", "context_dim", "enemy_block_dim",
         "enemy_dim", "enemy_slots", "head_hidden_dim", "action_dim",
     }
-    if not isinstance(architecture, dict) or set(architecture) != expected_keys:
+    if (
+        not isinstance(architecture, dict)
+        or not expected_keys <= set(architecture)
+        or not set(architecture) <= expected_keys | {"attention_mode"}
+    ):
         raise RuntimeError("PCTA checkpoint has incompatible actor architecture metadata")
+    if architecture.get("attention_mode", "learned") != "learned":
+        raise RuntimeError("Full PCTA evaluator requires attention_mode='learned'")
     if (
         int(architecture["observation_dim"]) != OBS_DIM
         or int(architecture["context_input_dim"]) != 44
