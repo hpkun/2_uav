@@ -23,8 +23,11 @@ def _run(*arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_pre_v34_checkpoints_are_rejected_by_v34_evaluator(tmp_path):
-    for version in ("heterogeneous_mavuav_4v4_v3_2", "heterogeneous_mavuav_4v4_v3_3"):
+def test_pre_v35_checkpoints_are_rejected_by_v35_evaluator(tmp_path):
+    for version in (
+        "heterogeneous_mavuav_4v4_v3_2", "heterogeneous_mavuav_4v4_v3_3",
+        "heterogeneous_mavuav_4v4_v3_4",
+    ):
         checkpoint = tmp_path / f"{version}.pt"
         torch.save({"environment_version": version, "observation_dim": 100, "global_state_dim": 117}, checkpoint)
         result = subprocess.run(

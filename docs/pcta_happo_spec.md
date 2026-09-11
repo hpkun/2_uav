@@ -1,6 +1,6 @@
 # PCTA-HAPPO method specification
 
-PCTA-HAPPO means Pursuit-Consistent Target Attention HAPPO. It is an actor-only variant for the frozen v3.4 100D/117D environment. The centralized MLP critic, vanilla HAPPO sequential update, preceding factor, GAE, PPO clipping, advantage normalization, entropy coefficient (`0.01`) and environment are unchanged. The four Red actors remain parameter-independent.
+PCTA-HAPPO means Pursuit-Consistent Target Attention HAPPO. It is an actor-only variant for the frozen v3.5 100D/117D environment. The centralized MLP critic, vanilla HAPPO sequential update, preceding factor, GAE, PPO clipping, advantage normalization, entropy coefficient (`0.01`) and environment are unchanged. The four Red actors remain parameter-independent.
 
 ## Actor
 

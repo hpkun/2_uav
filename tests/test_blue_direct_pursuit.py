@@ -31,12 +31,12 @@ def test_inverse_trim_map_round_trip_for_random_actions():
         np.testing.assert_allclose(inverse_trim_map(mapped, aircraft.state, aircraft.spec), action, atol=1e-12)
 
 
-def test_direct_pursuit_actions_are_finite_bounded_and_have_no_lookahead_calls():
+def test_periodic_guidance_actions_are_finite_bounded_and_have_no_lookahead_calls():
     env = make_env(); policy = env.blue_policy
     source = inspect.getsource(BluePolicy)
     assert "integrate_interval" not in source and "situation_reward" not in source
     for blue_id in env.blue_ids:
-        action = policy.action(env.entities[blue_id], red_entities(env))
+        action = policy.action(env.entities[blue_id], red_entities(env), 0)
         assert action.shape == (3,) and np.isfinite(action).all()
         assert np.all(np.abs(action) <= 1.0)
 
@@ -49,7 +49,7 @@ def _heading_error_after(target_y: float) -> tuple[float, float, np.ndarray]:
     for aid in RED_IDS[1:]: env.entities[aid].state.alive = False
     desired = float(np.arctan2(target_y, 3000.0))
     before = abs(wrap_angle(desired - blue.state.psi))
-    action = env.blue_policy.action(blue, red_entities(env))
+    action = env.blue_policy.action(blue, red_entities(env), 0)
     after_state = integrate_interval(blue.state, action, blue.spec, env.physics_dt, env.physics_substeps)
     return before, abs(wrap_angle(desired - after_state.psi)), action
 
@@ -71,7 +71,7 @@ def _pitch_error_after(target_h: float) -> tuple[float, float, np.ndarray]:
     target.state = AircraftState(3000.0, 0.0, target_h, 275.0, 0.0, 0.0, True)
     for aid in RED_IDS[1:]: env.entities[aid].state.alive = False
     desired = float(np.arctan2(target_h - 5000.0, 3000.0))
-    action = env.blue_policy.action(blue, red_entities(env))
+    action = env.blue_policy.action(blue, red_entities(env), 0)
     after_state = integrate_interval(blue.state, action, blue.spec, env.physics_dt, env.physics_substeps)
     return abs(desired), abs(desired - after_state.theta), action
 
@@ -91,7 +91,7 @@ def test_zero_angular_error_has_zero_trim_action_and_holds_speed():
     blue.state = AircraftState(0.0, 0.0, 5000.0, 275.0, 0.0, 0.0, True)
     env.entities["MAV"].state = AircraftState(3000.0, 0.0, 5000.0, 275.0, 0.0, 0.0, True)
     for aid in RED_IDS[1:]: env.entities[aid].state.alive = False
-    action = env.blue_policy.action(blue, red_entities(env))
+    action = env.blue_policy.action(blue, red_entities(env), 0)
     after = integrate_interval(blue.state, action, blue.spec, env.physics_dt, env.physics_substeps)
     np.testing.assert_allclose(action, np.zeros(3), atol=1e-12)
     assert np.isclose(after.v, blue.state.v, atol=1e-9)
@@ -100,13 +100,13 @@ def test_zero_angular_error_has_zero_trim_action_and_holds_speed():
 def test_altitude_and_horizontal_emergency_rules_are_explicit():
     env = make_env(); blue = env.entities["Blue1"]
     blue.state.h, blue.state.theta = 1500.0, -0.3
-    np.testing.assert_array_equal(env.blue_policy.action(blue, red_entities(env)), [-1.0, 1.0, 0.0])
+    np.testing.assert_array_equal(env.blue_policy.action(blue, red_entities(env), 0), [-1.0, 1.0, 0.0])
     blue.state.h, blue.state.theta = 19500.0, 0.3
-    np.testing.assert_array_equal(env.blue_policy.action(blue, red_entities(env)), [-1.0, -1.0, 0.0])
+    np.testing.assert_array_equal(env.blue_policy.action(blue, red_entities(env), 0), [-1.0, -1.0, 0.0])
     blue.state = AircraftState(99_000.0, 0.0, 5000.0, 275.0, 0.0, 0.0, True)
-    diagnostics = env.blue_policy.diagnostics(blue, red_entities(env))
+    diagnostics = env.blue_policy.diagnostics(blue, red_entities(env), 0)
     assert diagnostics["blue_horizontal_recovery_active"]
-    assert env.blue_policy.action(blue, red_entities(env))[2] < 0.0
+    assert env.blue_policy.action(blue, red_entities(env), 0)[2] < 0.0
 
 
 def test_random_legal_state_stress_has_no_boundary_controller_invariant():
@@ -121,18 +121,18 @@ def test_random_legal_state_stress_has_no_boundary_controller_invariant():
             float(rng.uniform(-np.pi / 3, np.pi / 3)),
             float(rng.uniform(-np.pi, np.pi)), True,
         )
-        action = env.blue_policy.action(blue, red_entities(env))
+        action = env.blue_policy.action(blue, red_entities(env), 0)
         assert np.isfinite(action).all() and np.all(np.abs(action) <= 1.0)
 
 
-def test_direct_pursuit_can_enter_formal_attack_geometry():
+def test_periodic_guidance_blue_can_enter_formal_attack_geometry():
     env = make_env(); blue = env.entities["Blue1"]; target = env.entities["MAV"]
     blue.state = AircraftState(0.0, 0.0, 5000.0, 300.0, 0.0, 0.0, True)
     target.state = AircraftState(4500.0, 0.0, 5000.0, 250.0, 0.0, 0.0, True)
     for aid in RED_IDS[1:]: env.entities[aid].state.alive = False
     reached = False
     for _ in range(45):
-        action = env.blue_policy.action(blue, red_entities(env))
+        action = env.blue_policy.action(blue, red_entities(env), _)
         blue.state = integrate_interval(blue.state, action, blue.spec, env.physics_dt, env.physics_substeps)
         target.state = integrate_interval(target.state, np.zeros(3), target.spec, env.physics_dt, env.physics_substeps)
         geometry = compute_pairwise_geometry(blue.state, target.state)

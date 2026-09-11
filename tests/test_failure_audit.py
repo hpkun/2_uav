@@ -49,6 +49,8 @@ def synthetic_row(outcome: str, kills: int) -> dict:
         "tail_min_survivor_visible_fraction": 1.0,
         "tail_max_survivor_invisible_streak": 0,
         "blue_target_id": '{"UAV1": 1}', "blue_target_is_MAV": 0.0,
+        "blue_guidance_refresh_due": 0.5, "blue_guidance_age": 0.5,
+        "blue_desired_heading": 0.0, "blue_desired_pitch": 0.0,
         "blue_boundary_recovery_active": 0.0, "blue_horizontal_recovery_active": 0.0,
         "reward_credit_samples": 4,
         "reward_best_equals_closest_count": 3, "reward_best_closing_comparable_samples": 3,
@@ -214,8 +216,8 @@ def test_blue_action_audit_matches_formal_direct_controller_state(altitude, thet
     env.reset(seed=3)
     blue = env.entities["Blue1"]
     blue.state.h, blue.state.theta = altitude, theta
+    actual = env.blue_policy.action(blue, {red_id: env.entities[red_id] for red_id in RED_IDS}, 0)
     diagnostic = blue_action_diagnostics(env, "Blue1")
-    actual = env.blue_policy.action(blue, {red_id: env.entities[red_id] for red_id in RED_IDS})
     assert diagnostic["blue_target_id"] == env.blue_policy.select_target(
         blue, {red_id: env.entities[red_id] for red_id in RED_IDS},
     ).aircraft_id
@@ -257,8 +259,11 @@ def test_checkpoint_loader_rejects_nonbaseline_contract(tmp_path):
         load_vanilla_baseline_checkpoint(checkpoint, "cpu")
 
 
-@pytest.mark.parametrize("version", ["heterogeneous_mavuav_4v4_v3_2", "heterogeneous_mavuav_4v4_v3_3"])
-def test_failure_audit_rejects_pre_v34_checkpoint(tmp_path, version):
+@pytest.mark.parametrize("version", [
+    "heterogeneous_mavuav_4v4_v3_2", "heterogeneous_mavuav_4v4_v3_3",
+    "heterogeneous_mavuav_4v4_v3_4",
+])
+def test_failure_audit_rejects_pre_v35_checkpoint(tmp_path, version):
     actors = IndependentActors(hidden_dim=8)
     checkpoint = tmp_path / "v32.pt"
     torch.save({
@@ -334,9 +339,12 @@ def test_blue_controller_audit_reports_target_and_emergency_flags():
     blue = env.entities["Blue1"]
     blue.state.h = 1500.0
     blue.state.theta = -0.8
+    env.blue_policy.action(blue, {red_id: env.entities[red_id] for red_id in RED_IDS}, 0)
     diagnostic = blue_action_diagnostics(env, "Blue1")
     assert set(diagnostic) == {
         "blue_target_id", "blue_target_is_MAV",
+        "blue_guidance_refresh_due", "blue_guidance_age",
+        "blue_desired_heading", "blue_desired_pitch",
         "blue_boundary_recovery_active", "blue_horizontal_recovery_active",
     }
     assert diagnostic["blue_target_id"] in RED_IDS

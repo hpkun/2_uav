@@ -1,6 +1,6 @@
 # Recurrent HAPPO baseline
 
-R-HAPPO is the recurrent-actor baseline for the frozen v3.4 environment contract. It does not change environment dynamics, combat, reward, sensing, the 100D actor observation, or the 117D centralized state.
+R-HAPPO is the recurrent-actor baseline for the frozen v3.5 environment contract. It does not change environment dynamics, combat, reward, sensing, the 100D actor observation, or the 117D centralized state.
 
 - Four independent actors with no parameter sharing: `100-FC128-Tanh-GRU128-FC128-Tanh-3` plus one state-independent `log_std(3)` per actor.
 - Unchanged centralized-MLP design: `117-FC128-Tanh-FC128-Tanh-1`.

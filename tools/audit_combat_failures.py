@@ -1,4 +1,4 @@
-"""Episode-level failure audit for canonical v3.4 Vanilla HAPPO checkpoints."""
+"""Episode-level failure audit for canonical v3.5 Vanilla HAPPO checkpoints."""
 from __future__ import annotations
 
 import argparse
@@ -48,7 +48,8 @@ EPISODE_FIELDS = (
     "post_third_mean_speed", "post_third_min_speed", "post_third_max_speed",
     "post_third_mean_altitude", "post_third_min_altitude", "post_third_max_altitude",
     "post_third_mean_theta", "post_third_mean_heading",
-    "blue_target_id", "blue_target_is_MAV",
+    "blue_target_id", "blue_target_is_MAV", "blue_guidance_refresh_due",
+    "blue_guidance_age", "blue_desired_heading", "blue_desired_pitch",
     "blue_boundary_recovery_active", "blue_horizontal_recovery_active",
     "reward_credit_samples",
     "reward_best_equals_closest_count", "reward_best_equals_closest_fraction",
@@ -104,10 +105,10 @@ def _action_array(actors: Any, observations: Mapping[str, np.ndarray], device: s
 
 
 def blue_action_diagnostics(env: HeterogeneousMAVUAVAirCombatEnv, blue_id: str) -> dict[str, Any]:
-    """Read the O(1) direct-pursuit target and emergency-controller state."""
+    """Read periodic-guidance state without changing the controller cache."""
     blue = env.entities[blue_id]
     red = {red_id: env.entities[red_id] for red_id in RED_IDS}
-    return env.blue_policy.diagnostics(blue, red)
+    return env.blue_policy.diagnostics(blue, red, env.step_count)
 
 
 def blue_geometry_diagnostics(
@@ -355,6 +356,18 @@ def _episode_row(
             record["blue_target_is_MAV"] for record in recovery_records
             if record["blue_target_id"] is not None
         ]),
+        "blue_guidance_refresh_due": _fraction([
+            record["blue_guidance_refresh_due"] for record in recovery_records
+        ]),
+        "blue_guidance_age": _mean([
+            record["blue_guidance_age"] for record in recovery_records
+        ]),
+        "blue_desired_heading": _mean([
+            record["blue_desired_heading"] for record in recovery_records
+        ]),
+        "blue_desired_pitch": _mean([
+            record["blue_desired_pitch"] for record in recovery_records
+        ]),
         "blue_boundary_recovery_active": _fraction([
             record["blue_boundary_recovery_active"] for record in recovery_records
         ]),
@@ -505,6 +518,8 @@ def summarize_audit(rows: list[dict[str, Any]], policy_mode: str, seed: int) -> 
         },
         "blue_controller": {
             "target_MAV_fraction": _mean([row["blue_target_is_MAV"] for row in rows]),
+            "guidance_refresh_due_fraction": _mean([row["blue_guidance_refresh_due"] for row in rows]),
+            "mean_guidance_age": _mean([row["blue_guidance_age"] for row in rows]),
             "boundary_recovery_fraction": _mean([row["blue_boundary_recovery_active"] for row in rows]),
             "horizontal_recovery_fraction": _mean([row["blue_horizontal_recovery_active"] for row in rows]),
         },

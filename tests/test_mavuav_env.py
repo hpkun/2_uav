@@ -361,7 +361,7 @@ def test_v33_blue_recovery_guard_expands_for_steep_uav_descent():
     blue.state.theta = -np.pi / 3.0
     assert e.blue_policy._altitude_recovery_guard(blue.state, blue) > 6000.0
     np.testing.assert_array_equal(
-        e.blue_policy.action(blue, {aid: e.entities[aid] for aid in RED_IDS}), [-1.0, 1.0, 0.0],
+        e.blue_policy.action(blue, {aid: e.entities[aid] for aid in RED_IDS}, 0), [-1.0, 1.0, 0.0],
     )
 
 
@@ -442,7 +442,7 @@ def test_uav3_loss_and_four_blue_kill_event_rewards_remain_per_aircraft():
 def test_all_four_blue_aircraft_act_independently_and_mav_fallback():
     e = env()
     acted = []
-    e.blue_policy.action = lambda aircraft, red_entities: acted.append(aircraft.aircraft_id) or np.zeros(3)
+    e.blue_policy.action = lambda aircraft, red_entities, decision_step: acted.append(aircraft.aircraft_id) or np.zeros(3)
     e.step(np.zeros((len(RED_IDS), 3)))
     assert acted == list(BLUE_IDS)
 
@@ -583,7 +583,7 @@ def test_blue_policy_emergency_rule_keeps_one_step_state_in_bounds(axis, value, 
     elif axis == "y": blue.state.y = value
     else: blue.state.h = value
     blue.state.psi, blue.state.theta = heading, theta
-    action = e.blue_policy.action(blue, {aid: e.entities[aid] for aid in RED_IDS})
+    action = e.blue_policy.action(blue, {aid: e.entities[aid] for aid in RED_IDS}, 0)
     predicted = integrate_interval(blue.state, action, blue.spec, e.physics_dt, e.physics_substeps)
     assert e.blue_policy._within_battlefield(predicted)
 
@@ -592,8 +592,8 @@ def test_blue_policy_outside_horizontal_boundary_uses_finite_center_recovery():
     e = env(); blue = e.entities["Blue1"]
     blue.state.x = e.config["battlefield"]["x"][1] + 1000.0
     blue.state.psi = 0.0
-    diagnostics = e.blue_policy.diagnostics(blue, {aid: e.entities[aid] for aid in RED_IDS})
-    action = e.blue_policy.action(blue, {aid: e.entities[aid] for aid in RED_IDS})
+    diagnostics = e.blue_policy.diagnostics(blue, {aid: e.entities[aid] for aid in RED_IDS}, 0)
+    action = e.blue_policy.action(blue, {aid: e.entities[aid] for aid in RED_IDS}, 0)
     assert diagnostics["blue_horizontal_recovery_active"] and np.isfinite(action).all()
 
 
@@ -604,10 +604,10 @@ def test_blue_policy_y_mirror_changes_only_yaw_overload_action():
     blue = e.entities["Blue1"]
     blue.state = AircraftState(0.0, 1200.0, 5000.0, 325.0, 0.1, -0.2, True)
     red["UAV2"].state = AircraftState(2500.0, 2200.0, 5300.0, 225.0, -0.05, 0.3, True)
-    action = e.blue_policy.action(blue, red)
+    action = e.blue_policy.action(blue, red, 0)
     blue.state.y *= -1; blue.state.psi *= -1
     red["UAV2"].state.y *= -1; red["UAV2"].state.psi *= -1
-    mirrored = e.blue_policy.action(blue, red)
+    mirrored = e.blue_policy.action(blue, red, 2)
     np.testing.assert_array_equal(mirrored, [action[0], action[1], -action[2]])
 
 

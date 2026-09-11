@@ -13,17 +13,36 @@ from env.mavuav import (
 from tools.audit_environment_foundations import audit_foundations, write_summary
 
 
-def test_v34_foundation_contract_is_exact_and_frozen_fields_are_unchanged():
+def test_v35_foundation_contract_is_exact_and_frozen_fields_are_unchanged():
     config = load_environment_config(None)
-    assert ENVIRONMENT_VERSION == config["environment_version"] == "heterogeneous_mavuav_4v4_v3_4"
+    assert ENVIRONMENT_VERSION == config["environment_version"] == "heterogeneous_mavuav_4v4_v3_5"
     assert (OBS_DIM, GLOBAL_STATE_DIM) == (100, 117)
     assert config["sensing"] == {"MAV_range": 12000.0, "UAV_range": 8000.0}
     assert config["simulation"] == {"decision_dt": 1.0, "physics_dt": 0.1, "max_decision_steps": 75}
+    assert config["battlefield"] == {
+        "x": (-100000.0, 100000.0), "y": (-100000.0, 100000.0),
+        "altitude": (1000.0, 20000.0),
+    }
+    assert config["aircraft_specs"] == {
+        "MAV": {"v_min": 250.0, "v_max": 400.0, "nx": [-1.0, 5.0], "ny": [-1.5, 2.0], "nz": [-3.0, 3.0]},
+        "UAV": {"v_min": 150.0, "v_max": 300.0, "nx": [-1.0, 5.0], "ny": [-1.5, 1.5], "nz": [-2.0, 2.0]},
+        "Blue": {"v_min": 150.0, "v_max": 300.0, "nx": [-1.0, 5.0], "ny": [-1.5, 1.5], "nz": [-2.0, 2.0]},
+    }
+    assert config["randomization_profiles"]["main"] == {
+        "team_xy_jitter": 1500.0, "slot_xy_jitter": 300.0,
+        "altitude_jitter": 400.0, "speed_jitter": 20.0, "heading_jitter_deg": 10.0,
+    }
     assert config["combat"] == {"distance": (1000.0, 3000.0), "ata_deg": 30.0, "aa_deg": 90.0, "hold_steps": 3}
     assert config["reward"] == {
         "blue_kill": 50.0, "uav_loss": -10.0, "mav_loss": -100.0,
         "terminal_red_win": 100.0, "terminal_blue_win": -100.0, "terminal_draw": 0.0,
     }
+    assert config["normalization"] == {
+        "self_xy_scale": 30000.0, "relative_xy_scale": 12000.0,
+        "relative_altitude_scale": 10000.0, "distance_scale": 12000.0,
+        "relative_velocity_scale": 800.0,
+    }
+    assert config["safety"] == {"red_safe_distance": 100.0, "red_safe_distance_penalty": -1.0}
 
 
 def test_v33_initial_speed_and_rear_formation_avoid_clipping_by_construction():

@@ -2,7 +2,9 @@
 
 本项目包含异构 `1 MAV + 3 UAV vs 4 Blue` 环境、vanilla HAPPO/MAPPO 实现，以及独立的评估和诊断工具。正式研究代码位于 `env/` 与 `algorithm/`，不需要安装当前项目 package。
 
-当前最终冻结的 canonical contract 为 `heterogeneous_mavuav_4v4_v3_4`，actor observation 为 100D，centralized state 为 117D。场景为 1 MAV + 3 Red UAV 对 4 Blue-team UAV；红蓝 UAV 使用完全相同的动力学参数，八架飞机名义初速统一为 275 m/s，MAV 在三架 Red UAV 前线后方 1 km。四架 Blue 各自从所有存活 Red（包括 MAV）中选择距离最近者，再执行边界安全、物理一致的确定性直接几何追击。Blue 使用 privileged true state；这与 Red 的 12/8 km sensing 和理想 datalink 是刻意保留的 benchmark 信息结构非对称。v3.3 及更早 checkpoint 不能续跑、评估、回放或审计。
+当前最终冻结的 canonical contract 为 `heterogeneous_mavuav_4v4_v3_5`，actor observation 为 100D，centralized state 为 117D。场景为 1 MAV + 3 Red UAV 对 4 Blue-team UAV；红蓝 UAV 使用完全相同的动力学参数，八架飞机名义初速统一为 275 m/s，MAV 在三架 Red UAV 前线后方 1 km。四架 Blue 各自选择最近存活 Red（包括 MAV），每两个 decision steps 刷新一次目标时刻的 heading/pitch，并在两步之间保持这组 guidance。Blue 使用 privileged true state；这与 Red 的 12/8 km sensing 和理想 datalink 是刻意保留的 benchmark 信息结构非对称。v3.4 及更早 checkpoint 不能续跑、评估、回放或审计。
+
+v3.5 相对 v3.4 唯一的科学行为变化是上述 Blue guidance hold。正式 v3.4 Vanilla HAPPO 2M 结果为 0% Red win、0 Red kills、100% draw，表明每步实时 pure pursuit 与 distance/ATA/AA/hold 攻击门形成了结构性退化几何。两步周期规则用于解除这种规则控制器与攻击判据的结构性耦合，同时保留固定规则对手和 O(1) 高速控制；这不是为了直接调高 Red 胜率。
 
 ## 环境准备
 
@@ -127,7 +129,9 @@ outputs/happo_main_seed1_5m_<timestamp>/
 python tools/audit_env.py --steps 1000 --num-envs 16
 python tools/benchmark_env.py --sample-steps 2000 --num-envs 16
 python tools/audit_environment_foundations.py --profile main --samples 10000 --seed 1000 \
-    --output outputs/foundation_v34_main
+    --output outputs/foundation_v35_main
+python tools/audit_blue_guidance_geometry.py --profile main --base-seed 1000 --seeds 20 \
+    --output-dir outputs/blue_guidance_geometry_v35
 python tools/plot_trajectory.py outputs/<run>/checkpoint_final.pt \
     --profile main --seed 1000
 ```

@@ -23,6 +23,7 @@ def _environment_state(env: HeterogeneousMAVUAVAirCombatEnv) -> dict[str, Any]:
         "blue_attack_kills": set(env._blue_attack_kills),
         "rng": deepcopy(env.rng.bit_generator.state),
         "profile": env.profile,
+        "blue_policy_state": deepcopy(env.blue_policy.state_dict()),
     }
 
 
@@ -36,6 +37,7 @@ def _restore_environment_state(env: HeterogeneousMAVUAVAirCombatEnv, state: Mapp
     env._blue_attack_kills = set(state["blue_attack_kills"])
     env.rng.bit_generator.state = deepcopy(state["rng"])
     env.profile = state["profile"]
+    env.blue_policy.load_state_dict(deepcopy(state["blue_policy_state"]))
 
 
 def _worker(

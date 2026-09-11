@@ -23,7 +23,7 @@ TYPE_ONE_HOT = {
     "UAV": (0.0, 1.0, 0.0),
     "Blue": (0.0, 0.0, 1.0),
 }
-ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_4"
+ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_5"
 OBS_DIM = 100
 GLOBAL_STATE_DIM = 117
 CROSS_TEAM_ATTACK_PAIRS = tuple((red, blue) for red in RED_IDS for blue in BLUE_IDS) + tuple(
@@ -110,10 +110,15 @@ def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
     reward_fields = {"blue_kill", "uav_loss", "mav_loss", "terminal_red_win", "terminal_blue_win", "terminal_draw"}
     if set(cfg["reward"]) != reward_fields or not np.all(np.isfinite([float(cfg["reward"][key]) for key in reward_fields])):
         raise ValueError("reward has unknown, missing or non-finite fields")
-    if set(cfg["blue_policy"]) != {"target_strategy"}:
+    if set(cfg["blue_policy"]) != {"target_strategy", "guidance_mode", "target_refresh_steps"}:
         raise ValueError("blue_policy has unknown or missing fields")
     if cfg["blue_policy"]["target_strategy"] != BluePolicy.TARGET_STRATEGY:
         raise ValueError(f"blue_policy.target_strategy must be {BluePolicy.TARGET_STRATEGY!r}")
+    if cfg["blue_policy"]["guidance_mode"] != BluePolicy.GUIDANCE_MODE:
+        raise ValueError(f"blue_policy.guidance_mode must be {BluePolicy.GUIDANCE_MODE!r}")
+    refresh_steps = cfg["blue_policy"]["target_refresh_steps"]
+    if isinstance(refresh_steps, bool) or not isinstance(refresh_steps, int) or refresh_steps != 2:
+        raise ValueError("blue_policy.target_refresh_steps must be the frozen integer value 2")
     for aircraft_id in ENTITY_IDS:
         start = cfg["scenario"]["initial"][aircraft_id]
         if set(start) != {"position", "speed", "heading_deg"} or len(start["position"]) != 3:
@@ -169,7 +174,10 @@ class HeterogeneousMAVUAVAirCombatEnv:
         self.profile = profile or str(self.config["scenario"]["default_profile"])
         if self.profile not in self.config["randomization_profiles"]:
             raise ValueError(f"unknown randomization profile: {self.profile}")
-        self.blue_policy = BluePolicy(self.decision_dt, self.physics_dt, self.config["battlefield"])
+        self.blue_policy = BluePolicy(
+            self.decision_dt, self.physics_dt, self.config["battlefield"],
+            int(self.config["blue_policy"]["target_refresh_steps"]),
+        )
         self.rng = np.random.default_rng(seed)
         self.entities: dict[str, Aircraft] = {}
         self.step_count = 0
@@ -266,7 +274,9 @@ class HeterogeneousMAVUAVAirCombatEnv:
         red_entities = {aid: self.entities[aid] for aid in RED_IDS}
         all_actions = dict(red_actions)
         for aid in BLUE_IDS:
-            all_actions[aid] = self.blue_policy.action(self.entities[aid], red_entities)
+            all_actions[aid] = self.blue_policy.action(
+                self.entities[aid], red_entities, self.step_count,
+            )
         commands = {
             aid: map_normalized_action(action, self.entities[aid].state, self.entities[aid].spec)
             for aid, action in all_actions.items() if self.entities[aid].state.alive

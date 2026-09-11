@@ -1,6 +1,6 @@
 # Episode-level combat failure audit
 
-`tools/audit_combat_failures.py` is a read-only evaluator for canonical v3.4 Vanilla HAPPO baseline checkpoints. It validates the 100D/117D environment and vanilla/MLP/baseline method contract, then writes only `audit_episodes.csv` and `audit_summary.json` into a new or empty output directory. v3.3 and older checkpoints are rejected.
+`tools/audit_combat_failures.py` is a read-only evaluator for canonical v3.5 Vanilla HAPPO baseline checkpoints. It validates the 100D/117D environment and vanilla/MLP/baseline method contract, then writes only `audit_episodes.csv` and `audit_summary.json` into a new or empty output directory. v3.4 and older checkpoints are rejected.
 
 Deterministic mode uses the formal evaluation action rule, Gaussian mean followed by `tanh`. Stochastic mode calls the actor's normal `sample(..., deterministic=False)` path, which uses a reparameterized sample followed by `tanh`; it never adds noise to deterministic actions. Episode `i` always resets the environment with `base_seed + i`. Stochastic Torch RNG is also reset to that episode seed for reproducible independent episodes.
 
@@ -10,7 +10,7 @@ Tail visibility has two distinct layers. `tail_longest_all_invisible_streak` mea
 
 Failure classes use this mutually exclusive priority: `LATE_PROGRESS / POSSIBLE_HORIZON`, `TARGET_LOSS`, `CANNOT_CLOSE`, `BAD_GEOMETRY`, `STREAK_INTERRUPTED`, then `OTHER`. `TARGET_LOSS` means at least one final-surviving Blue is team-invisible for 10 consecutive tail decisions; it does not require every remaining Blue to be invisible simultaneously. These labels are mechanical diagnostic buckets, not scientific causal conclusions, and `POSSIBLE_HORIZON` does not assert that the horizon is too short.
 
-Blue diagnostics now follow the v3.4 controller directly and do not reconstruct candidate rollouts. Each episode records per-Blue target counts in `blue_target_id`, the fraction targeting MAV in `blue_target_is_MAV`, and activation fractions for analytic altitude recovery (`blue_boundary_recovery_active`) and emergency horizontal steer-to-centre (`blue_horizontal_recovery_active`).
+Blue diagnostics follow the v3.5 controller directly and never mutate its cache. They include cached target, MAV targeting, refresh-due state, guidance age, cached heading/pitch, analytic altitude recovery and emergency horizontal recovery. No candidate rollout is reconstructed.
 
 Ground-truth post-hoc geometry and reward-credit diagnostics have different sample scopes. The audit retains real distance, ATA, AA, closing, streak, speed and altitude records for every alive Blue even when that Blue is team-invisible. Reward-credit samples, however, include only alive Blue records for which `env.team_visible(blue_id)` is true, exactly matching the Blue set that contributes to the formal `_team_situation_reward()` branch. Invisible Blue therefore remains available for geometry analysis but does not enter full-episode or post-last reward-credit denominators.
 

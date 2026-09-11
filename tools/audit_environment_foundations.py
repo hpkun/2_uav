@@ -1,4 +1,4 @@
-"""Reset-only foundation audit for the canonical v3.4 4v4 environment."""
+"""Reset-only foundation audit for the canonical v3.5 4v4 environment."""
 from __future__ import annotations
 
 import argparse
