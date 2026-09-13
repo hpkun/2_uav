@@ -27,7 +27,8 @@ DEFAULTS = {
     "gamma": 0.99, "gae_lambda": 0.95, "ppo_epochs": 4, "minibatch_size": 256,
     "clip_coef": 0.2, "actor_learning_rate": 3e-4, "critic_learning_rate": 1e-3,
     "entropy_coef": 0.01, "value_loss_coef": 0.5, "max_grad_norm": 0.5,
-    "hidden_dim": 128, "actor_variant": "vanilla", "critic_variant": "mlp", "method_variant": "baseline",
+    "hidden_dim": 128, "actor_log_std_init": -0.5,
+    "actor_variant": "vanilla", "critic_variant": "mlp", "method_variant": "baseline",
     "agp_lambda": 0.5,
     "hrta_entity_dim": 32, "hrta_role_dim": 16, "hrta_fusion_hidden_dim": 64,
     "recurrent_hidden_dim": 128, "recurrent_sequence_length": 16,
@@ -41,6 +42,7 @@ RESUME_CONFIG_FIELDS = (
     "environment_profile", "seed", "num_envs", "rollout_steps", "gamma", "gae_lambda",
     "ppo_epochs", "minibatch_size", "clip_coef", "actor_learning_rate",
     "critic_learning_rate", "entropy_coef", "value_loss_coef", "max_grad_norm", "hidden_dim",
+    "actor_log_std_init",
 )
 
 
@@ -85,7 +87,10 @@ class HAPPOTrainer:
             int(c["num_envs"]), self.environment_config, seed=int(c["seed"]), profile=c["environment_profile"],
         )
         if c["actor_variant"] == "vanilla":
-            self.actors = IndependentActors(hidden_dim=int(c["hidden_dim"])).to(self.device)
+            self.actors = IndependentActors(
+                hidden_dim=int(c["hidden_dim"]),
+                log_std_init=float(c["actor_log_std_init"]),
+            ).to(self.device)
         elif c["actor_variant"] == "hrta":
             self.actors = HRTAIndependentActors(
                 entity_dim=int(c["hrta_entity_dim"]),
@@ -112,6 +117,7 @@ class HAPPOTrainer:
                 enemy_dim=int(c["pcta_enemy_dim"]),
                 hidden_dim=int(c["pcta_hidden_dim"]),
                 attention_mode="uniform" if c["actor_variant"] == "pcta_uniform" else "learned",
+                log_std_init=float(c["actor_log_std_init"]),
             ).to(self.device)
         else:
             raise ValueError(
@@ -662,7 +668,10 @@ class HAPPOTrainer:
             if checkpoint_lambda is None or float(checkpoint_lambda) != float(self.config["agp_lambda"]):
                 raise RuntimeError("resume AGP lambda mismatch")
         for field in RESUME_CONFIG_FIELDS:
-            checkpoint_value = saved_config.get(field)
+            checkpoint_value = saved_config.get(
+                field,
+                DEFAULTS["actor_log_std_init"] if field == "actor_log_std_init" else None,
+            )
             current_value = self.config.get(field)
             if checkpoint_value != current_value:
                 raise RuntimeError(
