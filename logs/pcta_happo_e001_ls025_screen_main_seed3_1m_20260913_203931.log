@@ -1,0 +1,120 @@
+============================================================
+PCTA-HAPPO TRAINING
+Run: pcta_happo_e001_ls025_screen_main_seed3_1m_20260913_203931
+Profile: main
+Seed: 3
+Device: cuda
+Envs: 16
+Method: baseline
+Critic: mlp
+Rollout: 128
+Target steps: 1,000,000
+Checkpoint interval: 500,000
+Evaluation interval: disabled
+Log interval: 100,000
+============================================================
+[TRAIN] 100,352 / 1,000,000 (10.0%)
+        elapsed 00:04:24 | speed 380.0 steps/s | ETA 00:39:28
+        episodes +1367 / total 1367
+        return -2.16 | W/B/D 0.0% / 9.9% / 90.1%
+        MAV survival 90.1% | UAV survivors 2.03
+        Red kills 0.00 | Blue kills 0.04 | ep length 72.9
+        actor loss [-0.014, -0.016, -0.016, -0.017]
+        critic loss 420.825 | entropy 3.491
+        PCTA consistency 0.001429 (weighted 0.000071) | valid pairs 329609 | attention entropy 1.127 | target switch 6.9%
+[TRAIN] 200,704 / 1,000,000 (20.1%)
+        elapsed 00:08:56 | speed 369.0 steps/s | ETA 00:36:06
+        episodes +1346 / total 2713
+        return 28.46 | W/B/D 0.0% / 1.9% / 98.1%
+        MAV survival 98.1% | UAV survivors 2.84
+        Red kills 0.00 | Blue kills 0.16 | ep length 74.6
+        actor loss [-0.017, -0.017, -0.016, -0.015]
+        critic loss 84.084 | entropy 3.487
+        PCTA consistency 0.000957 (weighted 0.000048) | valid pairs 375485 | attention entropy 1.130 | target switch 6.2%
+[TRAIN] 301,056 / 1,000,000 (30.1%)
+        elapsed 00:12:45 | speed 439.1 steps/s | ETA 00:26:32
+        episodes +1344 / total 4057
+        return 31.64 | W/B/D 0.0% / 1.6% / 98.4%
+        MAV survival 98.4% | UAV survivors 2.88
+        Red kills 0.00 | Blue kills 0.11 | ep length 74.7
+        actor loss [-0.015, -0.015, -0.015, -0.013]
+        critic loss 73.071 | entropy 3.514
+        PCTA consistency 0.000796 (weighted 0.000040) | valid pairs 379553 | attention entropy 1.131 | target switch 6.5%
+[TRAIN] 401,408 / 1,000,000 (40.1%)
+        elapsed 00:17:11 | speed 376.2 steps/s | ETA 00:26:31
+        episodes +1342 / total 5399
+        return 31.19 | W/B/D 0.0% / 2.1% / 97.9%
+        MAV survival 97.9% | UAV survivors 2.93
+        Red kills 0.00 | Blue kills 0.06 | ep length 74.7
+        actor loss [-0.019, -0.017, -0.011, -0.014]
+        critic loss 92.565 | entropy 3.507
+        PCTA consistency 0.000738 (weighted 0.000037) | valid pairs 380833 | attention entropy 1.114 | target switch 5.9%
+[TRAIN] 501,760 / 1,000,000 (50.2%)
+        elapsed 00:21:50 | speed 360.4 steps/s | ETA 00:23:03
+        episodes +1343 / total 6742
+        return 36.09 | W/B/D 0.0% / 0.8% / 99.2%
+        MAV survival 99.2% | UAV survivors 2.95
+        Red kills 0.00 | Blue kills 0.05 | ep length 74.8
+        actor loss [-0.016, -0.016, -0.015, -0.016]
+        critic loss 37.613 | entropy 3.474
+        PCTA consistency 0.000630 (weighted 0.000032) | valid pairs 385522 | attention entropy 1.239 | target switch 6.0%
+[CKPT] milestone 500,000 crossed at step 501,760 | checkpoint_501760.pt
+[TRAIN] 600,064 / 1,000,000 (60.0%)
+        elapsed 00:25:18 | speed 471.8 steps/s | ETA 00:14:08
+        episodes +1315 / total 8057
+        return 38.01 | W/B/D 0.0% / 0.9% / 99.1%
+        MAV survival 99.1% | UAV survivors 2.93
+        Red kills 0.00 | Blue kills 0.05 | ep length 74.6
+        actor loss [-0.015, -0.017, -0.016, -0.014]
+        critic loss 40.363 | entropy 3.461
+        PCTA consistency 0.000608 (weighted 0.000030) | valid pairs 380447 | attention entropy 1.278 | target switch 6.1%
+[TRAIN] 700,416 / 1,000,000 (70.0%)
+        elapsed 00:29:16 | speed 421.5 steps/s | ETA 00:11:51
+        episodes +1345 / total 9402
+        return 39.17 | W/B/D 0.0% / 0.7% / 99.3%
+        MAV survival 99.3% | UAV survivors 2.88
+        Red kills 0.00 | Blue kills 0.10 | ep length 74.7
+        actor loss [-0.012, -0.016, -0.014, -0.016]
+        critic loss 38.147 | entropy 3.463
+        PCTA consistency 0.000712 (weighted 0.000036) | valid pairs 386066 | attention entropy 1.262 | target switch 6.5%
+[TRAIN] 800,768 / 1,000,000 (80.1%)
+        elapsed 00:33:30 | speed 395.5 steps/s | ETA 00:08:24
+        episodes +1339 / total 10741
+        return 40.56 | W/B/D 0.0% / 0.5% / 99.5%
+        MAV survival 99.5% | UAV survivors 2.94
+        Red kills 0.00 | Blue kills 0.06 | ep length 74.9
+        actor loss [-0.016, -0.016, -0.014, -0.016]
+        critic loss 24.311 | entropy 3.435
+        PCTA consistency 0.000534 (weighted 0.000027) | valid pairs 389149 | attention entropy 1.281 | target switch 6.5%
+[TRAIN] 901,120 / 1,000,000 (90.1%)
+        elapsed 00:37:02 | speed 474.4 steps/s | ETA 00:03:28
+        episodes +1343 / total 12084
+        return 39.85 | W/B/D 0.0% / 0.9% / 99.1%
+        MAV survival 99.1% | UAV survivors 2.93
+        Red kills 0.00 | Blue kills 0.06 | ep length 74.8
+        actor loss [-0.017, -0.017, -0.019, -0.014]
+        critic loss 38.919 | entropy 3.421
+        PCTA consistency 0.000558 (weighted 0.000028) | valid pairs 388371 | attention entropy 1.263 | target switch 6.6%
+[TRAIN] 1,000,000 / 1,000,000 (100.0%)
+        elapsed 00:41:00 | speed 415.3 steps/s | ETA 00:00:00
+        episodes +1321 / total 13405
+        return 40.49 | W/B/D 0.0% / 0.7% / 99.3%
+        MAV survival 99.3% | UAV survivors 2.96
+        Red kills 0.00 | Blue kills 0.05 | ep length 74.7
+        actor loss [-0.016, -0.019, -0.016, -0.011]
+        critic loss 32.925 | entropy 3.396
+        PCTA consistency 0.000441 (weighted 0.000022) | valid pairs 384191 | attention entropy 1.272 | target switch 6.8%
+[CKPT] milestone 1,000,000 crossed at step 1,000,000 | checkpoint_1000000.pt
+[TRAIN] optimization finished at 1,000,000 steps
+[FINAL EVAL] step 1,000,000 | nearest_red_aircraft
+       win 0.0% | blue 0.0% | draw 100.0%
+       return 41.76 | Red kills 0.00 | MAV survival 100.0%
+============================================================
+TRAINING COMPLETE
+Steps: 1,000,000
+Elapsed training time: 00:41:00
+Final evaluation time: 00:03:32
+Completed episodes: 13405
+Final checkpoint: checkpoint_final.pt
+Run folder: /mnt/c/Users/HPK/Desktop/2_uav/outputs/pcta_happo_e001_ls025_screen_main_seed3_1m_20260913_203931
+============================================================

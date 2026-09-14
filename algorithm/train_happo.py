@@ -20,7 +20,7 @@ import torch
 import yaml
 
 from algorithm.happo import HAPPOTrainer
-from algorithm.happo.trainer import PCTA_FAMILY
+from algorithm.happo.trainer import LEGACY_PCTA_FAMILY, PCTA_V2_VARIANT
 from algorithm.happo.evaluation import evaluate_actors, evaluate_recurrent_actors, summarize_records
 from env.mavuav import RED_IDS, load_environment_config
 
@@ -38,6 +38,11 @@ TRAINING_FIELDS = (
 PCTA_FIELDS = (
     "pcta_consistency_loss", "pcta_consistency_weighted_loss",
     "pcta_valid_temporal_pairs", "pcta_attention_entropy", "pcta_target_switch_rate",
+)
+PCTA_V2_FIELDS = (
+    "pcta_v2_attention_entropy", "pcta_v2_target_switch_rate",
+    "pcta_v2_valid_temporal_pairs", "pcta_v2_pursuit_bias_mean",
+    "pcta_v2_max_attention_weight",
 )
 LOSS_FIELDS = (*(f"actor_{i}_loss" for i in range(len(RED_IDS))), "critic_loss", "entropy")
 
@@ -69,6 +74,7 @@ def _algorithm_name(
         "pcta": "pcta_happo",
         "pcta_attention_only": "pcta_attention_only_happo",
         "pcta_uniform": "pcta_uniform_happo",
+        "pcta_v2": "pcta_v2_happo",
     }
     try:
         return names[actor_variant]
@@ -320,6 +326,16 @@ def _progress_lines(
             f"attention entropy {np.mean([update['pcta_attention_entropy'] for update in window.updates]):.3f} | "
             f"target switch {np.mean([update['pcta_target_switch_rate'] for update in window.updates]):.1%}"
         )
+    if window.updates and "pcta_v2_attention_entropy" in window.updates[0]:
+        valid_pairs = sum(int(update["pcta_v2_valid_temporal_pairs"]) for update in window.updates)
+        lines.append(
+            "        PCTA-v2 target diagnostics | "
+            f"valid pairs {valid_pairs} | "
+            f"attention entropy {np.mean([update['pcta_v2_attention_entropy'] for update in window.updates]):.3f} | "
+            f"target switch {np.mean([update['pcta_v2_target_switch_rate'] for update in window.updates]):.1%} | "
+            f"pursuit bias {np.mean([update['pcta_v2_pursuit_bias_mean'] for update in window.updates]):.3f} | "
+            f"max attention {np.mean([update['pcta_v2_max_attention_weight'] for update in window.updates]):.3f}"
+        )
     return "\n".join(lines)
 
 
@@ -361,11 +377,7 @@ def _initial_resolved(
         "checkpoint_interval": args.checkpoint_interval, "evaluation_interval": args.eval_interval,
         "log_interval": args.log_interval, "evaluation_episodes": args.eval_episodes,
         "final_evaluation_episodes": args.final_eval_episodes, "resume_history": [],
-        **({
-            "attention_mode": trainer.pcta_attention_mode,
-            "pcta_consistency_coef": float(trainer.config["pcta_consistency_coef"]),
-            "effective_pcta_consistency_coef": float(trainer.config["pcta_consistency_coef"]),
-        } if trainer.config["actor_variant"] in PCTA_FAMILY else {}),
+        **trainer.pcta_metadata,
     }
 
 
@@ -452,6 +464,7 @@ def main(
             "rc_happo": "RC-HAPPO", "pcta_happo": "PCTA-HAPPO",
             "pcta_attention_only_happo": "PCTA-ATTENTION-ONLY HAPPO",
             "pcta_uniform_happo": "PCTA-UNIFORM HAPPO",
+            "pcta_v2_happo": "PCTA-v2 HAPPO",
         }.get(
             algorithm, algorithm.upper(),
         )
@@ -481,7 +494,12 @@ def main(
         log_observer = MilestoneObserver(args.log_interval, trainer.env_steps)
         completed = _last_completed_episodes(run_dir / "training.csv")
         evaluation_fields: tuple[str, ...] | None = None
-        training_fields = TRAINING_FIELDS + PCTA_FIELDS if actor_variant in PCTA_FAMILY else TRAINING_FIELDS
+        if actor_variant in LEGACY_PCTA_FAMILY:
+            training_fields = TRAINING_FIELDS + PCTA_FIELDS
+        elif actor_variant == PCTA_V2_VARIANT:
+            training_fields = TRAINING_FIELDS + PCTA_V2_FIELDS
+        else:
+            training_fields = TRAINING_FIELDS
         configured_horizon = int(trainer.config["rollout_steps"])
         num_envs = int(trainer.config["num_envs"])
         window = ProgressWindow()
@@ -573,11 +591,7 @@ def main(
             "training_elapsed_seconds": training_elapsed,
             "final_evaluation_elapsed_seconds": final_evaluation_elapsed,
             "final_evaluations": final_rows, "checkpoint_final": "checkpoint_final.pt",
-            **({
-                "attention_mode": trainer.pcta_attention_mode,
-                "pcta_consistency_coef": float(trainer.config["pcta_consistency_coef"]),
-                "effective_pcta_consistency_coef": float(trainer.config["pcta_consistency_coef"]),
-            } if actor_variant in PCTA_FAMILY else {}),
+            **trainer.pcta_metadata,
         }
         with (run_dir / "summary.json").open("w", encoding="utf-8") as stream:
             json.dump(summary, stream, indent=2, ensure_ascii=False)

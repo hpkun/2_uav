@@ -45,6 +45,7 @@ def test_direct_happo_entrypoints_show_help_without_package_install():
     assert "--attention-output" in _run("algorithm/evaluate_happo_hrta.py", "--help").stdout
     assert "--steps" in _run("algorithm/train_happo_agp.py", "--help").stdout
     assert "--steps" in _run("algorithm/train_happo_pcta.py", "--help").stdout
+    assert "--steps" in _run("algorithm/train_happo_pcta_v2.py", "--help").stdout
     assert "--episodes" in _run("algorithm/evaluate_happo_pcta.py", "--help").stdout
     assert "--steps" in _run("algorithm/train_happo_relational_critic.py", "--help").stdout
     assert "--episodes" in _run("algorithm/evaluate_happo_relational_critic.py", "--help").stdout
