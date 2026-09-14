@@ -165,6 +165,14 @@ class PCTAv2TargetDiagnostics:
     target_switches: int
     max_attention_weight_sum: float
     pursuit_bias_mean: float
+    valid_target_states: int = 0
+    multi_target_states: int = 0
+    head_normalized_entropy_sum: float = 0.0
+    head_normalized_entropy_count: int = 0
+    head_max_attention_sum: float = 0.0
+    head_max_attention_count: int = 0
+    head_disagreement_sum: float = 0.0
+    head_disagreement_count: int = 0
 
 
 def target_behavior_diagnostics(
@@ -174,15 +182,51 @@ def target_behavior_diagnostics(
     truncated: torch.Tensor,
     active_masks: torch.Tensor,
 ) -> PCTAv2TargetDiagnostics:
-    """Measure target behavior without creating an auxiliary optimization objective."""
+    """Measure static per-head and temporal ensemble behavior without optimization."""
     if observations.ndim != 3 or observations.shape[-1] != OBS_DIM:
         raise ValueError("PCTA-v2 temporal observations must have shape [T,N,OBS_DIM]")
-    pursuit_bias_mean = float(actor.pursuit_bias_gain.detach().mean().item())
-    if observations.shape[0] < 2:
-        return PCTAv2TargetDiagnostics(0, 0.0, 0, 0.0, pursuit_bias_mean)
     with torch.no_grad():
-        attention = actor.attention_weights(observations)
+        _, encoded = actor.encode(observations)
+        attention = encoded["enemy_attention"]
+        attention_heads = encoded["enemy_attention_heads"]
         valid_targets = enemy_valid_mask(observations)
+        active = active_masks > 0.5
+        valid_state = active & valid_targets.any(dim=-1)
+        multi_state = active & (valid_targets.sum(dim=-1) >= 2)
+        static = {
+            "valid_target_states": int(valid_state.sum().item()),
+            "multi_target_states": int(multi_state.sum().item()),
+            "head_normalized_entropy_sum": 0.0,
+            "head_normalized_entropy_count": 0,
+            "head_max_attention_sum": 0.0,
+            "head_max_attention_count": 0,
+            "head_disagreement_sum": 0.0,
+            "head_disagreement_count": 0,
+        }
+        if valid_state.any():
+            selected_heads = attention_heads[valid_state]
+            selected_valid = valid_targets[valid_state]
+            static["head_max_attention_sum"] = float(selected_heads.max(dim=-1).values.sum().item())
+            static["head_max_attention_count"] = int(selected_heads.shape[0] * selected_heads.shape[1])
+            mean_distribution = selected_heads.mean(dim=-2)
+            safe_heads = selected_heads.clamp_min(1e-12)
+            kl = safe_heads * (safe_heads.log() - mean_distribution.clamp_min(1e-12).log().unsqueeze(-2))
+            kl = kl.masked_fill(~selected_valid[:, None, :], 0.0)
+            jsd = kl.sum(dim=-1).mean(dim=-1)
+            static["head_disagreement_sum"] = float((jsd / math.log(selected_heads.shape[1])).sum().item())
+            static["head_disagreement_count"] = int(selected_heads.shape[0])
+        if multi_state.any():
+            multi_heads = attention_heads[multi_state]
+            multi_valid = valid_targets[multi_state]
+            multi_heads = multi_heads.masked_fill(~multi_valid[:, None, :], 0.0)
+            entropy = -(multi_heads * multi_heads.clamp_min(1e-12).log()).sum(dim=-1)
+            denominator = multi_valid.sum(dim=-1).to(dtype=entropy.dtype).log()
+            normalized = entropy / denominator.unsqueeze(-1)
+            static["head_normalized_entropy_sum"] = float(normalized.sum().item())
+            static["head_normalized_entropy_count"] = int(normalized.numel())
+        pursuit_bias_mean = float(actor.pursuit_bias_gain.detach().mean().item())
+        if observations.shape[0] < 2:
+            return PCTAv2TargetDiagnostics(0, 0.0, 0, 0.0, pursuit_bias_mean, **static)
         previous_attention = attention[:-1]
         current_attention = attention[1:]
         previous_valid = valid_targets[:-1]
@@ -201,7 +245,7 @@ def target_behavior_diagnostics(
         )
         count = int(transition_valid.sum().item())
         if count == 0:
-            return PCTAv2TargetDiagnostics(0, 0.0, 0, 0.0, pursuit_bias_mean)
+            return PCTAv2TargetDiagnostics(0, 0.0, 0, 0.0, pursuit_bias_mean, **static)
         selected = current_attention[transition_valid]
         entropy = -(selected * selected.clamp_min(1e-12).log()).sum(dim=-1)
         switches = int((selected.argmax(dim=-1) != previous_target[transition_valid]).sum().item())
@@ -212,6 +256,7 @@ def target_behavior_diagnostics(
             target_switches=switches,
             max_attention_weight_sum=float(max_weights.sum().item()),
             pursuit_bias_mean=pursuit_bias_mean,
+            **static,
         )
 
 

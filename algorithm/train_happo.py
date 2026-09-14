@@ -42,7 +42,10 @@ PCTA_FIELDS = (
 PCTA_V2_FIELDS = (
     "pcta_v2_attention_entropy", "pcta_v2_target_switch_rate",
     "pcta_v2_valid_temporal_pairs", "pcta_v2_pursuit_bias_mean",
-    "pcta_v2_max_attention_weight",
+    "pcta_v2_max_attention_weight", "pcta_v2_ensemble_attention_entropy",
+    "pcta_v2_ensemble_max_attention_weight", "pcta_v2_head_normalized_entropy",
+    "pcta_v2_head_max_attention_weight", "pcta_v2_head_disagreement",
+    "pcta_v2_valid_target_states", "pcta_v2_multi_target_states",
 )
 LOSS_FIELDS = (*(f"actor_{i}_loss" for i in range(len(RED_IDS))), "critic_loss", "entropy")
 
@@ -330,11 +333,14 @@ def _progress_lines(
         valid_pairs = sum(int(update["pcta_v2_valid_temporal_pairs"]) for update in window.updates)
         lines.append(
             "        PCTA-v2 target diagnostics | "
-            f"valid pairs {valid_pairs} | "
-            f"attention entropy {np.mean([update['pcta_v2_attention_entropy'] for update in window.updates]):.3f} | "
+            f"ens H {np.mean([update['pcta_v2_ensemble_attention_entropy'] for update in window.updates]):.3f} | "
+            f"head Hn {np.mean([update['pcta_v2_head_normalized_entropy'] for update in window.updates]):.3f} | "
+            f"head max {np.mean([update['pcta_v2_head_max_attention_weight'] for update in window.updates]):.3f} | "
+            f"disagree {np.mean([update['pcta_v2_head_disagreement'] for update in window.updates]):.3f} | "
             f"target switch {np.mean([update['pcta_v2_target_switch_rate'] for update in window.updates]):.1%} | "
-            f"pursuit bias {np.mean([update['pcta_v2_pursuit_bias_mean'] for update in window.updates]):.3f} | "
-            f"max attention {np.mean([update['pcta_v2_max_attention_weight'] for update in window.updates]):.3f}"
+            f"beta {np.mean([update['pcta_v2_pursuit_bias_mean'] for update in window.updates]):.3f} | "
+            f"valid/multi states {sum(int(update['pcta_v2_valid_target_states']) for update in window.updates)}/"
+            f"{sum(int(update['pcta_v2_multi_target_states']) for update in window.updates)}"
         )
     return "\n".join(lines)
 

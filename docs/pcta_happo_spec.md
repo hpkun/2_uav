@@ -28,6 +28,8 @@ PCTA-family checkpoints retain `happo_training_checkpoint_v1` and record the exa
 
 The latter two variants are mechanism ablations, not new primary methods. The unused query module remains present in PCTA-Uniform so all three PCTA-family actors have identical state-dict keys, parameter shapes, parameter counts, and same-seed initialization.
 
+PCTA-v2 target diagnostics distinguish static per-head selectivity from temporal ensemble behavior. `pcta_v2_attention_entropy`, `pcta_v2_max_attention_weight`, and `pcta_v2_target_switch_rate` retain their historical mean-head (`alpha_mean`) and transition-valid semantics. The explicit aliases `pcta_v2_ensemble_attention_entropy` and `pcta_v2_ensemble_max_attention_weight` are exactly equal to those legacy fields. Static diagnostics use all active states: `pcta_v2_valid_target_states` counts states with at least one valid enemy and `pcta_v2_multi_target_states` counts states with at least two. `pcta_v2_head_normalized_entropy` averages each head's entropy divided by `log(K_valid)` only over multi-target states and heads; `pcta_v2_head_max_attention_weight` averages per-head maxima over states with at least one valid enemy; and `pcta_v2_head_disagreement` is the multi-head Jensen-Shannon divergence divided by `log(H)`. These diagnostics are computed under `torch.no_grad()` and do not affect actor parameters, gradients, RNG state, policy distribution, or optimization.
+
 ## Design provenance
 
 The following literature facts motivate components but are not claims of reproduction:

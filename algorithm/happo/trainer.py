@@ -249,6 +249,7 @@ class HAPPOTrainer:
                 "pcta_v2_context_dim": int(self.config["pcta_v2_context_dim"]),
                 "pcta_v2_enemy_dim": int(self.config["pcta_v2_enemy_dim"]),
                 "pcta_v2_target_dim": int(self.config["pcta_v2_target_dim"]),
+                "pcta_v2_diagnostics_version": 2,
             }
         if self.config["actor_variant"] in LEGACY_PCTA_FAMILY:
             return {
@@ -423,6 +424,14 @@ class HAPPOTrainer:
         pcta_switches = 0
         pcta_v2_max_attention_sum = 0.0
         pcta_v2_bias_sum = 0.0
+        pcta_v2_valid_target_states = 0
+        pcta_v2_multi_target_states = 0
+        pcta_v2_head_entropy_sum = 0.0
+        pcta_v2_head_entropy_count = 0
+        pcta_v2_head_max_sum = 0.0
+        pcta_v2_head_max_count = 0
+        pcta_v2_head_disagreement_sum = 0.0
+        pcta_v2_head_disagreement_count = 0
         if c["actor_variant"] in PCTA_FAMILY:
             self.last_pcta_factor_history = [factor.detach().cpu().numpy().copy()]
         clip = float(c["clip_coef"]); mini = int(c["minibatch_size"]); total = len(advantages)
@@ -482,6 +491,14 @@ class HAPPOTrainer:
                 pcta_switches += temporal.target_switches
                 pcta_v2_max_attention_sum += temporal.max_attention_weight_sum
                 pcta_v2_bias_sum += temporal.pursuit_bias_mean
+                pcta_v2_valid_target_states += temporal.valid_target_states
+                pcta_v2_multi_target_states += temporal.multi_target_states
+                pcta_v2_head_entropy_sum += temporal.head_normalized_entropy_sum
+                pcta_v2_head_entropy_count += temporal.head_normalized_entropy_count
+                pcta_v2_head_max_sum += temporal.head_max_attention_sum
+                pcta_v2_head_max_count += temporal.head_max_attention_count
+                pcta_v2_head_disagreement_sum += temporal.head_disagreement_sum
+                pcta_v2_head_disagreement_count += temporal.head_disagreement_count
         critic_losses = []
         for _ in range(int(c["ppo_epochs"])):
             sample_order = self.rng.permutation(total)
@@ -509,6 +526,13 @@ class HAPPOTrainer:
                 "pcta_v2_valid_temporal_pairs": pcta_pairs,
                 "pcta_v2_pursuit_bias_mean": pcta_v2_bias_sum / num_agents,
                 "pcta_v2_max_attention_weight": pcta_v2_max_attention_sum / pcta_pairs if pcta_pairs else 0.0,
+                "pcta_v2_ensemble_attention_entropy": pcta_attention_entropy_sum / pcta_pairs if pcta_pairs else 0.0,
+                "pcta_v2_ensemble_max_attention_weight": pcta_v2_max_attention_sum / pcta_pairs if pcta_pairs else 0.0,
+                "pcta_v2_head_normalized_entropy": pcta_v2_head_entropy_sum / pcta_v2_head_entropy_count if pcta_v2_head_entropy_count else 0.0,
+                "pcta_v2_head_max_attention_weight": pcta_v2_head_max_sum / pcta_v2_head_max_count if pcta_v2_head_max_count else 0.0,
+                "pcta_v2_head_disagreement": pcta_v2_head_disagreement_sum / pcta_v2_head_disagreement_count if pcta_v2_head_disagreement_count else 0.0,
+                "pcta_v2_valid_target_states": pcta_v2_valid_target_states,
+                "pcta_v2_multi_target_states": pcta_v2_multi_target_states,
             })
         metrics.update(self.last_rollout_metrics)
         if not all(np.isfinite(v) for v in metrics.values() if isinstance(v, float)): raise FloatingPointError("non-finite HAPPO update")

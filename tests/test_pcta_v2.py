@@ -135,6 +135,92 @@ def test_target_diagnostics_are_finite_and_do_not_create_gradients():
     assert 0 <= result.target_switches <= result.valid_pairs
 
 
+def _synthetic_target_diagnostics(heads, valid_count):
+    actor = PCTAv2Actor()
+    obs = observations(1, 1)
+    for index, start in enumerate(ENEMY_STARTS):
+        obs[..., start + 9] = float(index < valid_count)
+        obs[..., start + 10] = float(index < valid_count)
+        obs[..., start + 11] = 0.0
+    head_tensor = torch.tensor(heads, dtype=torch.float32).reshape(1, 1, 4, 4)
+    valid = torch.zeros(1, 1, 4, dtype=torch.bool)
+    valid[..., :valid_count] = True
+
+    def fake_encode(_observations):
+        alpha_mean = head_tensor.mean(dim=-2)
+        return torch.zeros(1, 1, 136), {
+            "enemy_attention": alpha_mean,
+            "enemy_attention_heads": head_tensor,
+        }
+
+    actor.encode = fake_encode
+    result = target_behavior_diagnostics(
+        actor, obs, torch.zeros(1, 1), torch.zeros(1, 1), torch.ones(1, 1),
+    )
+    return result
+
+
+def test_synthetic_uniform_heads_have_normalized_entropy_one_and_zero_disagreement():
+    result = _synthetic_target_diagnostics([[0.25, 0.25, 0.25, 0.25]] * 4, 4)
+    assert result.valid_target_states == result.multi_target_states == 1
+    assert result.head_normalized_entropy_count == result.head_max_attention_count == 4
+    assert result.head_disagreement_count == 1
+    assert result.head_normalized_entropy_sum / result.head_normalized_entropy_count == pytest.approx(1.0)
+    assert result.head_max_attention_sum / result.head_max_attention_count == pytest.approx(0.25)
+    assert result.head_disagreement_sum == pytest.approx(0.0)
+
+
+def test_synthetic_identical_sharp_heads_have_zero_entropy_and_zero_disagreement():
+    result = _synthetic_target_diagnostics([[1.0, 0.0, 0.0, 0.0]] * 4, 4)
+    assert result.head_normalized_entropy_sum == pytest.approx(0.0)
+    assert result.head_max_attention_sum / result.head_max_attention_count == pytest.approx(1.0)
+    assert result.head_disagreement_sum == pytest.approx(0.0)
+
+
+def test_synthetic_specialized_heads_have_zero_per_head_entropy_but_high_disagreement():
+    result = _synthetic_target_diagnostics(
+        [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0],
+         [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]], 4,
+    )
+    assert result.head_normalized_entropy_sum == pytest.approx(0.0)
+    assert result.head_max_attention_sum / result.head_max_attention_count == pytest.approx(1.0)
+    assert result.head_disagreement_sum == pytest.approx(1.0)
+
+
+def test_synthetic_two_valid_targets_are_normalized_by_log_two():
+    result = _synthetic_target_diagnostics([[0.5, 0.5, 0.0, 0.0]] * 4, 2)
+    assert result.valid_target_states == 1 and result.multi_target_states == 1
+    assert result.head_normalized_entropy_sum / result.head_normalized_entropy_count == pytest.approx(1.0)
+
+
+def test_synthetic_one_or_zero_valid_targets_have_safe_counts_and_means():
+    one = _synthetic_target_diagnostics([[1.0, 0.0, 0.0, 0.0]] * 4, 1)
+    zero = _synthetic_target_diagnostics([[0.0, 0.0, 0.0, 0.0]] * 4, 0)
+    assert one.valid_target_states == 1 and one.multi_target_states == 0
+    assert one.head_normalized_entropy_count == 0
+    assert one.head_max_attention_sum / one.head_max_attention_count == pytest.approx(1.0)
+    assert zero.valid_target_states == zero.multi_target_states == 0
+    assert zero.head_normalized_entropy_count == zero.head_max_attention_count == zero.head_disagreement_count == 0
+    assert all(np.isfinite(value) for value in (zero.head_normalized_entropy_sum, zero.head_disagreement_sum))
+
+
+def test_target_diagnostics_preserve_parameters_grads_rng_and_training_state():
+    torch.manual_seed(812)
+    actor = PCTAv2Actor()
+    actor.train()
+    diagnostic_observations = observations(3, 1)
+    parameters = [parameter.detach().clone() for parameter in actor.parameters()]
+    gradients = [parameter.grad for parameter in actor.parameters()]
+    rng_before = torch.get_rng_state().clone()
+    target_behavior_diagnostics(
+        actor, diagnostic_observations, torch.zeros(3, 1), torch.zeros(3, 1), torch.ones(3, 1),
+    )
+    assert actor.training
+    assert torch.equal(torch.get_rng_state(), rng_before)
+    assert all(torch.equal(before, after) for before, after in zip(parameters, actor.parameters()))
+    assert all(before is after for before, after in zip(gradients, (parameter.grad for parameter in actor.parameters())))
+
+
 def test_v2_trainer_has_one_optimizer_step_and_never_calls_legacy_consistency(monkeypatch):
     import algorithm.happo.trainer as trainer_module
 
@@ -159,9 +245,18 @@ def test_v2_trainer_has_one_optimizer_step_and_never_calls_legacy_consistency(mo
     for field in (
         "pcta_v2_attention_entropy", "pcta_v2_target_switch_rate",
         "pcta_v2_pursuit_bias_mean", "pcta_v2_max_attention_weight",
+        "pcta_v2_ensemble_attention_entropy", "pcta_v2_ensemble_max_attention_weight",
+        "pcta_v2_head_normalized_entropy", "pcta_v2_head_max_attention_weight",
+        "pcta_v2_head_disagreement", "pcta_v2_valid_target_states",
+        "pcta_v2_multi_target_states",
     ):
         assert np.isfinite(metrics[field])
     assert metrics["pcta_v2_valid_temporal_pairs"] > 0
+    assert metrics["pcta_v2_ensemble_attention_entropy"] == metrics["pcta_v2_attention_entropy"]
+    assert metrics["pcta_v2_ensemble_max_attention_weight"] == metrics["pcta_v2_max_attention_weight"]
+    assert 0.0 <= metrics["pcta_v2_head_normalized_entropy"] <= 1.0
+    assert 0.0 <= metrics["pcta_v2_head_disagreement"] <= 1.0
+    assert metrics["pcta_v2_valid_target_states"] >= metrics["pcta_v2_multi_target_states"] >= 0
     trainer.close()
 
 
@@ -243,9 +338,14 @@ def test_entrypoint_writes_v2_resolved_summary_diagnostics_and_checkpoint():
         required = {
             "pcta_v2_attention_entropy", "pcta_v2_target_switch_rate",
             "pcta_v2_valid_temporal_pairs", "pcta_v2_pursuit_bias_mean",
-            "pcta_v2_max_attention_weight",
+            "pcta_v2_max_attention_weight", "pcta_v2_ensemble_attention_entropy",
+            "pcta_v2_ensemble_max_attention_weight", "pcta_v2_head_normalized_entropy",
+            "pcta_v2_head_max_attention_weight", "pcta_v2_head_disagreement",
+            "pcta_v2_valid_target_states", "pcta_v2_multi_target_states",
         }
         assert rows and required <= rows[0].keys()
         assert all(np.isfinite(float(rows[-1][field])) for field in required)
+        assert float(rows[-1]["pcta_v2_attention_entropy"]) == float(rows[-1]["pcta_v2_ensemble_attention_entropy"])
+        assert float(rows[-1]["pcta_v2_max_attention_weight"]) == float(rows[-1]["pcta_v2_ensemble_max_attention_weight"])
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)
