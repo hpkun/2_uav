@@ -10,6 +10,14 @@ PHI_M = np.deg2rad(30.0)
 SITUATION_WEIGHTS = (0.32, 0.43, 0.10, 0.10, 0.05)
 
 
+def potential_shaping_reward(potential_prev: float, potential_next: float, gamma: float, done: bool) -> tuple[float, float]:
+    """Return (effective_next, gamma * effective_next - previous)."""
+    previous = float(potential_prev)
+    raw_next = float(potential_next)
+    effective_next = 0.0 if bool(done) else raw_next
+    return effective_next, float(gamma) * effective_next - previous
+
+
 def bearing_reward(phi: float) -> float:
     phi = abs(float(phi))
     return float(1.0 - 0.3 * phi / PHI_M) if phi <= PHI_M else float(0.7 * (np.pi - phi) / (np.pi - PHI_M))
@@ -59,4 +67,3 @@ def situation_components(attacker: AircraftState, target: AircraftState) -> tupl
 
 def situation_reward(attacker: AircraftState, target: AircraftState) -> float:
     return float(np.dot(SITUATION_WEIGHTS, situation_components(attacker, target)))
-

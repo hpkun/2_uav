@@ -88,6 +88,13 @@ class HAPPOTrainer:
         torch.manual_seed(int(c["seed"]))
         self.rng = np.random.default_rng(int(c["seed"]))
         self.environment_config = load_environment_config(env_config)
+        shaping = self.environment_config.get("shaping", {})
+        self.reward_shaping_mode = str(shaping.get("mode", "absolute"))
+        self.shaping_gamma = float(shaping.get("gamma", 0.0))
+        if self.reward_shaping_mode == "potential" and not np.isclose(self.shaping_gamma, float(c["gamma"]), atol=1e-12):
+            raise ValueError(
+                f"potential shaping gamma {self.shaping_gamma} must equal training gamma {float(c['gamma'])}"
+            )
         self.vector_env = MAVUAVVectorEnv(
             int(c["num_envs"]), self.environment_config, seed=int(c["seed"]), profile=c["environment_profile"],
         )
@@ -670,7 +677,7 @@ class HAPPOTrainer:
 
     def save(self, path: str | Path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        payload = {"environment_version": ENVIRONMENT_VERSION, "environment_profile": self.config["environment_profile"], "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM, "actor_variant": self.config["actor_variant"], "critic_variant": self.config["critic_variant"], "method_variant": self.config["method_variant"], "actor_architecture": self.actor_architecture, "critic_architecture": self.critic_architecture, "critic_parameter_count": self.critic_parameter_count, "actors": self.actors.state_dict(), "critic": self.critic.state_dict(), "config": self.config}
+        payload = {"environment_version": self.environment_config["environment_version"], "environment_profile": self.config["environment_profile"], "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM, "actor_variant": self.config["actor_variant"], "critic_variant": self.config["critic_variant"], "method_variant": self.config["method_variant"], "reward_shaping_mode": self.reward_shaping_mode, "shaping_gamma": self.shaping_gamma, "training_gamma": float(self.config["gamma"]), "actor_architecture": self.actor_architecture, "critic_architecture": self.critic_architecture, "critic_parameter_count": self.critic_parameter_count, "actors": self.actors.state_dict(), "critic": self.critic.state_dict(), "config": self.config}
         payload.update(self.pcta_metadata)
         torch.save(payload, path)
 
@@ -679,13 +686,16 @@ class HAPPOTrainer:
         state = {
             "format": "happo_training_checkpoint_v1",
             "sampled_steps": int(self.env_steps),
-            "environment_version": ENVIRONMENT_VERSION,
+            "environment_version": self.environment_config["environment_version"],
             "environment_profile": self.config["environment_profile"],
             "observation_dim": OBS_DIM,
             "global_state_dim": GLOBAL_STATE_DIM,
             "actor_variant": self.config["actor_variant"],
             "critic_variant": self.config["critic_variant"],
             "method_variant": self.config["method_variant"],
+            "reward_shaping_mode": self.reward_shaping_mode,
+            "shaping_gamma": self.shaping_gamma,
+            "training_gamma": float(self.config["gamma"]),
             "agp_lambda": float(self.config["agp_lambda"]),
             "actor_architecture": self.actor_architecture,
             "critic_architecture": self.critic_architecture,
@@ -721,10 +731,16 @@ class HAPPOTrainer:
 
     def load_checkpoint(self, path: str | Path) -> int:
         data = torch.load(path, map_location=self.device, weights_only=False)
-        expected = (ENVIRONMENT_VERSION, OBS_DIM, GLOBAL_STATE_DIM)
+        expected = (self.environment_config["environment_version"], OBS_DIM, GLOBAL_STATE_DIM)
         actual = (data.get("environment_version"), data.get("observation_dim"), data.get("global_state_dim"))
         if actual != expected:
             raise RuntimeError("incompatible checkpoint contract for HAPPO environment")
+        checkpoint_mode = data.get("reward_shaping_mode", "absolute")
+        checkpoint_gamma = float(data.get("shaping_gamma", 0.0))
+        if checkpoint_mode != self.reward_shaping_mode or (
+            checkpoint_mode == "potential" and not np.isclose(checkpoint_gamma, self.shaping_gamma, atol=1e-12)
+        ):
+            raise RuntimeError("incompatible checkpoint reward shaping contract")
         self._validate_actor_architecture(data)
         self._validate_critic_architecture(data)
         saved_config = data.get("trainer_config", data.get("config", {}))
@@ -825,8 +841,14 @@ class HAPPOTrainer:
 
     def load(self, path: str | Path) -> None:
         data = torch.load(path, map_location=self.device, weights_only=False)
-        if (data.get("environment_version"), data.get("observation_dim"), data.get("global_state_dim")) != (ENVIRONMENT_VERSION, OBS_DIM, GLOBAL_STATE_DIM):
+        if (data.get("environment_version"), data.get("observation_dim"), data.get("global_state_dim")) != (self.environment_config["environment_version"], OBS_DIM, GLOBAL_STATE_DIM):
             raise RuntimeError("incompatible HAPPO checkpoint environment contract")
+        checkpoint_mode = data.get("reward_shaping_mode", "absolute")
+        checkpoint_gamma = float(data.get("shaping_gamma", 0.0))
+        if checkpoint_mode != self.reward_shaping_mode or (
+            checkpoint_mode == "potential" and not np.isclose(checkpoint_gamma, self.shaping_gamma, atol=1e-12)
+        ):
+            raise RuntimeError("incompatible HAPPO checkpoint reward shaping contract")
         self._validate_actor_architecture(data)
         self._validate_critic_architecture(data)
         if data.get("environment_profile") != self.config["environment_profile"]:

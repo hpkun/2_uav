@@ -18,6 +18,11 @@ def _environment_state(env: HeterogeneousMAVUAVAirCombatEnv) -> dict[str, Any]:
     return {
         "entities": deepcopy(env.entities), "step_count": env.step_count,
         "episode_return": env.episode_return, "running": env._running,
+        "potential_shaping_sum": env._potential_shaping_sum,
+        "absolute_situation_sum": env._absolute_situation_sum,
+        "event_reward_sum": env._event_reward_sum,
+        "terminal_reward_sum": env._terminal_reward_sum,
+        "safety_reward_sum": env._safety_reward_sum,
         "attack_streak": deepcopy(env._attack_streak),
         "red_attack_kills": set(env._red_attack_kills),
         "blue_attack_kills": set(env._blue_attack_kills),
@@ -32,6 +37,11 @@ def _restore_environment_state(env: HeterogeneousMAVUAVAirCombatEnv, state: Mapp
     env.step_count = int(state["step_count"])
     env.episode_return = float(state["episode_return"])
     env._running = bool(state["running"])
+    env._potential_shaping_sum = float(state.get("potential_shaping_sum", 0.0))
+    env._absolute_situation_sum = float(state.get("absolute_situation_sum", 0.0))
+    env._event_reward_sum = float(state.get("event_reward_sum", 0.0))
+    env._terminal_reward_sum = float(state.get("terminal_reward_sum", 0.0))
+    env._safety_reward_sum = float(state.get("safety_reward_sum", 0.0))
     env._attack_streak = deepcopy(state["attack_streak"])
     env._red_attack_kills = set(state["red_attack_kills"])
     env._blue_attack_kills = set(state["blue_attack_kills"])
