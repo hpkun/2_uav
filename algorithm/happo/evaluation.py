@@ -30,6 +30,11 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, float]:
         "mean_event_reward_sum": float(np.mean([r.get("event_reward_sum", 0.0) for r in records])),
         "mean_terminal_reward_sum": float(np.mean([r.get("terminal_reward_sum", 0.0) for r in records])),
         "mean_safety_reward_sum": float(np.mean([r.get("safety_reward_sum", 0.0) for r in records])),
+        "mean_mav_process_reward_sum": float(np.mean([r.get("mav_process_reward_sum", 0.0) for r in records])),
+        "mean_uav_process_reward_sum": float(np.mean([r.get("mean_uav_process_reward_sum", 0.0) for r in records])),
+        "mean_shared_event_reward_sum": float(np.mean([r.get("shared_event_reward_sum", 0.0) for r in records])),
+        "mean_shared_terminal_reward_sum": float(np.mean([r.get("shared_terminal_reward_sum", 0.0) for r in records])),
+        "mean_shared_safety_reward_sum": float(np.mean([r.get("shared_safety_reward_sum", 0.0) for r in records])),
     }
 
 

@@ -12,6 +12,10 @@ from .dynamics import map_normalized_action, rk4_step
 from .geometry import compute_pairwise_geometry
 from .models import Aircraft, AircraftSpec, AircraftState
 from .reward import potential_shaping_reward, situation_reward
+from .reward_role_v37 import (
+    target_score, uav_angle_reward, uav_speed_reward, uav_distance_reward,
+    uav_process_reward, mav_aspect_reward, mav_awareness_reward,
+)
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "env.yaml"
 RED_IDS = ("MAV", "UAV1", "UAV2", "UAV3")
@@ -25,7 +29,8 @@ TYPE_ONE_HOT = {
 }
 ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_5"
 CURRENT_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_6"
-SUPPORTED_ENVIRONMENT_VERSIONS = frozenset((ENVIRONMENT_VERSION, CURRENT_ENVIRONMENT_VERSION))
+ROLE_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_7"
+SUPPORTED_ENVIRONMENT_VERSIONS = frozenset((ENVIRONMENT_VERSION, CURRENT_ENVIRONMENT_VERSION, ROLE_ENVIRONMENT_VERSION))
 OBS_DIM = 100
 GLOBAL_STATE_DIM = 117
 CROSS_TEAM_ATTACK_PAIRS = tuple((red, blue) for red in RED_IDS for blue in BLUE_IDS) + tuple(
@@ -48,7 +53,7 @@ def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
         "environment_version", "simulation", "battlefield", "aircraft_specs", "scenario",
         "randomization_profiles", "sensing", "normalization", "safety", "combat", "reward", "blue_policy",
     }
-    allowed = expected | {"shaping"}
+    allowed = expected | {"shaping", "role_reward"}
     if not expected <= set(config) or not set(config) <= allowed:
         raise ValueError(f"config keys must be {sorted(expected)} with optional shaping, got {sorted(config)}")
     cfg = deepcopy(dict(config))
@@ -115,13 +120,29 @@ def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("reward has unknown, missing or non-finite fields")
     shaping = cfg.get("shaping")
     if cfg["environment_version"] == ENVIRONMENT_VERSION:
-        if shaping is not None:
+        if shaping is not None or "role_reward" in cfg:
             raise ValueError("v3.5 configuration must omit shaping")
-    else:
+    elif cfg["environment_version"] == CURRENT_ENVIRONMENT_VERSION:
+        if "role_reward" in cfg:
+            raise ValueError("v3.6 configuration must omit role_reward")
         if not isinstance(shaping, Mapping) or set(shaping) != {"mode", "gamma"}:
             raise ValueError("v3.6 configuration requires shaping.mode and shaping.gamma")
         if shaping["mode"] != "potential" or not np.isfinite(float(shaping["gamma"])) or not (0.0 < float(shaping["gamma"]) <= 1.0):
             raise ValueError("v3.6 shaping must be potential with finite gamma in (0, 1]")
+    else:
+        if shaping is not None:
+            raise ValueError("v3.7 must omit PBRS shaping")
+        role = cfg.get("role_reward")
+        frozen = {
+            "mode": "heterogeneous_role_v1",
+            "target_selector": {"angle_weight": .35, "distance_weight": .25, "altitude_weight": .20, "relative_velocity_weight": .20},
+            "uav": {"angle_weight": 15.0, "distance_weight": 10.0, "speed_weight": 10.0, "process_normalizer": 35.0},
+            "mav": {"threat_weight": .3, "aspect_weight": .2, "awareness_weight": .4, "aspect_threshold_deg": 45.0, "awareness_threshold_deg": 90.0, "awareness_gain": .3},
+        }
+        if role != frozen:
+            raise ValueError("v3.7 role_reward must match the frozen heterogeneous_role_v1 contract")
+        if float(cfg["reward"]["blue_kill"]) != 100.0:
+            raise ValueError("v3.7 blue_kill must be +100")
     if set(cfg["blue_policy"]) != {"target_strategy", "guidance_mode", "target_refresh_steps"}:
         raise ValueError("blue_policy has unknown or missing fields")
     if cfg["blue_policy"]["target_strategy"] != BluePolicy.TARGET_STRATEGY:
@@ -199,12 +220,16 @@ class HeterogeneousMAVUAVAirCombatEnv:
         self._event_reward_sum = 0.0
         self._terminal_reward_sum = 0.0
         self._safety_reward_sum = 0.0
+        self._role_process_sums = {aid: 0.0 for aid in RED_IDS}
+        self._reward_target_previous = {aid: None for aid in RED_IDS[1:]}
+        self._reward_target_switches = {aid: 0 for aid in RED_IDS[1:]}
+        self._reward_target_none_steps = {aid: 0 for aid in RED_IDS[1:]}
         self._running = False
         self._attack_streak: dict[tuple[str, str], int] = {}
         self._red_attack_kills: set[str] = set()
         self._blue_attack_kills: set[str] = set()
         shaping = self.config.get("shaping", {})
-        self.reward_mode = str(shaping.get("mode", "absolute"))
+        self.reward_mode = "heterogeneous_role_v1" if self.config["environment_version"] == ROLE_ENVIRONMENT_VERSION else str(shaping.get("mode", "absolute"))
         self.shaping_gamma = float(shaping.get("gamma", 0.0))
 
     @property
@@ -264,6 +289,10 @@ class HeterogeneousMAVUAVAirCombatEnv:
         self._event_reward_sum = 0.0
         self._terminal_reward_sum = 0.0
         self._safety_reward_sum = 0.0
+        self._role_process_sums = {aid: 0.0 for aid in RED_IDS}
+        self._reward_target_previous = {aid: None for aid in RED_IDS[1:]}
+        self._reward_target_switches = {aid: 0 for aid in RED_IDS[1:]}
+        self._reward_target_none_steps = {aid: 0 for aid in RED_IDS[1:]}
         self._attack_streak.clear()
         self._red_attack_kills.clear()
         self._blue_attack_kills.clear()
@@ -295,7 +324,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
     def step(self, actions: Mapping[str, np.ndarray] | np.ndarray | list[np.ndarray]):
         if not self._running:
             raise RuntimeError("reset() must be called before step()")
-        potential_prev = self._team_situation_reward()
+        potential_prev = self._team_situation_reward() if self.reward_mode != "heterogeneous_role_v1" else 0.0
         red_actions = self._action_dict(actions)
         red_entities = {aid: self.entities[aid] for aid in RED_IDS}
         all_actions = dict(red_actions)
@@ -321,7 +350,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
         safety_violation = minimum_friendly_distance < float(safety_cfg["red_safe_distance"])
         safety_reward = float(safety_cfg["red_safe_distance_penalty"]) if safety_violation else 0.0
         terminated, truncated, outcome = self._termination()
-        situation = self._team_situation_reward()
+        situation = self._team_situation_reward() if self.reward_mode != "heterogeneous_role_v1" else 0.0
         done = terminated or truncated
         potential_next_effective, potential_shaping = potential_shaping_reward(
             potential_prev, situation, self.shaping_gamma, done,
@@ -334,14 +363,25 @@ class HeterogeneousMAVUAVAirCombatEnv:
         if outcome == "red": terminal = float(reward_cfg["terminal_red_win"])
         elif outcome == "blue": terminal = float(reward_cfg["terminal_blue_win"])
         elif outcome == "draw": terminal = float(reward_cfg["terminal_draw"])
-        team_reward = float((potential_shaping if self.reward_mode == "potential" else situation) + event + terminal + safety_reward)
+        if self.reward_mode == "heterogeneous_role_v1":
+            role_process, role_diagnostics = self._role_process_rewards()
+            shared = float(event + terminal + safety_reward)
+            rewards = {aid: float(role_process[aid] + shared) for aid in RED_IDS}
+            team_reward = float(np.mean([rewards[aid] for aid in RED_IDS]))
+            if not np.isclose(team_reward, shared + np.mean([role_process[aid] for aid in RED_IDS]), rtol=0, atol=1e-12):
+                raise AssertionError("role reward accounting mismatch")
+            for aid in RED_IDS:
+                self._role_process_sums[aid] += role_process[aid]
+        else:
+            team_reward = float((potential_shaping if self.reward_mode == "potential" else situation) + event + terminal + safety_reward)
+            rewards = {aid: team_reward for aid in RED_IDS}
+            role_diagnostics = {}
         self.episode_return += team_reward
         self._potential_shaping_sum += float(potential_shaping)
         self._absolute_situation_sum += float(situation)
         self._event_reward_sum += float(event)
         self._terminal_reward_sum += float(terminal)
         self._safety_reward_sum += float(safety_reward)
-        rewards = {aid: team_reward for aid in RED_IDS}
         self._running = not (terminated or truncated)
         info: dict[str, Any] = {
             "outcome": outcome, "attack_events": attack_events,
@@ -356,11 +396,12 @@ class HeterogeneousMAVUAVAirCombatEnv:
             "potential_shaping_reward": float(potential_shaping),
             "potential_terminal_zeroed": bool(self.reward_mode == "potential" and done),
             "absolute_situation": float(situation), "team_reward": float(team_reward),
+            **role_diagnostics,
         }
         if terminated or truncated:
             info["episode_summary"] = self._episode_summary(outcome)
         observations = self._observations()
-        if not np.isfinite(team_reward) or not all(np.all(np.isfinite(v)) for v in observations.values()) or not np.all(np.isfinite(self.global_state())):
+        if not all(np.isfinite(v) for v in rewards.values()) or not np.isfinite(team_reward) or not all(np.all(np.isfinite(v)) for v in observations.values()) or not np.all(np.isfinite(self.global_state())):
             raise FloatingPointError("environment produced non-finite output")
         return observations, rewards, terminated, truncated, info
 
@@ -457,6 +498,56 @@ class HeterogeneousMAVUAVAirCombatEnv:
             for blue in visible_alive_blue
         ]))
 
+    def _role_process_rewards(self) -> tuple[dict[str, float], dict[str, Any]]:
+        """Evaluate only post-step alive, team-visible role geometry."""
+        process = {aid: 0.0 for aid in RED_IDS}
+        diagnostics: dict[str, Any] = {}
+        available_blue = [bid for bid in BLUE_IDS if self.entities[bid].state.alive and self.team_visible(bid)]
+        alive_blue = [bid for bid in BLUE_IDS if self.entities[bid].state.alive]
+        mav = self.entities["MAV"].state
+        streak_max = max((self._attack_streak.get((bid, "MAV"), 0) for bid in alive_blue), default=0)
+        threat = -1.0 if mav.alive and streak_max > 0 else 0.0
+        aspect = sum(mav_aspect_reward(compute_pairwise_geometry(self.entities[bid].state, mav).ata) for bid in alive_blue) if mav.alive else 0.0
+        aware = sum(mav_awareness_reward(compute_pairwise_geometry(mav, self.entities[bid].state).ata) for bid in available_blue) if mav.alive else 0.0
+        process["MAV"] = float(.3 * threat + .2 * aspect + .4 * aware) if mav.alive else 0.0
+        diagnostics.update({"mav_R_threat": threat, "mav_R_aspect": float(aspect), "mav_R_aware": float(aware),
+                            "mav_process_reward": process["MAV"], "mav_blue_attack_streak_max": streak_max,
+                            "mav_direct_visible_blue_count": sum(self.direct_visible("MAV", bid) for bid in BLUE_IDS),
+                            "team_visible_blue_count": len(available_blue), "alive_blue_count": len(alive_blue)})
+        normalization = self.config["normalization"]
+        minimum_range, maximum_range = self.config["combat"]["distance"]
+        for aid in RED_IDS[1:]:
+            red = self.entities[aid].state
+            candidates = []
+            if red.alive:
+                for bid in available_blue:
+                    score = target_score(red, self.entities[bid].state,
+                                         normalization["relative_altitude_scale"],
+                                         normalization["relative_velocity_scale"], maximum_range)
+                    if np.isfinite(score):
+                        candidates.append((score, bid))
+            chosen = max(candidates, key=lambda item: item[0]) if candidates else None
+            target = chosen[1] if chosen else None
+            previous = self._reward_target_previous[aid]
+            switched = bool(previous is not None and target is not None and previous != target)
+            self._reward_target_switches[aid] += int(switched)
+            self._reward_target_none_steps[aid] += int(target is None)
+            self._reward_target_previous[aid] = target
+            angle = distance = speed = 0.0
+            if target is not None:
+                blue = self.entities[target].state
+                geometry = compute_pairwise_geometry(red, blue)
+                angle = uav_angle_reward(geometry.ata, geometry.aa)
+                distance = uav_distance_reward(geometry.distance, minimum_range, maximum_range)
+                speed = uav_speed_reward(red.v, blue.v)
+                process[aid] = uav_process_reward(angle, distance, speed)
+            prefix = aid.lower()
+            diagnostics.update({f"reward_target_{aid}": target, f"target_score_{aid}": None if chosen is None else float(chosen[0]),
+                                f"reward_target_switch_{aid}": switched,
+                                f"{prefix}_R_A": float(angle), f"{prefix}_R_D": float(distance), f"{prefix}_R_V": float(speed),
+                                f"{prefix}_process_reward": float(process[aid])})
+        return process, diagnostics
+
     def _episode_summary(self, outcome: str | None) -> dict[str, Any]:
         return {
             "outcome": outcome, "episode_length": self.step_count,
@@ -467,13 +558,26 @@ class HeterogeneousMAVUAVAirCombatEnv:
             "red_uav_losses": sum(not self.entities[aid].state.alive for aid in RED_IDS[1:]),
             "mav_loss": int(not self.entities["MAV"].state.alive),
             "blue_target_strategy": self.blue_policy.TARGET_STRATEGY, "episode_return": float(self.episode_return),
-            "environment_version": self.config["environment_version"], "reward_shaping_mode": self.reward_mode,
-            "shaping_gamma": self.shaping_gamma,
+            "environment_version": self.config["environment_version"],
+            "reward_shaping_mode": self.reward_mode if self.reward_mode != "heterogeneous_role_v1" else None,
+            "reward_mode": self.reward_mode,
+            "shaping_gamma": self.shaping_gamma if self.reward_mode != "heterogeneous_role_v1" else None,
             "potential_shaping_sum": float(self._potential_shaping_sum),
             "absolute_situation_sum": float(self._absolute_situation_sum),
             "event_reward_sum": float(self._event_reward_sum),
             "terminal_reward_sum": float(self._terminal_reward_sum),
             "safety_reward_sum": float(self._safety_reward_sum),
+            **({
+                "mav_process_reward_sum": self._role_process_sums["MAV"],
+                **{f"{aid.lower()}_process_reward_sum": self._role_process_sums[aid] for aid in RED_IDS[1:]},
+                "mean_uav_process_reward_sum": float(np.mean([self._role_process_sums[aid] for aid in RED_IDS[1:]])),
+                "shared_event_reward_sum": self._event_reward_sum,
+                "shared_terminal_reward_sum": self._terminal_reward_sum,
+                "shared_safety_reward_sum": self._safety_reward_sum,
+                "team_reward_sum": self.episode_return,
+                **{f"{aid.lower()}_reward_target_switches": self._reward_target_switches[aid] for aid in RED_IDS[1:]},
+                **{f"{aid.lower()}_target_none_steps": self._reward_target_none_steps[aid] for aid in RED_IDS[1:]},
+            } if self.reward_mode == "heterogeneous_role_v1" else {}),
         }
 
     def _self_xy_norm(self, value: float) -> float:

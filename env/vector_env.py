@@ -23,6 +23,10 @@ def _environment_state(env: HeterogeneousMAVUAVAirCombatEnv) -> dict[str, Any]:
         "event_reward_sum": env._event_reward_sum,
         "terminal_reward_sum": env._terminal_reward_sum,
         "safety_reward_sum": env._safety_reward_sum,
+        "role_process_sums": deepcopy(env._role_process_sums),
+        "reward_target_previous": deepcopy(env._reward_target_previous),
+        "reward_target_switches": deepcopy(env._reward_target_switches),
+        "reward_target_none_steps": deepcopy(env._reward_target_none_steps),
         "attack_streak": deepcopy(env._attack_streak),
         "red_attack_kills": set(env._red_attack_kills),
         "blue_attack_kills": set(env._blue_attack_kills),
@@ -42,6 +46,10 @@ def _restore_environment_state(env: HeterogeneousMAVUAVAirCombatEnv, state: Mapp
     env._event_reward_sum = float(state.get("event_reward_sum", 0.0))
     env._terminal_reward_sum = float(state.get("terminal_reward_sum", 0.0))
     env._safety_reward_sum = float(state.get("safety_reward_sum", 0.0))
+    env._role_process_sums = deepcopy(state.get("role_process_sums", {aid: 0.0 for aid in RED_IDS}))
+    env._reward_target_previous = deepcopy(state.get("reward_target_previous", {aid: None for aid in RED_IDS[1:]}))
+    env._reward_target_switches = deepcopy(state.get("reward_target_switches", {aid: 0 for aid in RED_IDS[1:]}))
+    env._reward_target_none_steps = deepcopy(state.get("reward_target_none_steps", {aid: 0 for aid in RED_IDS[1:]}))
     env._attack_streak = deepcopy(state["attack_streak"])
     env._red_attack_kills = set(state["red_attack_kills"])
     env._blue_attack_kills = set(state["blue_attack_kills"])

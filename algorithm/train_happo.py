@@ -33,6 +33,9 @@ TRAINING_FIELDS = (
     "draw_rate", "MAV_survival_rate", "mean_UAV_survivors", "mean_red_attack_kills",
     "mean_blue_attack_kills", "mean_episode_length", "mean_potential_shaping_sum", "mean_absolute_situation_sum",
     "mean_event_reward_sum", "mean_terminal_reward_sum", "mean_safety_reward_sum",
+    "mean_mav_process_reward_sum", "mean_uav_process_reward_sum",
+    "mean_shared_event_reward_sum", "mean_shared_terminal_reward_sum", "mean_shared_safety_reward_sum",
+    "reward_mode", "environment_version",
     *(f"actor_{i}_loss" for i in range(len(RED_IDS))),
     "critic_loss", "entropy", "method_variant",
     "agp_raw_mean", "agp_raw_mean_abs", "agp_shaping_mean", "agp_shaping_mean_abs",
@@ -223,6 +226,9 @@ def _episode_metrics(records: list[Mapping[str, Any]]) -> dict[str, Any]:
             "mean_red_attack_kills": 0.0, "mean_blue_attack_kills": 0.0, "mean_episode_length": 0.0,
             "mean_potential_shaping_sum": 0.0, "mean_absolute_situation_sum": 0.0,
             "mean_event_reward_sum": 0.0, "mean_terminal_reward_sum": 0.0, "mean_safety_reward_sum": 0.0,
+            "mean_mav_process_reward_sum": 0.0, "mean_uav_process_reward_sum": 0.0,
+            "mean_shared_event_reward_sum": 0.0, "mean_shared_terminal_reward_sum": 0.0,
+            "mean_shared_safety_reward_sum": 0.0,
         }
     n = len(records)
     return {
@@ -240,6 +246,11 @@ def _episode_metrics(records: list[Mapping[str, Any]]) -> dict[str, Any]:
         "mean_event_reward_sum": float(np.mean([r.get("event_reward_sum", 0.0) for r in records])),
         "mean_terminal_reward_sum": float(np.mean([r.get("terminal_reward_sum", 0.0) for r in records])),
         "mean_safety_reward_sum": float(np.mean([r.get("safety_reward_sum", 0.0) for r in records])),
+        "mean_mav_process_reward_sum": float(np.mean([r.get("mav_process_reward_sum", 0.0) for r in records])),
+        "mean_uav_process_reward_sum": float(np.mean([r.get("mean_uav_process_reward_sum", 0.0) for r in records])),
+        "mean_shared_event_reward_sum": float(np.mean([r.get("shared_event_reward_sum", 0.0) for r in records])),
+        "mean_shared_terminal_reward_sum": float(np.mean([r.get("shared_terminal_reward_sum", 0.0) for r in records])),
+        "mean_shared_safety_reward_sum": float(np.mean([r.get("shared_safety_reward_sum", 0.0) for r in records])),
     }
 
 
@@ -262,8 +273,9 @@ def _evaluation_row(
         ),
         "method_variant": trainer.config["method_variant"],
         "environment_version": trainer.environment_config["environment_version"],
-        "reward_shaping_mode": trainer.reward_shaping_mode,
-        "shaping_gamma": trainer.shaping_gamma,
+        "reward_mode": trainer.reward_mode,
+        "reward_shaping_mode": trainer.reward_shaping_mode if trainer.reward_mode != "heterogeneous_role_v1" else None,
+        "shaping_gamma": trainer.shaping_gamma if trainer.reward_mode != "heterogeneous_role_v1" else None,
         "training_gamma": float(trainer.config["gamma"]),
         "seed": seed,
         "blue_target_strategy": "nearest_red_aircraft", "training_profile": trainer.config["environment_profile"],
@@ -384,8 +396,9 @@ def _initial_resolved(
         ),
         "method_variant": trainer.config["method_variant"],
         "environment_version": env_config["environment_version"],
-        "reward_shaping_mode": trainer.reward_shaping_mode,
-        "shaping_gamma": trainer.shaping_gamma,
+        "reward_mode": trainer.reward_mode,
+        "reward_shaping_mode": trainer.reward_shaping_mode if trainer.reward_mode != "heterogeneous_role_v1" else None,
+        "shaping_gamma": trainer.shaping_gamma if trainer.reward_mode != "heterogeneous_role_v1" else None,
         "training_gamma": float(trainer.config["gamma"]),
         "actor_variant": trainer.config["actor_variant"],
         "critic_variant": trainer.config["critic_variant"],
@@ -544,6 +557,8 @@ def main(
             window.add(episodes, metrics, sampled_this_update, update_elapsed)
             row = {
                 "sampled_steps": trainer.env_steps, "completed_episodes": completed,
+                "reward_mode": trainer.reward_mode,
+                "environment_version": trainer.environment_config["environment_version"],
                 **_episode_metrics(episodes),
                 **{f"actor_{i}_loss": metrics[f"actor_{i}_loss"] for i in range(len(RED_IDS))},
                 "critic_loss": metrics["critic_loss"],
@@ -601,8 +616,9 @@ def main(
             "actor_variant": actor_variant, "critic_variant": critic_variant,
             "method_variant": method_variant,
             "environment_version": env_config["environment_version"],
-            "reward_shaping_mode": trainer.reward_shaping_mode,
-            "shaping_gamma": trainer.shaping_gamma,
+            "reward_mode": trainer.reward_mode,
+            "reward_shaping_mode": trainer.reward_shaping_mode if trainer.reward_mode != "heterogeneous_role_v1" else None,
+            "shaping_gamma": trainer.shaping_gamma if trainer.reward_mode != "heterogeneous_role_v1" else None,
             "training_gamma": float(trainer.config["gamma"]),
             "agp_lambda": float(trainer.config["agp_lambda"]),
             "blue_target_strategy": "nearest_red_aircraft",

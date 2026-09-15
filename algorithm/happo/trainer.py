@@ -90,6 +90,7 @@ class HAPPOTrainer:
         self.environment_config = load_environment_config(env_config)
         shaping = self.environment_config.get("shaping", {})
         self.reward_shaping_mode = str(shaping.get("mode", "absolute"))
+        self.reward_mode = "heterogeneous_role_v1" if self.environment_config["environment_version"].endswith("v3_7") else self.reward_shaping_mode
         self.shaping_gamma = float(shaping.get("gamma", 0.0))
         if self.reward_shaping_mode == "potential" and not np.isclose(self.shaping_gamma, float(c["gamma"]), rtol=0.0, atol=1e-12):
             raise ValueError(
@@ -677,7 +678,7 @@ class HAPPOTrainer:
 
     def save(self, path: str | Path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        payload = {"environment_version": self.environment_config["environment_version"], "environment_profile": self.config["environment_profile"], "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM, "actor_variant": self.config["actor_variant"], "critic_variant": self.config["critic_variant"], "method_variant": self.config["method_variant"], "reward_shaping_mode": self.reward_shaping_mode, "shaping_gamma": self.shaping_gamma, "training_gamma": float(self.config["gamma"]), "actor_architecture": self.actor_architecture, "critic_architecture": self.critic_architecture, "critic_parameter_count": self.critic_parameter_count, "actors": self.actors.state_dict(), "critic": self.critic.state_dict(), "config": self.config}
+        payload = {"environment_version": self.environment_config["environment_version"], "environment_profile": self.config["environment_profile"], "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM, "actor_variant": self.config["actor_variant"], "critic_variant": self.config["critic_variant"], "method_variant": self.config["method_variant"], "reward_mode": self.reward_mode, "reward_shaping_mode": self.reward_shaping_mode if self.reward_mode != "heterogeneous_role_v1" else None, "shaping_gamma": self.shaping_gamma if self.reward_mode != "heterogeneous_role_v1" else None, "training_gamma": float(self.config["gamma"]), "actor_architecture": self.actor_architecture, "critic_architecture": self.critic_architecture, "critic_parameter_count": self.critic_parameter_count, "actors": self.actors.state_dict(), "critic": self.critic.state_dict(), "config": self.config}
         payload.update(self.pcta_metadata)
         torch.save(payload, path)
 
@@ -693,8 +694,9 @@ class HAPPOTrainer:
             "actor_variant": self.config["actor_variant"],
             "critic_variant": self.config["critic_variant"],
             "method_variant": self.config["method_variant"],
-            "reward_shaping_mode": self.reward_shaping_mode,
-            "shaping_gamma": self.shaping_gamma,
+            "reward_shaping_mode": self.reward_shaping_mode if self.reward_mode != "heterogeneous_role_v1" else None,
+            "reward_mode": self.reward_mode,
+            "shaping_gamma": self.shaping_gamma if self.reward_mode != "heterogeneous_role_v1" else None,
             "training_gamma": float(self.config["gamma"]),
             "agp_lambda": float(self.config["agp_lambda"]),
             "actor_architecture": self.actor_architecture,
@@ -735,9 +737,9 @@ class HAPPOTrainer:
         actual = (data.get("environment_version"), data.get("observation_dim"), data.get("global_state_dim"))
         if actual != expected:
             raise RuntimeError("incompatible checkpoint contract for HAPPO environment")
-        checkpoint_mode = data.get("reward_shaping_mode", "absolute")
-        checkpoint_gamma = float(data.get("shaping_gamma", 0.0))
-        if checkpoint_mode != self.reward_shaping_mode or (
+        checkpoint_mode = data.get("reward_mode", data.get("reward_shaping_mode", "absolute"))
+        checkpoint_gamma = float(data.get("shaping_gamma") or 0.0)
+        if checkpoint_mode != self.reward_mode or (
             checkpoint_mode == "potential" and not np.isclose(checkpoint_gamma, self.shaping_gamma, rtol=0.0, atol=1e-12)
         ):
             raise RuntimeError("incompatible checkpoint reward shaping contract")
@@ -843,9 +845,9 @@ class HAPPOTrainer:
         data = torch.load(path, map_location=self.device, weights_only=False)
         if (data.get("environment_version"), data.get("observation_dim"), data.get("global_state_dim")) != (self.environment_config["environment_version"], OBS_DIM, GLOBAL_STATE_DIM):
             raise RuntimeError("incompatible HAPPO checkpoint environment contract")
-        checkpoint_mode = data.get("reward_shaping_mode", "absolute")
-        checkpoint_gamma = float(data.get("shaping_gamma", 0.0))
-        if checkpoint_mode != self.reward_shaping_mode or (
+        checkpoint_mode = data.get("reward_mode", data.get("reward_shaping_mode", "absolute"))
+        checkpoint_gamma = float(data.get("shaping_gamma") or 0.0)
+        if checkpoint_mode != self.reward_mode or (
             checkpoint_mode == "potential" and not np.isclose(checkpoint_gamma, self.shaping_gamma, rtol=0.0, atol=1e-12)
         ):
             raise RuntimeError("incompatible HAPPO checkpoint reward shaping contract")
