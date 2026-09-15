@@ -91,7 +91,7 @@ class HAPPOTrainer:
         shaping = self.environment_config.get("shaping", {})
         self.reward_shaping_mode = str(shaping.get("mode", "absolute"))
         self.shaping_gamma = float(shaping.get("gamma", 0.0))
-        if self.reward_shaping_mode == "potential" and not np.isclose(self.shaping_gamma, float(c["gamma"]), atol=1e-12):
+        if self.reward_shaping_mode == "potential" and not np.isclose(self.shaping_gamma, float(c["gamma"]), rtol=0.0, atol=1e-12):
             raise ValueError(
                 f"potential shaping gamma {self.shaping_gamma} must equal training gamma {float(c['gamma'])}"
             )
@@ -738,7 +738,7 @@ class HAPPOTrainer:
         checkpoint_mode = data.get("reward_shaping_mode", "absolute")
         checkpoint_gamma = float(data.get("shaping_gamma", 0.0))
         if checkpoint_mode != self.reward_shaping_mode or (
-            checkpoint_mode == "potential" and not np.isclose(checkpoint_gamma, self.shaping_gamma, atol=1e-12)
+            checkpoint_mode == "potential" and not np.isclose(checkpoint_gamma, self.shaping_gamma, rtol=0.0, atol=1e-12)
         ):
             raise RuntimeError("incompatible checkpoint reward shaping contract")
         self._validate_actor_architecture(data)
@@ -846,7 +846,7 @@ class HAPPOTrainer:
         checkpoint_mode = data.get("reward_shaping_mode", "absolute")
         checkpoint_gamma = float(data.get("shaping_gamma", 0.0))
         if checkpoint_mode != self.reward_shaping_mode or (
-            checkpoint_mode == "potential" and not np.isclose(checkpoint_gamma, self.shaping_gamma, atol=1e-12)
+            checkpoint_mode == "potential" and not np.isclose(checkpoint_gamma, self.shaping_gamma, rtol=0.0, atol=1e-12)
         ):
             raise RuntimeError("incompatible HAPPO checkpoint reward shaping contract")
         self._validate_actor_architecture(data)

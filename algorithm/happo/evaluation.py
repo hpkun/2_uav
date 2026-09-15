@@ -25,6 +25,11 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, float]:
         "mean_red_attack_kills": float(np.mean([r["red_attack_kills"] for r in records])),
         "mean_blue_attack_kills": float(np.mean([r["blue_attack_kills"] for r in records])),
         "mean_episode_length": float(np.mean([r["episode_length"] for r in records])),
+        "mean_potential_shaping_sum": float(np.mean([r.get("potential_shaping_sum", 0.0) for r in records])),
+        "mean_absolute_situation_sum": float(np.mean([r.get("absolute_situation_sum", 0.0) for r in records])),
+        "mean_event_reward_sum": float(np.mean([r.get("event_reward_sum", 0.0) for r in records])),
+        "mean_terminal_reward_sum": float(np.mean([r.get("terminal_reward_sum", 0.0) for r in records])),
+        "mean_safety_reward_sum": float(np.mean([r.get("safety_reward_sum", 0.0) for r in records])),
     }
 
 

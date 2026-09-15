@@ -31,7 +31,9 @@ OUTPUT_ROOT = PROJECT_ROOT / "outputs"
 TRAINING_FIELDS = (
     "sampled_steps", "completed_episodes", "mean_episode_return", "red_win_rate", "blue_win_rate",
     "draw_rate", "MAV_survival_rate", "mean_UAV_survivors", "mean_red_attack_kills",
-    "mean_blue_attack_kills", "mean_episode_length", *(f"actor_{i}_loss" for i in range(len(RED_IDS))),
+    "mean_blue_attack_kills", "mean_episode_length", "mean_potential_shaping_sum", "mean_absolute_situation_sum",
+    "mean_event_reward_sum", "mean_terminal_reward_sum", "mean_safety_reward_sum",
+    *(f"actor_{i}_loss" for i in range(len(RED_IDS))),
     "critic_loss", "entropy", "method_variant",
     "agp_raw_mean", "agp_raw_mean_abs", "agp_shaping_mean", "agp_shaping_mean_abs",
 )
@@ -219,6 +221,8 @@ def _episode_metrics(records: list[Mapping[str, Any]]) -> dict[str, Any]:
             "mean_episode_return": 0.0, "red_win_rate": 0.0, "blue_win_rate": 0.0,
             "draw_rate": 0.0, "MAV_survival_rate": 0.0, "mean_UAV_survivors": 0.0,
             "mean_red_attack_kills": 0.0, "mean_blue_attack_kills": 0.0, "mean_episode_length": 0.0,
+            "mean_potential_shaping_sum": 0.0, "mean_absolute_situation_sum": 0.0,
+            "mean_event_reward_sum": 0.0, "mean_terminal_reward_sum": 0.0, "mean_safety_reward_sum": 0.0,
         }
     n = len(records)
     return {
@@ -231,6 +235,11 @@ def _episode_metrics(records: list[Mapping[str, Any]]) -> dict[str, Any]:
         "mean_red_attack_kills": float(np.mean([r["red_attack_kills"] for r in records])),
         "mean_blue_attack_kills": float(np.mean([r["blue_attack_kills"] for r in records])),
         "mean_episode_length": float(np.mean([r["episode_length"] for r in records])),
+        "mean_potential_shaping_sum": float(np.mean([r.get("potential_shaping_sum", 0.0) for r in records])),
+        "mean_absolute_situation_sum": float(np.mean([r.get("absolute_situation_sum", 0.0) for r in records])),
+        "mean_event_reward_sum": float(np.mean([r.get("event_reward_sum", 0.0) for r in records])),
+        "mean_terminal_reward_sum": float(np.mean([r.get("terminal_reward_sum", 0.0) for r in records])),
+        "mean_safety_reward_sum": float(np.mean([r.get("safety_reward_sum", 0.0) for r in records])),
     }
 
 
@@ -252,6 +261,10 @@ def _evaluation_row(
             trainer.config["critic_variant"],
         ),
         "method_variant": trainer.config["method_variant"],
+        "environment_version": trainer.environment_config["environment_version"],
+        "reward_shaping_mode": trainer.reward_shaping_mode,
+        "shaping_gamma": trainer.shaping_gamma,
+        "training_gamma": float(trainer.config["gamma"]),
         "seed": seed,
         "blue_target_strategy": "nearest_red_aircraft", "training_profile": trainer.config["environment_profile"],
         "evaluation_profile": profile, "episodes": episodes, **summarize_records(records),
@@ -370,6 +383,10 @@ def _initial_resolved(
             trainer.config["critic_variant"],
         ),
         "method_variant": trainer.config["method_variant"],
+        "environment_version": env_config["environment_version"],
+        "reward_shaping_mode": trainer.reward_shaping_mode,
+        "shaping_gamma": trainer.shaping_gamma,
+        "training_gamma": float(trainer.config["gamma"]),
         "actor_variant": trainer.config["actor_variant"],
         "critic_variant": trainer.config["critic_variant"],
         "actor_architecture": trainer.actor_architecture,
@@ -583,6 +600,10 @@ def main(
             "algorithm": algorithm,
             "actor_variant": actor_variant, "critic_variant": critic_variant,
             "method_variant": method_variant,
+            "environment_version": env_config["environment_version"],
+            "reward_shaping_mode": trainer.reward_shaping_mode,
+            "shaping_gamma": trainer.shaping_gamma,
+            "training_gamma": float(trainer.config["gamma"]),
             "agp_lambda": float(trainer.config["agp_lambda"]),
             "blue_target_strategy": "nearest_red_aircraft",
             "actor_architecture": trainer.actor_architecture,

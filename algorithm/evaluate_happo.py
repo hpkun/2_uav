@@ -13,12 +13,13 @@ import csv
 import json
 from typing import Any
 
+import numpy as np
 import torch
 
 from algorithm.happo.evaluation import evaluate_actors, summarize_records
 from algorithm.happo.networks import IndependentActors
 from algorithm.happo.relational_critic import RelationalCentralizedCritic
-from env.mavuav import ENVIRONMENT_VERSION, GLOBAL_STATE_DIM, OBS_DIM, load_environment_config
+from env.mavuav import GLOBAL_STATE_DIM, OBS_DIM, load_environment_config
 
 
 def parse_args() -> argparse.Namespace:
@@ -35,6 +36,25 @@ def _resolved_device(requested: str) -> str:
     return "cpu" if requested.startswith("cuda") and not torch.cuda.is_available() else requested
 
 
+def validate_checkpoint_contract(payload: dict[str, Any], env_config: dict[str, Any]) -> None:
+    """Validate checkpoint metadata against the actually resolved evaluation environment."""
+    actual = (payload.get("environment_version"), payload.get("observation_dim"), payload.get("global_state_dim"))
+    expected = (env_config["environment_version"], OBS_DIM, GLOBAL_STATE_DIM)
+    if actual != expected:
+        raise RuntimeError("incompatible HAPPO checkpoint environment contract")
+    env_shaping = env_config.get("shaping", {})
+    env_mode = str(env_shaping.get("mode", "absolute"))
+    checkpoint_mode = str(payload.get("reward_shaping_mode", "absolute"))
+    if checkpoint_mode != env_mode:
+        raise RuntimeError("incompatible HAPPO checkpoint reward shaping mode")
+    if env_mode == "potential":
+        checkpoint_gamma = float(payload.get("shaping_gamma", float("nan")))
+        if not np.isfinite(checkpoint_gamma) or not np.isclose(
+            checkpoint_gamma, float(env_shaping["gamma"]), rtol=0.0, atol=1e-12,
+        ):
+            raise RuntimeError("incompatible HAPPO checkpoint shaping gamma")
+
+
 def main(expected_critic_variant: str = "mlp") -> None:
     args = parse_args()
     if args.episodes <= 0:
@@ -44,9 +64,13 @@ def main(expected_critic_variant: str = "mlp") -> None:
         raise FileNotFoundError(checkpoint)
     device = _resolved_device(args.device)
     payload = torch.load(checkpoint, map_location=device, weights_only=False)
-    actual = (payload.get("environment_version"), payload.get("observation_dim"), payload.get("global_state_dim"))
-    if actual != (ENVIRONMENT_VERSION, OBS_DIM, GLOBAL_STATE_DIM):
-        raise RuntimeError("incompatible HAPPO checkpoint environment contract")
+    if args.env_config:
+        env_config: dict[str, Any] = load_environment_config(args.env_config.expanduser().resolve())
+    elif "environment_config" in payload:
+        env_config = load_environment_config(payload["environment_config"])
+    else:
+        env_config = load_environment_config(None)
+    validate_checkpoint_contract(payload, env_config)
     trainer_config = payload.get("trainer_config", payload.get("config", {}))
     actor_variant = payload.get("actor_variant", trainer_config.get("actor_variant", "vanilla"))
     if actor_variant != "vanilla":
@@ -69,12 +93,6 @@ def main(expected_critic_variant: str = "mlp") -> None:
     actors = IndependentActors(hidden_dim=int(trainer_config["hidden_dim"])).to(device)
     actors.load_state_dict(payload["actors"])
     actors.eval()
-    if args.env_config:
-        env_config: dict[str, Any] = load_environment_config(args.env_config.expanduser().resolve())
-    elif "environment_config" in payload:
-        env_config = load_environment_config(payload["environment_config"])
-    else:
-        env_config = load_environment_config(None)
     training_profile = str(payload["environment_profile"])
     rows = []
     algorithm = "rc_happo" if critic_variant == "relational" else "happo"
@@ -86,6 +104,10 @@ def main(expected_critic_variant: str = "mlp") -> None:
             "critic_variant": critic_variant,
             "blue_target_strategy": "nearest_red_aircraft", "training_profile": training_profile,
             "evaluation_profile": args.profile, "episodes": args.episodes,
+            "environment_version": env_config["environment_version"],
+            "reward_shaping_mode": str(env_config.get("shaping", {}).get("mode", "absolute")),
+            "shaping_gamma": float(env_config.get("shaping", {}).get("gamma", 0.0)),
+            "training_gamma": float(trainer_config.get("gamma", 0.99)),
             **summarize_records(records),
         })
     label = checkpoint.stem.removeprefix("checkpoint_")
@@ -100,6 +122,10 @@ def main(expected_critic_variant: str = "mlp") -> None:
         json.dump({
             "algorithm": algorithm, "checkpoint": str(checkpoint), "training_profile": training_profile,
             "evaluation_profile": args.profile, "method_variant": method_variant,
+            "environment_version": env_config["environment_version"],
+            "reward_shaping_mode": str(env_config.get("shaping", {}).get("mode", "absolute")),
+            "shaping_gamma": float(env_config.get("shaping", {}).get("gamma", 0.0)),
+            "training_gamma": float(trainer_config.get("gamma", 0.99)),
             "critic_variant": critic_variant, "critic_architecture": critic_architecture,
             "device": device, "results": rows,
         }, stream, indent=2, ensure_ascii=False)
