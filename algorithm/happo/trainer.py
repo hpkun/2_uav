@@ -11,7 +11,7 @@ from torch import nn
 from algorithm.common.buffer import RolloutBuffer
 from algorithm.common.networks import CentralizedCritic
 from env.vector_env import MAVUAVVectorEnv
-from env.mavuav import ENVIRONMENT_VERSION, GLOBAL_STATE_DIM, OBS_DIM, RED_IDS, load_environment_config
+from env.mavuav import ENVIRONMENT_VERSION, GLOBAL_STATE_DIM, OBS_DIM, RED_IDS, ROLE_REWARD_MODES, load_environment_config
 from algorithm.modules.hrta import HRTAIndependentActors
 from algorithm.modules.structured_uniform import StructuredUniformIndependentActors
 from algorithm.modules.pcta import PCTAIndependentActors, pursuit_consistency
@@ -90,7 +90,10 @@ class HAPPOTrainer:
         self.environment_config = load_environment_config(env_config)
         shaping = self.environment_config.get("shaping", {})
         self.reward_shaping_mode = str(shaping.get("mode", "absolute"))
-        self.reward_mode = "heterogeneous_role_v1" if self.environment_config["environment_version"].endswith("v3_7") else self.reward_shaping_mode
+        version = self.environment_config["environment_version"]
+        self.reward_mode = ("heterogeneous_role_v1" if version.endswith("v3_7") else
+                            "heterogeneous_role_coupled_v1" if version.endswith("v3_8") else
+                            self.reward_shaping_mode)
         self.shaping_gamma = float(shaping.get("gamma", 0.0))
         if self.reward_shaping_mode == "potential" and not np.isclose(self.shaping_gamma, float(c["gamma"]), rtol=0.0, atol=1e-12):
             raise ValueError(
@@ -678,7 +681,7 @@ class HAPPOTrainer:
 
     def save(self, path: str | Path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        payload = {"environment_version": self.environment_config["environment_version"], "environment_profile": self.config["environment_profile"], "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM, "actor_variant": self.config["actor_variant"], "critic_variant": self.config["critic_variant"], "method_variant": self.config["method_variant"], "reward_mode": self.reward_mode, "reward_shaping_mode": self.reward_shaping_mode if self.reward_mode != "heterogeneous_role_v1" else None, "shaping_gamma": self.shaping_gamma if self.reward_mode != "heterogeneous_role_v1" else None, "training_gamma": float(self.config["gamma"]), "actor_architecture": self.actor_architecture, "critic_architecture": self.critic_architecture, "critic_parameter_count": self.critic_parameter_count, "actors": self.actors.state_dict(), "critic": self.critic.state_dict(), "config": self.config}
+        payload = {"environment_version": self.environment_config["environment_version"], "environment_profile": self.config["environment_profile"], "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM, "actor_variant": self.config["actor_variant"], "critic_variant": self.config["critic_variant"], "method_variant": self.config["method_variant"], "reward_mode": self.reward_mode, "reward_shaping_mode": self.reward_shaping_mode if self.reward_mode not in ROLE_REWARD_MODES else None, "shaping_gamma": self.shaping_gamma if self.reward_mode not in ROLE_REWARD_MODES else None, "training_gamma": float(self.config["gamma"]), "actor_architecture": self.actor_architecture, "critic_architecture": self.critic_architecture, "critic_parameter_count": self.critic_parameter_count, "actors": self.actors.state_dict(), "critic": self.critic.state_dict(), "config": self.config}
         payload.update(self.pcta_metadata)
         torch.save(payload, path)
 
@@ -694,9 +697,9 @@ class HAPPOTrainer:
             "actor_variant": self.config["actor_variant"],
             "critic_variant": self.config["critic_variant"],
             "method_variant": self.config["method_variant"],
-            "reward_shaping_mode": self.reward_shaping_mode if self.reward_mode != "heterogeneous_role_v1" else None,
+            "reward_shaping_mode": self.reward_shaping_mode if self.reward_mode not in ROLE_REWARD_MODES else None,
             "reward_mode": self.reward_mode,
-            "shaping_gamma": self.shaping_gamma if self.reward_mode != "heterogeneous_role_v1" else None,
+            "shaping_gamma": self.shaping_gamma if self.reward_mode not in ROLE_REWARD_MODES else None,
             "training_gamma": float(self.config["gamma"]),
             "agp_lambda": float(self.config["agp_lambda"]),
             "actor_architecture": self.actor_architecture,

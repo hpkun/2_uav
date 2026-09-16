@@ -1,0 +1,31 @@
+============================================================
+HAPPO TRAINING
+Run: happo_v37_role_main_seed1_750k
+Profile: main
+Seed: 1
+Device: cuda
+Envs: 16
+Method: baseline
+Critic: mlp
+Rollout: 128
+Target steps: 750,000
+Checkpoint interval: 250,000
+Evaluation interval: 250,000
+Log interval: 50,000
+============================================================
+[TRAIN] 51,200 / 750,000 (6.8%)
+        elapsed 00:02:19 | speed 367.3 steps/s | ETA 00:31:43
+        episodes +703 / total 703
+        return -51.28 | W/B/D 0.0% / 15.6% / 84.4%
+        MAV survival 84.4% | UAV survivors 0.63
+        Red kills 0.00 | Blue kills 0.01 | ep length 71.8
+        actor loss [-0.021, -0.020, -0.020, -0.023]
+        critic loss 660.142 | entropy 3.507
+[TRAIN] 100,352 / 750,000 (13.4%)
+        elapsed 00:05:12 | speed 284.1 steps/s | ETA 00:38:07
+        episodes +666 / total 1369
+        return -18.30 | W/B/D 0.0% / 5.4% / 94.6%
+        MAV survival 94.6% | UAV survivors 2.03
+        Red kills 0.00 | Blue kills 0.18 | ep length 74.0
+        actor loss [-0.025, -0.018, -0.022, -0.020]
+        critic loss 198.573 | entropy 3.506

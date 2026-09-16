@@ -22,7 +22,7 @@ import yaml
 from algorithm.happo import HAPPOTrainer
 from algorithm.happo.trainer import LEGACY_PCTA_FAMILY, PCTA_V2_VARIANT
 from algorithm.happo.evaluation import evaluate_actors, evaluate_recurrent_actors, summarize_records
-from env.mavuav import RED_IDS, load_environment_config
+from env.mavuav import RED_IDS, ROLE_REWARD_MODES, load_environment_config
 
 
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "happo.yaml"
@@ -274,8 +274,8 @@ def _evaluation_row(
         "method_variant": trainer.config["method_variant"],
         "environment_version": trainer.environment_config["environment_version"],
         "reward_mode": trainer.reward_mode,
-        "reward_shaping_mode": trainer.reward_shaping_mode if trainer.reward_mode != "heterogeneous_role_v1" else None,
-        "shaping_gamma": trainer.shaping_gamma if trainer.reward_mode != "heterogeneous_role_v1" else None,
+        "reward_shaping_mode": trainer.reward_shaping_mode if trainer.reward_mode not in ROLE_REWARD_MODES else None,
+        "shaping_gamma": trainer.shaping_gamma if trainer.reward_mode not in ROLE_REWARD_MODES else None,
         "training_gamma": float(trainer.config["gamma"]),
         "seed": seed,
         "blue_target_strategy": "nearest_red_aircraft", "training_profile": trainer.config["environment_profile"],
@@ -397,8 +397,8 @@ def _initial_resolved(
         "method_variant": trainer.config["method_variant"],
         "environment_version": env_config["environment_version"],
         "reward_mode": trainer.reward_mode,
-        "reward_shaping_mode": trainer.reward_shaping_mode if trainer.reward_mode != "heterogeneous_role_v1" else None,
-        "shaping_gamma": trainer.shaping_gamma if trainer.reward_mode != "heterogeneous_role_v1" else None,
+        "reward_shaping_mode": trainer.reward_shaping_mode if trainer.reward_mode not in ROLE_REWARD_MODES else None,
+        "shaping_gamma": trainer.shaping_gamma if trainer.reward_mode not in ROLE_REWARD_MODES else None,
         "training_gamma": float(trainer.config["gamma"]),
         "actor_variant": trainer.config["actor_variant"],
         "critic_variant": trainer.config["critic_variant"],
@@ -617,8 +617,8 @@ def main(
             "method_variant": method_variant,
             "environment_version": env_config["environment_version"],
             "reward_mode": trainer.reward_mode,
-            "reward_shaping_mode": trainer.reward_shaping_mode if trainer.reward_mode != "heterogeneous_role_v1" else None,
-            "shaping_gamma": trainer.shaping_gamma if trainer.reward_mode != "heterogeneous_role_v1" else None,
+            "reward_shaping_mode": trainer.reward_shaping_mode if trainer.reward_mode not in ROLE_REWARD_MODES else None,
+            "shaping_gamma": trainer.shaping_gamma if trainer.reward_mode not in ROLE_REWARD_MODES else None,
             "training_gamma": float(trainer.config["gamma"]),
             "agp_lambda": float(trainer.config["agp_lambda"]),
             "blue_target_strategy": "nearest_red_aircraft",

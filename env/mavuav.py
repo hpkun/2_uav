@@ -16,6 +16,7 @@ from .reward_role_v37 import (
     target_score, uav_angle_reward, uav_speed_reward, uav_distance_reward,
     uav_process_reward, mav_aspect_reward, mav_awareness_reward,
 )
+from .reward_role_v38 import uav_coupled_process_reward
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "env.yaml"
 RED_IDS = ("MAV", "UAV1", "UAV2", "UAV3")
@@ -30,7 +31,9 @@ TYPE_ONE_HOT = {
 ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_5"
 CURRENT_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_6"
 ROLE_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_7"
-SUPPORTED_ENVIRONMENT_VERSIONS = frozenset((ENVIRONMENT_VERSION, CURRENT_ENVIRONMENT_VERSION, ROLE_ENVIRONMENT_VERSION))
+COUPLED_ROLE_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_8"
+ROLE_REWARD_MODES = frozenset(("heterogeneous_role_v1", "heterogeneous_role_coupled_v1"))
+SUPPORTED_ENVIRONMENT_VERSIONS = frozenset((ENVIRONMENT_VERSION, CURRENT_ENVIRONMENT_VERSION, ROLE_ENVIRONMENT_VERSION, COUPLED_ROLE_ENVIRONMENT_VERSION))
 OBS_DIM = 100
 GLOBAL_STATE_DIM = 117
 CROSS_TEAM_ATTACK_PAIRS = tuple((red, blue) for red in RED_IDS for blue in BLUE_IDS) + tuple(
@@ -129,7 +132,7 @@ def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("v3.6 configuration requires shaping.mode and shaping.gamma")
         if shaping["mode"] != "potential" or not np.isfinite(float(shaping["gamma"])) or not (0.0 < float(shaping["gamma"]) <= 1.0):
             raise ValueError("v3.6 shaping must be potential with finite gamma in (0, 1]")
-    else:
+    elif cfg["environment_version"] == ROLE_ENVIRONMENT_VERSION:
         if shaping is not None:
             raise ValueError("v3.7 must omit PBRS shaping")
         role = cfg.get("role_reward")
@@ -143,6 +146,20 @@ def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("v3.7 role_reward must match the frozen heterogeneous_role_v1 contract")
         if float(cfg["reward"]["blue_kill"]) != 100.0:
             raise ValueError("v3.7 blue_kill must be +100")
+    else:
+        if shaping is not None:
+            raise ValueError("v3.8 must omit PBRS shaping")
+        role = cfg.get("role_reward")
+        frozen = {
+            "mode": "heterogeneous_role_coupled_v1",
+            "target_selector": {"angle_weight": .35, "distance_weight": .25, "altitude_weight": .20, "relative_velocity_weight": .20},
+            "uav": {"process_mode": "angle_distance_product"},
+            "mav": {"threat_weight": .3, "aspect_weight": .2, "awareness_weight": .4, "aspect_threshold_deg": 45.0, "awareness_threshold_deg": 90.0, "awareness_gain": .3},
+        }
+        if role != frozen:
+            raise ValueError("v3.8 role_reward must match the frozen heterogeneous_role_coupled_v1 contract")
+        if float(cfg["reward"]["blue_kill"]) != 100.0:
+            raise ValueError("v3.8 blue_kill must be +100")
     if set(cfg["blue_policy"]) != {"target_strategy", "guidance_mode", "target_refresh_steps"}:
         raise ValueError("blue_policy has unknown or missing fields")
     if cfg["blue_policy"]["target_strategy"] != BluePolicy.TARGET_STRATEGY:
@@ -229,7 +246,11 @@ class HeterogeneousMAVUAVAirCombatEnv:
         self._red_attack_kills: set[str] = set()
         self._blue_attack_kills: set[str] = set()
         shaping = self.config.get("shaping", {})
-        self.reward_mode = "heterogeneous_role_v1" if self.config["environment_version"] == ROLE_ENVIRONMENT_VERSION else str(shaping.get("mode", "absolute"))
+        role_modes = {
+            ROLE_ENVIRONMENT_VERSION: "heterogeneous_role_v1",
+            COUPLED_ROLE_ENVIRONMENT_VERSION: "heterogeneous_role_coupled_v1",
+        }
+        self.reward_mode = role_modes.get(self.config["environment_version"], str(shaping.get("mode", "absolute")))
         self.shaping_gamma = float(shaping.get("gamma", 0.0))
 
     @property
@@ -324,7 +345,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
     def step(self, actions: Mapping[str, np.ndarray] | np.ndarray | list[np.ndarray]):
         if not self._running:
             raise RuntimeError("reset() must be called before step()")
-        potential_prev = self._team_situation_reward() if self.reward_mode != "heterogeneous_role_v1" else 0.0
+        potential_prev = self._team_situation_reward() if self.reward_mode not in ROLE_REWARD_MODES else 0.0
         red_actions = self._action_dict(actions)
         red_entities = {aid: self.entities[aid] for aid in RED_IDS}
         all_actions = dict(red_actions)
@@ -350,7 +371,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
         safety_violation = minimum_friendly_distance < float(safety_cfg["red_safe_distance"])
         safety_reward = float(safety_cfg["red_safe_distance_penalty"]) if safety_violation else 0.0
         terminated, truncated, outcome = self._termination()
-        situation = self._team_situation_reward() if self.reward_mode != "heterogeneous_role_v1" else 0.0
+        situation = self._team_situation_reward() if self.reward_mode not in ROLE_REWARD_MODES else 0.0
         done = terminated or truncated
         potential_next_effective, potential_shaping = potential_shaping_reward(
             potential_prev, situation, self.shaping_gamma, done,
@@ -363,7 +384,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
         if outcome == "red": terminal = float(reward_cfg["terminal_red_win"])
         elif outcome == "blue": terminal = float(reward_cfg["terminal_blue_win"])
         elif outcome == "draw": terminal = float(reward_cfg["terminal_draw"])
-        if self.reward_mode == "heterogeneous_role_v1":
+        if self.reward_mode in ROLE_REWARD_MODES:
             role_process, role_diagnostics = self._role_process_rewards()
             shared = float(event + terminal + safety_reward)
             rewards = {aid: float(role_process[aid] + shared) for aid in RED_IDS}
@@ -540,7 +561,9 @@ class HeterogeneousMAVUAVAirCombatEnv:
                 angle = uav_angle_reward(geometry.ata, geometry.aa)
                 distance = uav_distance_reward(geometry.distance, minimum_range, maximum_range)
                 speed = uav_speed_reward(red.v, blue.v)
-                process[aid] = uav_process_reward(angle, distance, speed)
+                process[aid] = (uav_coupled_process_reward(angle, distance)
+                                if self.reward_mode == "heterogeneous_role_coupled_v1"
+                                else uav_process_reward(angle, distance, speed))
             prefix = aid.lower()
             diagnostics.update({f"reward_target_{aid}": target, f"target_score_{aid}": None if chosen is None else float(chosen[0]),
                                 f"reward_target_switch_{aid}": switched,
@@ -559,9 +582,9 @@ class HeterogeneousMAVUAVAirCombatEnv:
             "mav_loss": int(not self.entities["MAV"].state.alive),
             "blue_target_strategy": self.blue_policy.TARGET_STRATEGY, "episode_return": float(self.episode_return),
             "environment_version": self.config["environment_version"],
-            "reward_shaping_mode": self.reward_mode if self.reward_mode != "heterogeneous_role_v1" else None,
+            "reward_shaping_mode": self.reward_mode if self.reward_mode not in ROLE_REWARD_MODES else None,
             "reward_mode": self.reward_mode,
-            "shaping_gamma": self.shaping_gamma if self.reward_mode != "heterogeneous_role_v1" else None,
+            "shaping_gamma": self.shaping_gamma if self.reward_mode not in ROLE_REWARD_MODES else None,
             "potential_shaping_sum": float(self._potential_shaping_sum),
             "absolute_situation_sum": float(self._absolute_situation_sum),
             "event_reward_sum": float(self._event_reward_sum),
@@ -577,7 +600,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
                 "team_reward_sum": self.episode_return,
                 **{f"{aid.lower()}_reward_target_switches": self._reward_target_switches[aid] for aid in RED_IDS[1:]},
                 **{f"{aid.lower()}_target_none_steps": self._reward_target_none_steps[aid] for aid in RED_IDS[1:]},
-            } if self.reward_mode == "heterogeneous_role_v1" else {}),
+            } if self.reward_mode in ROLE_REWARD_MODES else {}),
         }
 
     def _self_xy_norm(self, value: float) -> float:

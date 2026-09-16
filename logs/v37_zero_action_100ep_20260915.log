@@ -1,0 +1,28 @@
+
+========================================================================
+V3.7 ZERO-ACTION SANITY — 100 EPISODES
+========================================================================
+episodes                                : 100
+seed_start                              : 1000
+mean_episode_return                     : -8.096447
+red_win_rate                            : 0.000000
+blue_win_rate                           : 0.010000
+draw_rate                               : 0.990000
+MAV_survival_rate                       : 0.990000
+mean_UAV_survivors                      : 3.000000
+mean_red_attack_kills                   : 0.000000
+mean_blue_attack_kills                  : 0.010000
+mean_episode_length                     : 74.440000
+mean_mav_process_reward_sum             : -13.737117
+mean_uav_process_reward_sum             : -3.456224
+mean_shared_event_reward_sum            : -1.000000
+mean_shared_terminal_reward_sum         : -1.000000
+mean_shared_safety_reward_sum           : -0.070000
+mean_uav1_target_switches               : 7.240000
+mean_uav2_target_switches               : 7.080000
+mean_uav3_target_switches               : 7.450000
+mean_uav1_target_none_steps             : 0.620000
+mean_uav2_target_none_steps             : 0.620000
+mean_uav3_target_none_steps             : 0.620000
+========================================================================
+Saved: outputs/v37_zero_action_sanity_100ep.json

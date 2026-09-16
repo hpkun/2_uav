@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "/mnt/c/Users/HPK/Desktop/2_uav/algorithm/train_happo.py", line 653, in <module>
+    main()
+  File "/mnt/c/Users/HPK/Desktop/2_uav/algorithm/train_happo.py", line 471, in main
+    run_dir = _new_run_dir(args)
+  File "/mnt/c/Users/HPK/Desktop/2_uav/algorithm/train_happo.py", line 201, in _new_run_dir
+    raise FileExistsError(f"run folder already exists: {run_dir}")
+FileExistsError: run folder already exists: /mnt/c/Users/HPK/Desktop/2_uav/outputs/happo_v37_role_main_seed4_750k

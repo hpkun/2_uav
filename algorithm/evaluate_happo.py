@@ -19,7 +19,7 @@ import torch
 from algorithm.happo.evaluation import evaluate_actors, summarize_records
 from algorithm.happo.networks import IndependentActors
 from algorithm.happo.relational_critic import RelationalCentralizedCritic
-from env.mavuav import GLOBAL_STATE_DIM, OBS_DIM, load_environment_config
+from env.mavuav import GLOBAL_STATE_DIM, OBS_DIM, ROLE_REWARD_MODES, load_environment_config
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,8 +43,10 @@ def validate_checkpoint_contract(payload: dict[str, Any], env_config: dict[str, 
     if actual != expected:
         raise RuntimeError("incompatible HAPPO checkpoint environment contract")
     env_shaping = env_config.get("shaping", {})
-    env_mode = ("heterogeneous_role_v1" if env_config["environment_version"].endswith("v3_7")
-                else str(env_shaping.get("mode", "absolute")))
+    version = env_config["environment_version"]
+    env_mode = ("heterogeneous_role_v1" if version.endswith("v3_7") else
+                "heterogeneous_role_coupled_v1" if version.endswith("v3_8") else
+                str(env_shaping.get("mode", "absolute")))
     checkpoint_mode = str(payload.get("reward_mode", payload.get("reward_shaping_mode", "absolute")))
     if checkpoint_mode != env_mode:
         raise RuntimeError("incompatible HAPPO checkpoint reward mode")
@@ -94,8 +96,10 @@ def main(expected_critic_variant: str = "mlp") -> None:
     actors = IndependentActors(hidden_dim=int(trainer_config["hidden_dim"])).to(device)
     actors.load_state_dict(payload["actors"])
     actors.eval()
-    reward_mode = ("heterogeneous_role_v1" if env_config["environment_version"].endswith("v3_7")
-                   else str(env_config.get("shaping", {}).get("mode", "absolute")))
+    version = env_config["environment_version"]
+    reward_mode = ("heterogeneous_role_v1" if version.endswith("v3_7") else
+                   "heterogeneous_role_coupled_v1" if version.endswith("v3_8") else
+                   str(env_config.get("shaping", {}).get("mode", "absolute")))
     training_profile = str(payload["environment_profile"])
     rows = []
     algorithm = "rc_happo" if critic_variant == "relational" else "happo"
@@ -109,8 +113,8 @@ def main(expected_critic_variant: str = "mlp") -> None:
             "evaluation_profile": args.profile, "episodes": args.episodes,
             "environment_version": env_config["environment_version"],
             "reward_mode": reward_mode,
-            "reward_shaping_mode": reward_mode if reward_mode != "heterogeneous_role_v1" else None,
-            "shaping_gamma": float(env_config.get("shaping", {}).get("gamma", 0.0)) if reward_mode != "heterogeneous_role_v1" else None,
+            "reward_shaping_mode": reward_mode if reward_mode not in ROLE_REWARD_MODES else None,
+            "shaping_gamma": float(env_config.get("shaping", {}).get("gamma", 0.0)) if reward_mode not in ROLE_REWARD_MODES else None,
             "training_gamma": float(trainer_config.get("gamma", 0.99)),
             **summarize_records(records),
         })
@@ -128,8 +132,8 @@ def main(expected_critic_variant: str = "mlp") -> None:
             "evaluation_profile": args.profile, "method_variant": method_variant,
             "environment_version": env_config["environment_version"],
             "reward_mode": reward_mode,
-            "reward_shaping_mode": reward_mode if reward_mode != "heterogeneous_role_v1" else None,
-            "shaping_gamma": float(env_config.get("shaping", {}).get("gamma", 0.0)) if reward_mode != "heterogeneous_role_v1" else None,
+            "reward_shaping_mode": reward_mode if reward_mode not in ROLE_REWARD_MODES else None,
+            "shaping_gamma": float(env_config.get("shaping", {}).get("gamma", 0.0)) if reward_mode not in ROLE_REWARD_MODES else None,
             "training_gamma": float(trainer_config.get("gamma", 0.99)),
             "critic_variant": critic_variant, "critic_architecture": critic_architecture,
             "device": device, "results": rows,
