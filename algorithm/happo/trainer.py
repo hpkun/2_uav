@@ -93,6 +93,7 @@ class HAPPOTrainer:
         version = self.environment_config["environment_version"]
         self.reward_mode = ("heterogeneous_role_v1" if version.endswith("v3_7") else
                             "heterogeneous_role_coupled_v1" if version.endswith("v3_8") else
+                            "heterogeneous_role_coupled_gate_v1" if version.endswith("v3_9") else
                             self.reward_shaping_mode)
         self.shaping_gamma = float(shaping.get("gamma", 0.0))
         if self.reward_shaping_mode == "potential" and not np.isclose(self.shaping_gamma, float(c["gamma"]), rtol=0.0, atol=1e-12):

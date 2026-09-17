@@ -1,0 +1,134 @@
+==============================================================================
+V3.8 SEED4 STOCHASTIC-vs-DETERMINISTIC POLICY GAP DIAGNOSTIC
+==============================================================================
+checkpoint : /mnt/c/Users/HPK/Desktop/2_uav/outputs/happo_v38_coupled_main_seed4_750k_20260916_154023/checkpoint_final.pt
+env config : /mnt/c/Users/HPK/Desktop/2_uav/configs/env_v38.yaml
+device     : cuda
+profile    : main
+env seeds  : 1000 .. 1099
+episodes   : 100 per mode
+==============================================================================
+
+FINAL ACTOR DISTRIBUTIONS
+------------------------------------------------------------------------------
+MAV   | log_std=[-0.2794, -0.3342, -0.4427] | std=[0.7562, 0.7159, 0.6423] | entropy=3.2004
+UAV1  | log_std=[-0.4261, -0.3431, -0.4112] | std=[0.6531, 0.7095, 0.6628] | entropy=3.0764
+UAV2  | log_std=[-0.3694, -0.5054, -0.3939] | std=[0.6912, 0.6032, 0.6744] | entropy=2.9881
+UAV3  | log_std=[-0.2859, -0.4614, -0.3301] | std=[0.7513, 0.6304, 0.7189] | entropy=3.1794
+
+RUNNING DETERMINISTIC EVALUATION...
+[deterministic]  20/100 | kills=0.100 | MAV_survival=0.850
+[deterministic]  40/100 | kills=0.150 | MAV_survival=0.700
+[deterministic]  60/100 | kills=0.100 | MAV_survival=0.700
+[deterministic]  80/100 | kills=0.200 | MAV_survival=0.738
+[deterministic] 100/100 | kills=0.210 | MAV_survival=0.730
+
+RUNNING STOCHASTIC EVALUATION...
+[stochastic   ]  20/100 | kills=1.650 | MAV_survival=1.000
+[stochastic   ]  40/100 | kills=1.300 | MAV_survival=1.000
+[stochastic   ]  60/100 | kills=1.417 | MAV_survival=1.000
+[stochastic   ]  80/100 | kills=1.337 | MAV_survival=1.000
+[stochastic   ] 100/100 | kills=1.440 | MAV_survival=1.000
+
+==============================================================================
+DETERMINISTIC — tanh(policy mean)
+==============================================================================
+mean_episode_return                           : -35.527003
+red_win_rate                                  :  0.000000
+blue_win_rate                                 :  0.270000
+draw_rate                                     :  0.730000
+MAV_survival_rate                             :  0.730000
+mean_UAV_survivors                            :  2.780000
+mean_red_attack_kills                         :  0.210000
+mean_blue_attack_kills                        :  0.270000
+mean_episode_length                           :  71.180000
+mean_mav_process_reward_sum                   : -5.986421
+mean_uav_process_reward_sum                   :  1.572803
+mean_shared_event_reward_sum                  : -8.200000
+mean_shared_terminal_reward_sum               : -27.000000
+mean_shared_safety_reward_sum                 : -0.010000
+uav_full_gate_episode_rate                    :  0.380000
+uav_hold2_episode_rate                        :  0.290000
+uav_hold3_attack_event_episode_rate           :  0.160000
+any_red_hold3_attack_event_episode_rate       :  0.160000
+mean_uav_attack_events_per_episode            :  0.210000
+mean_all_red_attack_events_per_episode        :  0.210000
+mean_uav_full_gate_steps_per_episode          :  1.080000
+mean_uav_hold2_steps_per_episode              :  0.570000
+mean_abs_pre_tanh_mu                          :  0.954701
+mean_abs_policy_mean_action                   :  0.597252
+mean_abs_executed_action                      :  0.597252
+mean_abs_action_minus_mean                    :  0.000000
+action_saturation_rate_abs_ge_095             :  0.134836
+per_agent_mean_abs_executed_action:
+    MAV  : 0.508086
+    UAV1 : 0.630022
+    UAV2 : 0.594127
+    UAV3 : 0.661149
+
+==============================================================================
+STOCHASTIC — policy sample
+==============================================================================
+mean_episode_return                           :  148.923387
+red_win_rate                                  :  0.070000
+blue_win_rate                                 :  0.000000
+draw_rate                                     :  0.930000
+MAV_survival_rate                             :  1.000000
+mean_UAV_survivors                            :  2.750000
+mean_red_attack_kills                         :  1.440000
+mean_blue_attack_kills                        :  0.250000
+mean_episode_length                           :  72.750000
+mean_mav_process_reward_sum                   : -5.107278
+mean_uav_process_reward_sum                   :  2.306942
+mean_shared_event_reward_sum                  :  141.500000
+mean_shared_terminal_reward_sum               :  7.000000
+mean_shared_safety_reward_sum                 : -0.030000
+uav_full_gate_episode_rate                    :  0.830000
+uav_hold2_episode_rate                        :  0.820000
+uav_hold3_attack_event_episode_rate           :  0.750000
+any_red_hold3_attack_event_episode_rate       :  0.750000
+mean_uav_attack_events_per_episode            :  1.440000
+mean_all_red_attack_events_per_episode        :  1.440000
+mean_uav_full_gate_steps_per_episode          :  4.300000
+mean_uav_hold2_steps_per_episode              :  2.780000
+mean_abs_pre_tanh_mu                          :  1.004730
+mean_abs_policy_mean_action                   :  0.606515
+mean_abs_executed_action                      :  0.656678
+mean_abs_action_minus_mean                    :  0.272676
+action_saturation_rate_abs_ge_095             :  0.206675
+per_agent_mean_abs_executed_action:
+    MAV  : 0.623817
+    UAV1 : 0.640144
+    UAV2 : 0.669006
+    UAV3 : 0.692862
+
+==============================================================================
+STOCHASTIC - DETERMINISTIC DELTAS
+==============================================================================
+mean_episode_return                           : +184.450390
+red_win_rate                                  : +0.070000
+blue_win_rate                                 : -0.270000
+draw_rate                                     : +0.200000
+MAV_survival_rate                             : +0.270000
+mean_red_attack_kills                         : +1.230000
+mean_blue_attack_kills                        : -0.020000
+mean_uav_process_reward_sum                   : +0.734140
+mean_shared_event_reward_sum                  : +149.700000
+uav_full_gate_episode_rate                    : +0.450000
+uav_hold2_episode_rate                        : +0.530000
+uav_hold3_attack_event_episode_rate           : +0.590000
+mean_uav_attack_events_per_episode            : +1.230000
+
+==============================================================================
+PAIRED SAME-SEED DIAGNOSTICS
+==============================================================================
+stochastic kills > deterministic kills      : 0.690
+stochastic kills = deterministic kills      : 0.280
+stochastic kills < deterministic kills      : 0.030
+mean paired kill delta                      : +1.230
+stochastic saves MAV when deterministic dies: 0.270
+deterministic saves MAV when stochastic dies: 0.000
+
+==============================================================================
+Saved diagnostic JSON: /mnt/c/Users/HPK/Desktop/2_uav/outputs/happo_v38_coupled_main_seed4_750k_20260916_154023/policy_gap_diagnostic_seed1000_1099.json
+==============================================================================
