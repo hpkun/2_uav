@@ -23,9 +23,9 @@ from .relational_critic import RelationalCentralizedCritic
 from .agp import apply_agp
 from .credit_buffer import CreditRolloutBuffer
 from .counterfactual_credit import (
-    CF_METHOD, CREDIT_METHODS, RDC_METHOD, CounterfactualCreditCritic,
-    combine_rdc_component_credit, component_credit, component_weights,
-    credit_component_names, extract_credit_components, replace_agent_action,
+    CF_METHOD, CREDIT_METHODS, RDC_METHOD, ActionMarginalCreditCritic,
+    combine_rdc_component_residual, component_residual, component_weights,
+    credit_component_names, extract_credit_components, normalize_credit_advantage,
 )
 
 
@@ -179,7 +179,7 @@ class HAPPOTrainer:
         if self.credit_enabled:
             self.credit_component_names = credit_component_names(c["method_variant"])
             self.credit_component_weights = component_weights(c["method_variant"])
-            self.credit_critic = CounterfactualCreditCritic(
+            self.credit_critic = ActionMarginalCreditCritic(
                 len(self.credit_component_names), hidden_dim=int(c["hidden_dim"]),
             ).to(self.device)
             self.credit_critic_optimizer = torch.optim.Adam(
@@ -320,13 +320,14 @@ class HAPPOTrainer:
         assert self.credit_critic is not None
         return {
             "credit_method": (
-                "counterfactual_team" if self.config["method_variant"] == CF_METHOD
-                else "role_decomposed_counterfactual"
+                "action_marginal_team" if self.config["method_variant"] == CF_METHOD
+                else "role_decomposed_action_marginal"
             ),
             "credit_component_names": list(self.credit_component_names),
             "credit_component_weights": self.credit_component_weights.tolist(),
             "credit_critic_architecture": self.credit_critic.architecture(),
-            "counterfactual_samples_per_agent": 1,
+            "counterfactual_action_sampling": False,
+            "credit_estimator_version": 2,
         }
 
     def _validate_actor_architecture(self, data: Mapping[str, Any]) -> None:
@@ -495,69 +496,95 @@ class HAPPOTrainer:
         self.completed_episodes.extend(completed)
         return completed
 
-    def _sample_counterfactual_joint_actions(
-        self, observations: torch.Tensor, actual_actions: torch.Tensor,
-    ) -> list[torch.Tensor]:
-        """Draw and freeze exactly one behavior-policy replacement per transition/agent."""
-        frozen: list[torch.Tensor] = []
-        with torch.no_grad():
-            for agent, actor in enumerate(self.actors.actors):
-                sampled, _ = actor.sample(observations[:, agent])
-                frozen.append(
-                    replace_agent_action(actual_actions, agent, sampled.detach()).detach()
-                )
-        self.last_counterfactual_actions = [value.detach().clone() for value in frozen]
-        return frozen
-
     def _train_credit_critic(
-        self, states: torch.Tensor, actions: torch.Tensor, targets: torch.Tensor,
-    ) -> tuple[float, float, float]:
+        self,
+        states: torch.Tensor,
+        actions: torch.Tensor,
+        targets: torch.Tensor,
+        active_masks: torch.Tensor,
+    ) -> dict[str, float]:
         if self.credit_critic is None or self.credit_critic_optimizer is None:
             raise RuntimeError("credit critic is unavailable")
         c = self.config
         total = len(states)
         mini = int(c["minibatch_size"])
-        value_losses: list[float] = []
-        q_losses: list[float] = []
-        total_losses: list[float] = []
+        value_sse = baseline_sse = 0.0
+        value_count = baseline_count = 0
+        per_agent_sse = np.zeros(len(RED_IDS), dtype=np.float64)
+        per_agent_count = np.zeros(len(RED_IDS), dtype=np.int64)
         for _ in range(int(c["ppo_epochs"])):
             sample_order = self.rng.permutation(total)
             for start in range(0, total, mini):
                 idx = torch.as_tensor(sample_order[start:start + mini], device=self.device)
-                value_loss = (self.credit_critic.values(states[idx]) - targets[idx]).square().mean()
-                q_loss = (self.credit_critic.q_values(states[idx], actions[idx]) - targets[idx]).square().mean()
-                loss = 0.5 * (value_loss + q_loss)
+                value_error = (self.credit_critic.values(states[idx]) - targets[idx]).square()
+                value_loss = value_error.mean()
+                batch_baseline_sse = torch.zeros((), device=self.device)
+                batch_baseline_count = 0
+                for agent in range(len(RED_IDS)):
+                    active = active_masks[idx, agent] > 0.5
+                    if not active.any():
+                        continue
+                    prediction = self.credit_critic.baseline_for_agent(
+                        states[idx][active], actions[idx][active], agent,
+                    )
+                    error = (prediction - targets[idx][active]).square()
+                    batch_baseline_sse = batch_baseline_sse + error.sum()
+                    count = error.numel()
+                    batch_baseline_count += count
+                    per_agent_sse[agent] += float(error.detach().sum().item())
+                    per_agent_count[agent] += count
+                baseline_loss = (
+                    batch_baseline_sse / batch_baseline_count
+                    if batch_baseline_count else torch.zeros((), device=self.device)
+                )
+                loss = 0.5 * (value_loss + baseline_loss)
                 self.credit_critic_optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.credit_critic.parameters(), float(c["max_grad_norm"]))
                 self.credit_critic_optimizer.step()
-                value_losses.append(float(value_loss.item()))
-                q_losses.append(float(q_loss.item()))
-                total_losses.append(float(loss.item()))
-        return float(np.mean(value_losses)), float(np.mean(q_losses)), float(np.mean(total_losses))
+                value_sse += float(value_error.detach().sum().item())
+                value_count += value_error.numel()
+                baseline_sse += float(batch_baseline_sse.detach().item())
+                baseline_count += batch_baseline_count
+        metrics = {
+            "credit_value_loss": value_sse / max(value_count, 1),
+            "credit_baseline_loss": baseline_sse / max(baseline_count, 1),
+        }
+        metrics["credit_total_loss"] = 0.5 * (
+            metrics["credit_value_loss"] + metrics["credit_baseline_loss"]
+        )
+        for agent in range(len(RED_IDS)):
+            metrics[f"credit_baseline_loss_{agent}"] = (
+                per_agent_sse[agent] / per_agent_count[agent]
+                if per_agent_count[agent] else 0.0
+            )
+        return metrics
 
-    def _counterfactual_actor_advantages(
+    def _action_marginal_actor_advantages(
         self,
         states: torch.Tensor,
         actions: torch.Tensor,
-        counterfactual_actions: list[torch.Tensor],
+        component_returns: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Freeze critic outputs so actor loss can only differentiate through new log-prob."""
+        """Freeze pre-update B_i residuals before any optimizer sees this rollout."""
         if self.credit_critic is None:
             raise RuntimeError("credit critic is unavailable")
         advantages: list[torch.Tensor] = []
-        credits: list[torch.Tensor] = []
+        residuals: list[torch.Tensor] = []
         with torch.no_grad():
-            actual_q = self.credit_critic.q_values(states, actions)
-            for replaced in counterfactual_actions:
-                counterfactual_q = self.credit_critic.q_values(states, replaced)
-                per_component = component_credit(actual_q, counterfactual_q)
-                credits.append(per_component)
+            for agent in range(len(RED_IDS)):
+                baseline = self.credit_critic.baseline_for_agent(states, actions, agent)
+                per_component = component_residual(component_returns, baseline)
+                residuals.append(per_component)
                 if self.config["method_variant"] == RDC_METHOD:
-                    advantages.append(combine_rdc_component_credit(actual_q, counterfactual_q))
+                    advantages.append(combine_rdc_component_residual(component_returns, baseline))
                 else:
                     advantages.append(per_component.squeeze(-1))
-        return torch.stack(advantages, dim=-1).detach(), torch.stack(credits, dim=1).detach()
+        frozen_advantages = torch.stack(advantages, dim=-1).detach()
+        frozen_residuals = torch.stack(residuals, dim=1).detach()
+        self.last_credit_actor_advantages = frozen_advantages.clone()
+        self.last_credit_component_residuals = frozen_residuals.clone()
+        return frozen_advantages, frozen_residuals
 
     def update(self) -> dict[str, Any]:
         if self.is_recurrent:
@@ -573,39 +600,42 @@ class HAPPOTrainer:
         returns = torch.as_tensor(self.buffer.returns.reshape(-1), device=self.device)
         credit_metrics: dict[str, float] = {}
         actor_advantages: torch.Tensor | None = None
-        component_credits: torch.Tensor | None = None
+        component_residuals: torch.Tensor | None = None
+        credit_targets: torch.Tensor | None = None
         if self.credit_enabled:
             if not isinstance(self.buffer, CreditRolloutBuffer):
                 raise TypeError("counterfactual methods require CreditRolloutBuffer")
-            counterfactual_actions = self._sample_counterfactual_joint_actions(observations, actions)
             credit_targets = torch.as_tensor(
                 self.buffer.credit_returns.reshape(-1, self.buffer.component_count),
                 device=self.device,
             )
-            value_loss, q_loss, total_loss = self._train_credit_critic(
+            actor_advantages, component_residuals = self._action_marginal_actor_advantages(
                 states, actions, credit_targets,
             )
-            actor_advantages, component_credits = self._counterfactual_actor_advantages(
-                states, actions, counterfactual_actions,
-            )
-            credit_metrics.update({
-                "credit_value_loss": value_loss,
-                "credit_q_loss": q_loss,
-                "credit_total_loss": total_loss,
-            })
             for agent in range(num_agents):
-                credit_metrics[f"credit_adv_mean_abs_{agent}"] = float(
-                    actor_advantages[:, agent].abs().mean().item()
+                active = active_masks[:, agent] > 0.5
+                active_advantage = actor_advantages[active, agent]
+                credit_metrics[f"credit_adv_mean_abs_{agent}"] = (
+                    float(active_advantage.abs().mean().item()) if active.any() else 0.0
                 )
-                credit_metrics[f"credit_adv_std_{agent}"] = float(
-                    actor_advantages[:, agent].std(unbiased=False).item()
+                credit_metrics[f"credit_adv_std_{agent}"] = (
+                    float(active_advantage.std(unbiased=False).item()) if active.any() else 0.0
                 )
             if self.config["method_variant"] == RDC_METHOD:
-                assert component_credits is not None
+                assert component_residuals is not None
                 for index, name in enumerate(self.credit_component_names):
-                    credit_metrics[f"rdc_{name}_credit_mean_abs"] = float(
-                        component_credits[..., index].abs().mean().item()
+                    active_values = [
+                        component_residuals[active_masks[:, agent] > 0.5, agent, index]
+                        for agent in range(num_agents)
+                        if (active_masks[:, agent] > 0.5).any()
+                    ]
+                    credit_metrics[f"rdc_{name}_credit_mean_abs"] = (
+                        float(torch.cat(active_values).abs().mean().item()) if active_values else 0.0
                     )
+            for index, name in enumerate(self.credit_component_names):
+                credit_metrics[f"credit_component_return_std_{name}"] = float(
+                    credit_targets[:, index].std(unbiased=False).item()
+                )
         factor = torch.ones_like(advantages)
         order = [int(v) for v in self.rng.permutation(num_agents)]
         actor_losses: list[list[float]] = [[] for _ in RED_IDS]; entropies: list[float] = []
@@ -626,17 +656,27 @@ class HAPPOTrainer:
         if c["actor_variant"] in PCTA_FAMILY:
             self.last_pcta_factor_history = [factor.detach().cpu().numpy().copy()]
         clip = float(c["clip_coef"]); mini = int(c["minibatch_size"]); total = len(advantages)
+        if self.credit_enabled:
+            self.last_credit_normalized_advantages = torch.zeros(
+                (total, num_agents), device=self.device,
+            )
         for agent in order:
             optimizer = self.actor_optimizers[agent]
             active = active_masks[:, agent] > 0.5
             agent_advantages = (
                 actor_advantages[:, agent] if actor_advantages is not None else advantages
             )
-            normalized = agent_advantages.clone()
-            if active.any():
+            if self.credit_enabled:
+                normalized, degenerate = normalize_credit_advantage(agent_advantages, active)
+                credit_metrics[f"credit_degenerate_agent_{agent}"] = float(degenerate)
+            else:
+                normalized = agent_advantages.clone()
+            if not self.credit_enabled and active.any():
                 normalized = (
                     agent_advantages - agent_advantages[active].mean()
                 ) / agent_advantages[active].std(unbiased=False).clamp_min(1e-8)
+            if self.credit_enabled:
+                self.last_credit_normalized_advantages[:, agent] = normalized.detach()
             for _ in range(int(c["ppo_epochs"])):
                 sample_order = self.rng.permutation(total)
                 for start in range(0, total, mini):
@@ -704,6 +744,11 @@ class HAPPOTrainer:
                 self.critic_optimizer.zero_grad(); (float(c["value_loss_coef"]) * value_loss).backward()
                 nn.utils.clip_grad_norm_(self.critic.parameters(), float(c["max_grad_norm"])); self.critic_optimizer.step()
                 critic_losses.append(float(value_loss.item()))
+        if self.credit_enabled:
+            assert credit_targets is not None
+            credit_metrics.update(self._train_credit_critic(
+                states, actions, credit_targets, active_masks,
+            ))
         metrics: dict[str, Any] = {f"actor_{i}_loss": float(np.mean(actor_losses[i])) if actor_losses[i] else 0.0 for i in range(num_agents)}
         metrics.update({"actor_loss": float(np.mean([v for rows in actor_losses for v in rows])), "critic_loss": float(np.mean(critic_losses)), "entropy": float(np.mean(entropies)), "agent_update_order": order})
         metrics.update(credit_metrics)
@@ -985,7 +1030,8 @@ class HAPPOTrainer:
             expected_credit = self.credit_metadata
             for field in (
                 "credit_method", "credit_component_names", "credit_component_weights",
-                "credit_critic_architecture", "counterfactual_samples_per_agent",
+                "credit_critic_architecture", "counterfactual_action_sampling",
+                "credit_estimator_version",
             ):
                 if data.get(field) != expected_credit[field]:
                     raise RuntimeError(

@@ -1,4 +1,4 @@
-"""Continuous-action counterfactual credit primitives for CF/RDC-HAPPO."""
+"""Action-marginal credit primitives for CF/RDC-HAPPO v2."""
 from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
@@ -88,35 +88,54 @@ def compute_component_lambda_returns(
     return returns
 
 
-def replace_agent_action(
-    joint_actions: torch.Tensor, agent_index: int, counterfactual_actions: torch.Tensor,
-) -> torch.Tensor:
-    """Clone a [B,A,D] joint action and replace exactly one agent's action."""
-    if joint_actions.ndim != 3:
-        raise ValueError("joint_actions must have shape [batch, agents, action_dim]")
-    if counterfactual_actions.shape != joint_actions[:, agent_index].shape:
-        raise ValueError("counterfactual action shape mismatch")
-    replaced = joint_actions.clone()
-    replaced[:, agent_index] = counterfactual_actions.detach()
-    return replaced
+def other_agent_actions(joint_actions: torch.Tensor, agent_index: int) -> torch.Tensor:
+    """Return [B,9] actions in RED_IDS order with the current agent removed."""
+    if joint_actions.ndim != 3 or joint_actions.shape[1:] != (len(RED_IDS), 3):
+        raise ValueError("joint_actions must have shape [batch, 4, 3]")
+    if not 0 <= int(agent_index) < len(RED_IDS):
+        raise IndexError("agent_index is out of range")
+    indices = [index for index in range(len(RED_IDS)) if index != int(agent_index)]
+    return joint_actions[:, indices].reshape(joint_actions.shape[0], -1)
 
 
-def component_credit(actual_q: torch.Tensor, counterfactual_q: torch.Tensor) -> torch.Tensor:
-    return actual_q - counterfactual_q
+def component_residual(component_returns: torch.Tensor, baselines: torch.Tensor) -> torch.Tensor:
+    if component_returns.shape != baselines.shape:
+        raise ValueError("component returns and baselines must share shape")
+    return component_returns - baselines
 
 
-def combine_rdc_component_credit(
-    actual_q: torch.Tensor, counterfactual_q: torch.Tensor,
+def combine_rdc_component_residual(
+    component_returns: torch.Tensor, baselines: torch.Tensor,
 ) -> torch.Tensor:
     """Preserve the full team objective using its exact environment-defined weights."""
-    if actual_q.shape[-1] != len(RDC_COMPONENT_NAMES) or actual_q.shape != counterfactual_q.shape:
-        raise ValueError("RDC Q tensors must share shape [..., 5]")
-    weights = torch.as_tensor(RDC_COMPONENT_WEIGHTS, dtype=actual_q.dtype, device=actual_q.device)
-    return ((actual_q - counterfactual_q) * weights).sum(dim=-1)
+    if component_returns.shape[-1] != len(RDC_COMPONENT_NAMES) or component_returns.shape != baselines.shape:
+        raise ValueError("RDC component tensors must share shape [..., 5]")
+    weights = torch.as_tensor(
+        RDC_COMPONENT_WEIGHTS, dtype=component_returns.dtype, device=component_returns.device,
+    )
+    return ((component_returns - baselines) * weights).sum(dim=-1)
 
 
-class CounterfactualCreditCritic(nn.Module):
-    """State-value and continuous joint-action Q heads for fixed reward components."""
+def normalize_credit_advantage(
+    advantages: torch.Tensor, active: torch.Tensor,
+) -> tuple[torch.Tensor, bool]:
+    """Normalize informative active residuals; suppress only numerical degeneracy."""
+    normalized = torch.zeros_like(advantages)
+    active = active > 0.5
+    if not active.any():
+        return normalized, True
+    active_values = advantages[active]
+    std = active_values.std(unbiased=False)
+    if std <= 1e-6:
+        # The threshold only disables numerically degenerate residual estimators.
+        # It does not rescale informative advantages or alter the task reward.
+        return normalized, True
+    normalized[active] = (active_values - active_values.mean()) / std
+    return normalized, False
+
+
+class ActionMarginalCreditCritic(nn.Module):
+    """Component values plus independent B_i(s, a_-i) marginal baselines."""
 
     def __init__(
         self,
@@ -129,31 +148,46 @@ class CounterfactualCreditCritic(nn.Module):
         super().__init__()
         self.component_count = int(component_count)
         self.state_dim = int(state_dim)
-        self.joint_action_dim = int(num_agents * action_dim)
+        self.num_agents = int(num_agents)
+        self.action_dim = int(action_dim)
+        self.other_action_dim = int((num_agents - 1) * action_dim)
         self.hidden_dim = int(hidden_dim)
-        self.state_encoder = nn.Sequential(nn.Linear(state_dim, hidden_dim), nn.Tanh())
-        self.value_head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim), nn.Tanh(), nn.Linear(hidden_dim, component_count),
-        )
-        self.q_head = nn.Sequential(
-            nn.Linear(hidden_dim + self.joint_action_dim, hidden_dim), nn.Tanh(),
+        self.value_network = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim), nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim), nn.Tanh(),
             nn.Linear(hidden_dim, component_count),
         )
+        self.marginal_baselines = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(state_dim + self.other_action_dim, hidden_dim), nn.Tanh(),
+                nn.Linear(hidden_dim, hidden_dim), nn.Tanh(),
+                nn.Linear(hidden_dim, component_count),
+            )
+            for _ in range(num_agents)
+        ])
 
     def values(self, states: torch.Tensor) -> torch.Tensor:
-        return self.value_head(self.state_encoder(states))
+        return self.value_network(states)
 
-    def q_values(self, states: torch.Tensor, joint_actions: torch.Tensor) -> torch.Tensor:
-        embedding = self.state_encoder(states)
-        flattened = joint_actions.reshape(joint_actions.shape[0], -1)
-        if flattened.shape[-1] != self.joint_action_dim:
-            raise ValueError("joint action dimension mismatch")
-        return self.q_head(torch.cat((embedding, flattened), dim=-1))
+    def baseline_for_agent(
+        self, states: torch.Tensor, joint_actions: torch.Tensor, agent_index: int,
+    ) -> torch.Tensor:
+        others = other_agent_actions(joint_actions, agent_index)
+        return self.marginal_baselines[int(agent_index)](torch.cat((states, others), dim=-1))
+
+    def baselines(self, states: torch.Tensor, joint_actions: torch.Tensor) -> torch.Tensor:
+        return torch.stack([
+            self.baseline_for_agent(states, joint_actions, agent)
+            for agent in range(self.num_agents)
+        ], dim=1)
 
     def architecture(self) -> dict[str, int]:
         return {
             "state_dim": self.state_dim,
-            "joint_action_dim": self.joint_action_dim,
+            "other_action_dim": self.other_action_dim,
+            "num_agents": self.num_agents,
+            "action_dim": self.action_dim,
             "hidden_dim": self.hidden_dim,
             "component_count": self.component_count,
+            "baseline_type": "agent_specific_action_marginal",
         }

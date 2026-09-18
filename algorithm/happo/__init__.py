@@ -5,7 +5,7 @@ from .recurrent_buffer import RecurrentRolloutBuffer, sequence_chunks
 from .relational_critic import RelationalCentralizedCritic
 from .trainer import HAPPOTrainer, preceding_factor_update
 from .credit_buffer import CreditRolloutBuffer
-from .counterfactual_credit import CounterfactualCreditCritic
+from .counterfactual_credit import ActionMarginalCreditCritic
 from algorithm.modules.pcta import PCTAActor, PCTAIndependentActors, pursuit_consistency
 from algorithm.modules.pcta_v2 import PCTAv2Actor, PCTAv2IndependentActors, target_behavior_diagnostics
 
@@ -13,7 +13,7 @@ __all__ = [
     "IndependentActors", "RecurrentGaussianActor", "RecurrentIndependentActors",
     "RolloutBuffer", "RecurrentRolloutBuffer", "sequence_chunks", "HAPPOTrainer",
     "preceding_factor_update", "RelationalCentralizedCritic",
-    "CreditRolloutBuffer", "CounterfactualCreditCritic",
+    "CreditRolloutBuffer", "ActionMarginalCreditCritic",
     "PCTAActor", "PCTAIndependentActors", "pursuit_consistency",
     "PCTAv2Actor", "PCTAv2IndependentActors", "target_behavior_diagnostics",
 ]

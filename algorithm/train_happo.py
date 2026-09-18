@@ -53,14 +53,20 @@ PCTA_V2_FIELDS = (
     "pcta_v2_valid_target_states", "pcta_v2_multi_target_states",
 )
 CREDIT_FIELDS = (
-    "credit_value_loss", "credit_q_loss", "credit_total_loss",
+    "credit_value_loss", "credit_baseline_loss", "credit_total_loss",
+    *(f"credit_baseline_loss_{i}" for i in range(len(RED_IDS))),
     *(f"credit_adv_mean_abs_{i}" for i in range(len(RED_IDS))),
     *(f"credit_adv_std_{i}" for i in range(len(RED_IDS))),
+    *(f"credit_degenerate_agent_{i}" for i in range(len(RED_IDS))),
 )
+CF_FIELDS = CREDIT_FIELDS + ("credit_component_return_std_team",)
 RDC_FIELDS = (
     "rdc_shared_credit_mean_abs", "rdc_mav_role_credit_mean_abs",
     "rdc_uav1_role_credit_mean_abs", "rdc_uav2_role_credit_mean_abs",
     "rdc_uav3_role_credit_mean_abs",
+    "credit_component_return_std_shared", "credit_component_return_std_mav_role",
+    "credit_component_return_std_uav1_role", "credit_component_return_std_uav2_role",
+    "credit_component_return_std_uav3_role",
 )
 LOSS_FIELDS = (*(f"actor_{i}_loss" for i in range(len(RED_IDS))), "critic_loss", "entropy")
 
@@ -356,6 +362,31 @@ def _progress_lines(
         f"        actor loss [{actor_loss_text}]",
         f"        critic loss {losses['critic_loss']:.3f} | entropy {losses['entropy']:.3f}",
     ])
+    if window.updates and "credit_value_loss" in window.updates[0]:
+        latest = window.updates[-1]
+        mean_value_loss = np.mean([update["credit_value_loss"] for update in window.updates])
+        mean_baseline_loss = np.mean([update["credit_baseline_loss"] for update in window.updates])
+        advantage_abs = [latest[f"credit_adv_mean_abs_{i}"] for i in range(len(RED_IDS))]
+        advantage_std = [latest[f"credit_adv_std_{i}"] for i in range(len(RED_IDS))]
+        degenerate = [int(latest[f"credit_degenerate_agent_{i}"]) for i in range(len(RED_IDS))]
+        lines.extend([
+            f"        credit loss V/B {mean_value_loss:.4f} / {mean_baseline_loss:.4f}",
+            f"        raw Aabs {[round(value, 6) for value in advantage_abs]} | "
+            f"Astd {[round(value, 6) for value in advantage_std]} | degenerate {degenerate}",
+        ])
+        if "rdc_shared_credit_mean_abs" in latest:
+            component_abs = [
+                latest[f"rdc_{name}_credit_mean_abs"]
+                for name in ("shared", "mav_role", "uav1_role", "uav2_role", "uav3_role")
+            ]
+            return_std = [
+                latest[f"credit_component_return_std_{name}"]
+                for name in ("shared", "mav_role", "uav1_role", "uav2_role", "uav3_role")
+            ]
+            lines.append(
+                f"        RDC comp abs S/M/U1/U2/U3 {[round(value, 6) for value in component_abs]} | "
+                f"component return std {[round(value, 6) for value in return_std]}"
+            )
     if window.updates and "pcta_consistency_loss" in window.updates[0]:
         valid_pairs = sum(int(update["pcta_valid_temporal_pairs"]) for update in window.updates)
         lines.append(
@@ -550,7 +581,7 @@ def main(
         elif method_variant == "rdc_happo":
             training_fields = TRAINING_FIELDS + CREDIT_FIELDS + RDC_FIELDS
         elif method_variant == "cf_happo":
-            training_fields = TRAINING_FIELDS + CREDIT_FIELDS
+            training_fields = TRAINING_FIELDS + CF_FIELDS
         else:
             training_fields = TRAINING_FIELDS
         configured_horizon = int(trainer.config["rollout_steps"])

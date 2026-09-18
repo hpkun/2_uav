@@ -12,9 +12,9 @@ import yaml
 from algorithm.common.buffer import RolloutBuffer
 from algorithm.happo.credit_buffer import CreditRolloutBuffer
 from algorithm.happo.counterfactual_credit import (
-    CF_METHOD, RDC_METHOD, CounterfactualCreditCritic,
-    component_credit, compute_component_lambda_returns,
-    credit_component_names, extract_credit_components, replace_agent_action,
+    CF_METHOD, RDC_METHOD, ActionMarginalCreditCritic,
+    component_residual, compute_component_lambda_returns,
+    credit_component_names, extract_credit_components, other_agent_actions,
 )
 from algorithm.happo.trainer import HAPPOTrainer
 from algorithm.train_happo import CREDIT_FIELDS, RDC_FIELDS, _algorithm_name
@@ -96,28 +96,39 @@ def test_credit_buffer_shapes_and_component_gae_boundaries_match_team_buffer():
 
 @pytest.mark.parametrize("components", [1, 5])
 def test_credit_critic_shapes_and_outputs_are_finite(components):
-    critic = CounterfactualCreditCritic(components, hidden_dim=8)
+    critic = ActionMarginalCreditCritic(components, hidden_dim=8)
     states = torch.randn(7, GLOBAL_STATE_DIM)
     actions = torch.randn(7, 4, 3).tanh()
-    values, q_values = critic.values(states), critic.q_values(states, actions)
-    assert values.shape == q_values.shape == (7, components)
-    assert torch.isfinite(values).all() and torch.isfinite(q_values).all()
+    values, baselines = critic.values(states), critic.baselines(states, actions)
+    assert values.shape == (7, components)
+    assert baselines.shape == (7, 4, components)
+    assert torch.isfinite(values).all() and torch.isfinite(baselines).all()
+    assert not hasattr(critic, "q_head") and not hasattr(critic, "q_values")
 
 
-def test_replace_agent_action_changes_only_selected_three_dimensions_bitwise():
+def test_other_agent_actions_excludes_own_action_in_fixed_red_order():
     actual = torch.arange(48, dtype=torch.float32).reshape(4, 4, 3)
-    replacement = torch.full((4, 3), -7.0, requires_grad=True)
-    changed = replace_agent_action(actual, 2, replacement)
-    assert torch.equal(changed[:, :2], actual[:, :2])
-    assert torch.equal(changed[:, 3:], actual[:, 3:])
-    assert torch.equal(changed[:, 2], replacement.detach())
-    assert changed[:, 2].grad_fn is None
+    result = other_agent_actions(actual, 2)
+    assert result.shape == (4, 9)
+    assert torch.equal(result, actual[:, [0, 1, 3]].reshape(4, 9))
 
 
-def test_cf_advantage_is_exact_q_difference():
-    actual = torch.tensor([[3.0], [-2.0]])
-    counterfactual = torch.tensor([[1.5], [-4.0]])
-    assert torch.equal(component_credit(actual, counterfactual).squeeze(-1), torch.tensor([1.5, 2.0]))
+def test_marginal_baseline_is_invariant_to_own_action_and_can_respond_to_other_action():
+    torch.manual_seed(8)
+    critic = ActionMarginalCreditCritic(1, hidden_dim=8)
+    states = torch.randn(5, GLOBAL_STATE_DIM)
+    first = torch.randn(5, 4, 3)
+    own_changed = first.clone(); own_changed[:, 2] += 100.0
+    other_changed = first.clone(); other_changed[:, 1] += 100.0
+    baseline = critic.baseline_for_agent(states, first, 2)
+    assert torch.equal(baseline, critic.baseline_for_agent(states, own_changed, 2))
+    assert not torch.equal(baseline, critic.baseline_for_agent(states, other_changed, 2))
+
+
+def test_cf_advantage_is_exact_return_minus_marginal_baseline():
+    returns = torch.tensor([[3.0], [-2.0]])
+    baseline = torch.tensor([[1.5], [-4.0]])
+    assert torch.equal(component_residual(returns, baseline).squeeze(-1), torch.tensor([1.5, 2.0]))
 
 
 @pytest.mark.parametrize("method", [CF_METHOD, RDC_METHOD])
@@ -127,16 +138,25 @@ def test_credit_train_update_changes_actors_credit_and_standard_critics(method):
         actor_before = [[parameter.detach().clone() for parameter in actor.parameters()] for actor in trainer.actors.actors]
         critic_before = [parameter.detach().clone() for parameter in trainer.critic.parameters()]
         credit_before = [parameter.detach().clone() for parameter in trainer.credit_critic.parameters()]
+        baseline_before = [
+            [parameter.detach().clone() for parameter in network.parameters()]
+            for network in trainer.credit_critic.marginal_baselines
+        ]
         _, metrics = trainer.train_update()
         assert all(any(not torch.equal(a, b) for a, b in zip(before, actor.parameters())) for before, actor in zip(actor_before, trainer.actors.actors))
         assert any(not torch.equal(a, b) for a, b in zip(critic_before, trainer.critic.parameters()))
         assert any(not torch.equal(a, b) for a, b in zip(credit_before, trainer.credit_critic.parameters()))
-        assert all(action.requires_grad is False for action in trainer.last_counterfactual_actions)
-        for field in ("credit_value_loss", "credit_q_loss", "credit_total_loss"):
+        assert all(
+            any(not torch.equal(a, b) for a, b in zip(before, network.parameters()))
+            for before, network in zip(baseline_before, trainer.credit_critic.marginal_baselines)
+        )
+        assert not hasattr(trainer, "last_counterfactual_actions")
+        for field in ("credit_value_loss", "credit_baseline_loss", "credit_total_loss"):
             assert np.isfinite(metrics[field])
         for agent in range(4):
             assert np.isfinite(metrics[f"credit_adv_mean_abs_{agent}"])
             assert np.isfinite(metrics[f"credit_adv_std_{agent}"])
+            assert metrics[f"credit_degenerate_agent_{agent}"] in (0.0, 1.0)
     finally:
         trainer.close()
 
@@ -163,27 +183,22 @@ def test_dimensions_and_component_names_remain_frozen():
 def test_entrypoint_algorithm_names_and_credit_csv_fields():
     assert _algorithm_name("vanilla", CF_METHOD, "mlp") == CF_METHOD
     assert _algorithm_name("vanilla", RDC_METHOD, "mlp") == RDC_METHOD
-    assert {"credit_value_loss", "credit_q_loss", "credit_total_loss"} <= set(CREDIT_FIELDS)
+    assert {"credit_value_loss", "credit_baseline_loss", "credit_total_loss"} <= set(CREDIT_FIELDS)
     assert "rdc_shared_credit_mean_abs" in RDC_FIELDS
 
 
 @pytest.mark.parametrize("method", [CF_METHOD, RDC_METHOD])
-def test_counterfactual_sampled_once_per_transition_agent_and_frozen(method, monkeypatch):
+def test_update_does_not_call_actor_sample_or_consume_credit_sampling_rng(method, monkeypatch):
     trainer = HAPPOTrainer(short_v39(), trainer_config(method))
     try:
         trainer.collect_rollout()
         counts = [0, 0, 0, 0]
         for index, actor in enumerate(trainer.actors.actors):
-            original = actor.sample
-
-            def wrapped(observations, deterministic=False, *, _index=index, _original=original):
+            def forbidden(*args, _index=index, **kwargs):
                 counts[_index] += 1
-                return _original(observations, deterministic)
-
-            monkeypatch.setattr(actor, "sample", wrapped)
+                raise AssertionError("credit update must not sample actors")
+            monkeypatch.setattr(actor, "sample", forbidden)
         trainer.update()
-        assert counts == [1, 1, 1, 1]
-        assert len(trainer.last_counterfactual_actions) == 4
-        assert all(not actions.requires_grad for actions in trainer.last_counterfactual_actions)
+        assert counts == [0, 0, 0, 0]
     finally:
         trainer.close()
