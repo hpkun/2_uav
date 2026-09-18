@@ -21,6 +21,12 @@ from .recurrent import RecurrentIndependentActors
 from .recurrent_buffer import RecurrentRolloutBuffer
 from .relational_critic import RelationalCentralizedCritic
 from .agp import apply_agp
+from .credit_buffer import CreditRolloutBuffer
+from .counterfactual_credit import (
+    CF_METHOD, CREDIT_METHODS, RDC_METHOD, CounterfactualCreditCritic,
+    combine_rdc_component_credit, component_credit, component_weights,
+    credit_component_names, extract_credit_components, replace_agent_action,
+)
 
 
 DEFAULTS = {
@@ -71,10 +77,10 @@ class HAPPOTrainer:
             c["pcta_consistency_coef"] = 0.0
         if c["environment_profile"] not in ("learnability", "main"):
             raise ValueError("environment_profile must be 'learnability' or 'main'")
-        if c["method_variant"] not in ("baseline", "agp"):
+        if c["method_variant"] not in ("baseline", "agp", *CREDIT_METHODS):
             raise ValueError("invalid method_variant")
         if c["actor_variant"] != "vanilla" and c["method_variant"] != "baseline":
-            raise ValueError("AGP requires actor_variant='vanilla'")
+            raise ValueError("non-baseline methods require actor_variant='vanilla'")
         if c["critic_variant"] not in ("mlp", "relational"):
             raise ValueError("critic_variant must be 'mlp' or 'relational'")
         if c["critic_variant"] == "relational" and (
@@ -82,6 +88,7 @@ class HAPPOTrainer:
         ):
             raise ValueError("relational critic is only supported with vanilla actors and baseline HAPPO")
         self.agp_enabled = c["method_variant"] == "agp"
+        self.credit_enabled = c["method_variant"] in CREDIT_METHODS
         if float(c["agp_lambda"]) < 0.0:
             raise ValueError("agp_lambda cannot be negative")
         self.device = torch.device(c["device"])
@@ -95,6 +102,16 @@ class HAPPOTrainer:
                             "heterogeneous_role_coupled_v1" if version.endswith("v3_8") else
                             "heterogeneous_role_coupled_gate_v1" if version.endswith("v3_9") else
                             self.reward_shaping_mode)
+        if self.credit_enabled and (
+            version != "heterogeneous_mavuav_4v4_v3_9"
+            or self.reward_mode != "heterogeneous_role_coupled_gate_v1"
+            or c["actor_variant"] != "vanilla"
+            or c["critic_variant"] != "mlp"
+        ):
+            raise ValueError(
+                "CF/RDC-HAPPO requires v3.9 heterogeneous_role_coupled_gate_v1, "
+                "actor_variant='vanilla', and critic_variant='mlp'"
+            )
         self.shaping_gamma = float(shaping.get("gamma", 0.0))
         if self.reward_shaping_mode == "potential" and not np.isclose(self.shaping_gamma, float(c["gamma"]), rtol=0.0, atol=1e-12):
             raise ValueError(
@@ -159,6 +176,20 @@ class HAPPOTrainer:
             self.critic = CentralizedCritic(GLOBAL_STATE_DIM, int(c["hidden_dim"])).to(self.device)
         self.actor_optimizers = [torch.optim.Adam(actor.parameters(), lr=float(c["actor_learning_rate"])) for actor in self.actors.actors]
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=float(c["critic_learning_rate"]))
+        if self.credit_enabled:
+            self.credit_component_names = credit_component_names(c["method_variant"])
+            self.credit_component_weights = component_weights(c["method_variant"])
+            self.credit_critic = CounterfactualCreditCritic(
+                len(self.credit_component_names), hidden_dim=int(c["hidden_dim"]),
+            ).to(self.device)
+            self.credit_critic_optimizer = torch.optim.Adam(
+                self.credit_critic.parameters(), lr=float(c["critic_learning_rate"]),
+            )
+        else:
+            self.credit_component_names = ()
+            self.credit_component_weights = np.empty(0, dtype=np.float32)
+            self.credit_critic = None
+            self.credit_critic_optimizer = None
         self.buffer = self.make_buffer(int(c["rollout_steps"]))
         self.observations, self.global_states, self.active_masks, _ = self.vector_env.reset()
         if self.is_recurrent:
@@ -276,7 +307,27 @@ class HAPPOTrainer:
             return RecurrentRolloutBuffer(
                 horizon, int(self.config["num_envs"]), int(self.config["recurrent_hidden_dim"]),
             )
+        if self.credit_enabled:
+            return CreditRolloutBuffer(
+                horizon, int(self.config["num_envs"]), len(self.credit_component_names),
+            )
         return RolloutBuffer(horizon, int(self.config["num_envs"]))
+
+    @property
+    def credit_metadata(self) -> dict[str, Any]:
+        if not self.credit_enabled:
+            return {}
+        assert self.credit_critic is not None
+        return {
+            "credit_method": (
+                "counterfactual_team" if self.config["method_variant"] == CF_METHOD
+                else "role_decomposed_counterfactual"
+            ),
+            "credit_component_names": list(self.credit_component_names),
+            "credit_component_weights": self.credit_component_weights.tolist(),
+            "credit_critic_architecture": self.credit_critic.architecture(),
+            "counterfactual_samples_per_agent": 1,
+        }
 
     def _validate_actor_architecture(self, data: Mapping[str, Any]) -> None:
         checkpoint_variant = data.get("actor_variant", data.get("trainer_config", data.get("config", {})).get("actor_variant", "vanilla"))
@@ -347,12 +398,41 @@ class HAPPOTrainer:
                 shaping = np.zeros(self.buffer.num_envs, dtype=np.float64)
             raw_terms.append(raw)
             shaping_terms.append(shaping)
-            self.buffer.insert(self.observations, self.global_states, action_array, log_prob_array, training_rewards, values, terminated, truncated, self.active_masks)
+            if self.credit_enabled:
+                if not isinstance(self.buffer, CreditRolloutBuffer):
+                    raise TypeError("counterfactual methods require CreditRolloutBuffer")
+                credit_rewards = extract_credit_components(
+                    infos, rewards, self.config["method_variant"],
+                )
+                self.buffer.insert(
+                    self.observations, self.global_states, action_array, log_prob_array,
+                    training_rewards, values, terminated, truncated, self.active_masks,
+                    credit_rewards=credit_rewards,
+                )
+            else:
+                self.buffer.insert(self.observations, self.global_states, action_array, log_prob_array, training_rewards, values, terminated, truncated, self.active_masks)
             completed.extend(info["episode_summary"] for info in infos if "episode_summary" in info)
             self.observations, self.global_states, self.active_masks = next_obs, next_states, next_masks
             self.env_steps += self.buffer.num_envs
         with torch.no_grad(): last_values = self.critic(torch.as_tensor(self.global_states, device=self.device)).cpu().numpy()
         self.buffer.compute_returns_and_advantages(last_values, float(self.config["gamma"]), float(self.config["gae_lambda"]))
+        if self.credit_enabled:
+            if not isinstance(self.buffer, CreditRolloutBuffer) or self.credit_critic is None:
+                raise TypeError("counterfactual rollout state is incomplete")
+            with torch.no_grad():
+                flat_states = torch.as_tensor(
+                    self.buffer.global_states.reshape(-1, GLOBAL_STATE_DIM), device=self.device,
+                )
+                credit_values = self.credit_critic.values(flat_states).reshape(
+                    self.buffer.horizon, self.buffer.num_envs, -1,
+                ).cpu().numpy()
+                last_credit_values = self.credit_critic.values(
+                    torch.as_tensor(self.global_states, device=self.device),
+                ).cpu().numpy()
+            self.buffer.compute_credit_returns(
+                credit_values, last_credit_values,
+                float(self.config["gamma"]), float(self.config["gae_lambda"]),
+            )
         raw_values = np.concatenate(raw_terms) if raw_terms else np.zeros(1)
         shaping_values = np.concatenate(shaping_terms) if shaping_terms else np.zeros(1)
         self.last_rollout_metrics = {
@@ -415,6 +495,70 @@ class HAPPOTrainer:
         self.completed_episodes.extend(completed)
         return completed
 
+    def _sample_counterfactual_joint_actions(
+        self, observations: torch.Tensor, actual_actions: torch.Tensor,
+    ) -> list[torch.Tensor]:
+        """Draw and freeze exactly one behavior-policy replacement per transition/agent."""
+        frozen: list[torch.Tensor] = []
+        with torch.no_grad():
+            for agent, actor in enumerate(self.actors.actors):
+                sampled, _ = actor.sample(observations[:, agent])
+                frozen.append(
+                    replace_agent_action(actual_actions, agent, sampled.detach()).detach()
+                )
+        self.last_counterfactual_actions = [value.detach().clone() for value in frozen]
+        return frozen
+
+    def _train_credit_critic(
+        self, states: torch.Tensor, actions: torch.Tensor, targets: torch.Tensor,
+    ) -> tuple[float, float, float]:
+        if self.credit_critic is None or self.credit_critic_optimizer is None:
+            raise RuntimeError("credit critic is unavailable")
+        c = self.config
+        total = len(states)
+        mini = int(c["minibatch_size"])
+        value_losses: list[float] = []
+        q_losses: list[float] = []
+        total_losses: list[float] = []
+        for _ in range(int(c["ppo_epochs"])):
+            sample_order = self.rng.permutation(total)
+            for start in range(0, total, mini):
+                idx = torch.as_tensor(sample_order[start:start + mini], device=self.device)
+                value_loss = (self.credit_critic.values(states[idx]) - targets[idx]).square().mean()
+                q_loss = (self.credit_critic.q_values(states[idx], actions[idx]) - targets[idx]).square().mean()
+                loss = 0.5 * (value_loss + q_loss)
+                self.credit_critic_optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.credit_critic.parameters(), float(c["max_grad_norm"]))
+                self.credit_critic_optimizer.step()
+                value_losses.append(float(value_loss.item()))
+                q_losses.append(float(q_loss.item()))
+                total_losses.append(float(loss.item()))
+        return float(np.mean(value_losses)), float(np.mean(q_losses)), float(np.mean(total_losses))
+
+    def _counterfactual_actor_advantages(
+        self,
+        states: torch.Tensor,
+        actions: torch.Tensor,
+        counterfactual_actions: list[torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Freeze critic outputs so actor loss can only differentiate through new log-prob."""
+        if self.credit_critic is None:
+            raise RuntimeError("credit critic is unavailable")
+        advantages: list[torch.Tensor] = []
+        credits: list[torch.Tensor] = []
+        with torch.no_grad():
+            actual_q = self.credit_critic.q_values(states, actions)
+            for replaced in counterfactual_actions:
+                counterfactual_q = self.credit_critic.q_values(states, replaced)
+                per_component = component_credit(actual_q, counterfactual_q)
+                credits.append(per_component)
+                if self.config["method_variant"] == RDC_METHOD:
+                    advantages.append(combine_rdc_component_credit(actual_q, counterfactual_q))
+                else:
+                    advantages.append(per_component.squeeze(-1))
+        return torch.stack(advantages, dim=-1).detach(), torch.stack(credits, dim=1).detach()
+
     def update(self) -> dict[str, Any]:
         if self.is_recurrent:
             return self._update_recurrent()
@@ -427,6 +571,41 @@ class HAPPOTrainer:
         advantages = torch.as_tensor(self.buffer.advantages.reshape(-1), device=self.device)
         states = torch.as_tensor(self.buffer.global_states.reshape(-1, GLOBAL_STATE_DIM), device=self.device)
         returns = torch.as_tensor(self.buffer.returns.reshape(-1), device=self.device)
+        credit_metrics: dict[str, float] = {}
+        actor_advantages: torch.Tensor | None = None
+        component_credits: torch.Tensor | None = None
+        if self.credit_enabled:
+            if not isinstance(self.buffer, CreditRolloutBuffer):
+                raise TypeError("counterfactual methods require CreditRolloutBuffer")
+            counterfactual_actions = self._sample_counterfactual_joint_actions(observations, actions)
+            credit_targets = torch.as_tensor(
+                self.buffer.credit_returns.reshape(-1, self.buffer.component_count),
+                device=self.device,
+            )
+            value_loss, q_loss, total_loss = self._train_credit_critic(
+                states, actions, credit_targets,
+            )
+            actor_advantages, component_credits = self._counterfactual_actor_advantages(
+                states, actions, counterfactual_actions,
+            )
+            credit_metrics.update({
+                "credit_value_loss": value_loss,
+                "credit_q_loss": q_loss,
+                "credit_total_loss": total_loss,
+            })
+            for agent in range(num_agents):
+                credit_metrics[f"credit_adv_mean_abs_{agent}"] = float(
+                    actor_advantages[:, agent].abs().mean().item()
+                )
+                credit_metrics[f"credit_adv_std_{agent}"] = float(
+                    actor_advantages[:, agent].std(unbiased=False).item()
+                )
+            if self.config["method_variant"] == RDC_METHOD:
+                assert component_credits is not None
+                for index, name in enumerate(self.credit_component_names):
+                    credit_metrics[f"rdc_{name}_credit_mean_abs"] = float(
+                        component_credits[..., index].abs().mean().item()
+                    )
         factor = torch.ones_like(advantages)
         order = [int(v) for v in self.rng.permutation(num_agents)]
         actor_losses: list[list[float]] = [[] for _ in RED_IDS]; entropies: list[float] = []
@@ -450,9 +629,14 @@ class HAPPOTrainer:
         for agent in order:
             optimizer = self.actor_optimizers[agent]
             active = active_masks[:, agent] > 0.5
-            normalized = advantages.clone()
+            agent_advantages = (
+                actor_advantages[:, agent] if actor_advantages is not None else advantages
+            )
+            normalized = agent_advantages.clone()
             if active.any():
-                normalized = (advantages - advantages[active].mean()) / advantages[active].std(unbiased=False).clamp_min(1e-8)
+                normalized = (
+                    agent_advantages - agent_advantages[active].mean()
+                ) / agent_advantages[active].std(unbiased=False).clamp_min(1e-8)
             for _ in range(int(c["ppo_epochs"])):
                 sample_order = self.rng.permutation(total)
                 for start in range(0, total, mini):
@@ -522,6 +706,7 @@ class HAPPOTrainer:
                 critic_losses.append(float(value_loss.item()))
         metrics: dict[str, Any] = {f"actor_{i}_loss": float(np.mean(actor_losses[i])) if actor_losses[i] else 0.0 for i in range(num_agents)}
         metrics.update({"actor_loss": float(np.mean([v for rows in actor_losses for v in rows])), "critic_loss": float(np.mean(critic_losses)), "entropy": float(np.mean(entropies)), "agent_update_order": order})
+        metrics.update(credit_metrics)
         if c["actor_variant"] in LEGACY_PCTA_FAMILY:
             raw_consistency = pcta_loss_sum / pcta_pairs if pcta_pairs else 0.0
             metrics.update({
@@ -684,6 +869,10 @@ class HAPPOTrainer:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         payload = {"environment_version": self.environment_config["environment_version"], "environment_profile": self.config["environment_profile"], "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM, "actor_variant": self.config["actor_variant"], "critic_variant": self.config["critic_variant"], "method_variant": self.config["method_variant"], "reward_mode": self.reward_mode, "reward_shaping_mode": self.reward_shaping_mode if self.reward_mode not in ROLE_REWARD_MODES else None, "shaping_gamma": self.shaping_gamma if self.reward_mode not in ROLE_REWARD_MODES else None, "training_gamma": float(self.config["gamma"]), "actor_architecture": self.actor_architecture, "critic_architecture": self.critic_architecture, "critic_parameter_count": self.critic_parameter_count, "actors": self.actors.state_dict(), "critic": self.critic.state_dict(), "config": self.config}
         payload.update(self.pcta_metadata)
+        payload.update(self.credit_metadata)
+        if self.credit_enabled:
+            assert self.credit_critic is not None
+            payload["credit_critic"] = self.credit_critic.state_dict()
         torch.save(payload, path)
 
     def checkpoint_state(self) -> dict[str, Any]:
@@ -725,6 +914,11 @@ class HAPPOTrainer:
             },
         }
         state.update(self.pcta_metadata)
+        state.update(self.credit_metadata)
+        if self.credit_enabled:
+            assert self.credit_critic is not None and self.credit_critic_optimizer is not None
+            state["credit_critic"] = self.credit_critic.state_dict()
+            state["credit_critic_optimizer_state"] = self.credit_critic_optimizer.state_dict()
         if self.is_recurrent:
             state["rollout_state"]["actor_hidden_states"] = self.actor_hidden_states.copy()
             state["rollout_state"]["actor_recurrent_masks"] = self.actor_recurrent_masks.copy()
@@ -787,6 +981,18 @@ class HAPPOTrainer:
                 f"resume method mismatch: checkpoint={checkpoint_method!r} "
                 f"current={self.config['method_variant']!r}"
             )
+        if self.credit_enabled:
+            expected_credit = self.credit_metadata
+            for field in (
+                "credit_method", "credit_component_names", "credit_component_weights",
+                "credit_critic_architecture", "counterfactual_samples_per_agent",
+            ):
+                if data.get(field) != expected_credit[field]:
+                    raise RuntimeError(
+                        f"incompatible counterfactual credit contract: {field}"
+                    )
+            if "credit_critic" not in data or "credit_critic_optimizer_state" not in data:
+                raise RuntimeError("counterfactual checkpoint is missing credit training state")
         if self.agp_enabled:
             checkpoint_lambda = data.get("agp_lambda", saved_config.get("agp_lambda"))
             if checkpoint_lambda is None or float(checkpoint_lambda) != float(self.config["agp_lambda"]):
@@ -812,11 +1018,17 @@ class HAPPOTrainer:
             raise RuntimeError("resume environment config mismatch: resolved content differs from checkpoint")
         self.actors.load_state_dict(data["actors"])
         self.critic.load_state_dict(data["critic"])
+        if self.credit_enabled:
+            assert self.credit_critic is not None
+            self.credit_critic.load_state_dict(data["credit_critic"])
         if "actor_optimizer_states" not in data or "rollout_state" not in data:
             raise RuntimeError("checkpoint contains weights only and cannot resume training")
         for optimizer, state in zip(self.actor_optimizers, data["actor_optimizer_states"]):
             optimizer.load_state_dict(state)
         self.critic_optimizer.load_state_dict(data["critic_optimizer_state"])
+        if self.credit_enabled:
+            assert self.credit_critic_optimizer is not None
+            self.credit_critic_optimizer.load_state_dict(data["credit_critic_optimizer_state"])
         self.rng.bit_generator.state = deepcopy(data["trainer_numpy_rng"])
         torch.set_rng_state(data["torch_rng"].cpu())
         _restore_cuda_rng_state(data.get("cuda_rng"))

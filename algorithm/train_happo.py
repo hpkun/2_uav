@@ -52,6 +52,16 @@ PCTA_V2_FIELDS = (
     "pcta_v2_head_max_attention_weight", "pcta_v2_head_disagreement",
     "pcta_v2_valid_target_states", "pcta_v2_multi_target_states",
 )
+CREDIT_FIELDS = (
+    "credit_value_loss", "credit_q_loss", "credit_total_loss",
+    *(f"credit_adv_mean_abs_{i}" for i in range(len(RED_IDS))),
+    *(f"credit_adv_std_{i}" for i in range(len(RED_IDS))),
+)
+RDC_FIELDS = (
+    "rdc_shared_credit_mean_abs", "rdc_mav_role_credit_mean_abs",
+    "rdc_uav1_role_credit_mean_abs", "rdc_uav2_role_credit_mean_abs",
+    "rdc_uav3_role_credit_mean_abs",
+)
 LOSS_FIELDS = (*(f"actor_{i}_loss" for i in range(len(RED_IDS))), "critic_loss", "entropy")
 
 
@@ -67,6 +77,8 @@ def _algorithm_name(
     if actor_variant == "vanilla" and method_variant != "baseline":
         method_names = {
             "agp": "happo_agp",
+            "cf_happo": "cf_happo",
+            "rdc_happo": "rdc_happo",
         }
         try:
             return method_names[method_variant]
@@ -414,6 +426,7 @@ def _initial_resolved(
         "log_interval": args.log_interval, "evaluation_episodes": args.eval_episodes,
         "final_evaluation_episodes": args.final_eval_episodes, "resume_history": [],
         **trainer.pcta_metadata,
+        **trainer.credit_metadata,
     }
 
 
@@ -534,6 +547,10 @@ def main(
             training_fields = TRAINING_FIELDS + PCTA_FIELDS
         elif actor_variant == PCTA_V2_VARIANT:
             training_fields = TRAINING_FIELDS + PCTA_V2_FIELDS
+        elif method_variant == "rdc_happo":
+            training_fields = TRAINING_FIELDS + CREDIT_FIELDS + RDC_FIELDS
+        elif method_variant == "cf_happo":
+            training_fields = TRAINING_FIELDS + CREDIT_FIELDS
         else:
             training_fields = TRAINING_FIELDS
         configured_horizon = int(trainer.config["rollout_steps"])
@@ -635,6 +652,7 @@ def main(
             "final_evaluation_elapsed_seconds": final_evaluation_elapsed,
             "final_evaluations": final_rows, "checkpoint_final": "checkpoint_final.pt",
             **trainer.pcta_metadata,
+            **trainer.credit_metadata,
         }
         with (run_dir / "summary.json").open("w", encoding="utf-8") as stream:
             json.dump(summary, stream, indent=2, ensure_ascii=False)
