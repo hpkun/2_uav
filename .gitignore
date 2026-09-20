@@ -5,6 +5,13 @@ __pycache__/
 # Generated experiment outputs
 outputs/
 
+# Training, evaluation, and process logs
+logs/
+*.log
+*.out
+*.err
+nohup.out
+
 # Model checkpoints
 *.pt
 *.pth
