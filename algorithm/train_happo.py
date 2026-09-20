@@ -78,6 +78,10 @@ def _algorithm_name(
         if actor_variant != "vanilla" or method_variant != "baseline":
             raise ValueError("relational critic only supports vanilla baseline HAPPO")
         return "rc_happo"
+    if critic_variant == "tam_attention":
+        if actor_variant != "tam" or method_variant != "baseline":
+            raise ValueError("TAM attention critic requires baseline TAM actors")
+        return "tam_happo"
     if critic_variant != "mlp":
         raise ValueError(f"unsupported critic_variant: {critic_variant!r}")
     if actor_variant == "vanilla" and method_variant != "baseline":
@@ -280,8 +284,10 @@ def _evaluation_row(
     device: str,
 ) -> dict[str, Any]:
     evaluator = evaluate_recurrent_actors if trainer.is_recurrent else evaluate_actors
+    evaluation_kwargs = {"inactive_mask": True} if trainer.is_tam else {}
     records = evaluator(
         trainer.actors, trainer.environment_config, episodes, profile, seed=1000, device=device,
+        **evaluation_kwargs,
     )
     return {
         "sampled_steps": trainer.env_steps,
@@ -458,6 +464,7 @@ def _initial_resolved(
         "final_evaluation_episodes": args.final_eval_episodes, "resume_history": [],
         **trainer.pcta_metadata,
         **trainer.credit_metadata,
+        **trainer.tam_metadata,
     }
 
 
@@ -684,6 +691,7 @@ def main(
             "final_evaluations": final_rows, "checkpoint_final": "checkpoint_final.pt",
             **trainer.pcta_metadata,
             **trainer.credit_metadata,
+            **trainer.tam_metadata,
         }
         with (run_dir / "summary.json").open("w", encoding="utf-8") as stream:
             json.dump(summary, stream, indent=2, ensure_ascii=False)

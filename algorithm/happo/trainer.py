@@ -19,6 +19,8 @@ from algorithm.modules.pcta_v2 import PCTAv2IndependentActors, target_behavior_d
 from .networks import IndependentActors
 from .recurrent import RecurrentIndependentActors
 from .recurrent_buffer import RecurrentRolloutBuffer
+from .tam import TAMAttentionCritic, TAMIndependentActors
+from .tam_buffer import TAMRolloutBuffer
 from .relational_critic import RelationalCentralizedCritic
 from .agp import apply_agp
 from .credit_buffer import CreditRolloutBuffer
@@ -43,6 +45,12 @@ DEFAULTS = {
     "pcta_consistency_coef": 0.05,
     "pcta_v2_attention_heads": 4, "pcta_v2_context_dim": 64,
     "pcta_v2_enemy_dim": 32, "pcta_v2_target_dim": 32,
+    "tam_actor_gru_hidden_dim": 128, "tam_critic_gru_hidden_dim": 128,
+    "tam_recurrent_sequence_length": 16, "tam_attention_heads": 4,
+    "tam_token_dim": 128, "tam_actor_hidden_layers": [256, 128],
+    "tam_critic_hidden_layers": [256, 128], "tam_state_memory": True,
+    "tam_attention": True, "tam_inactive_mask": True,
+    "tam_value_loss_type": "huber", "tam_huber_delta": 10.0,
 }
 
 LEGACY_PCTA_FAMILY = frozenset(("pcta", "pcta_attention_only", "pcta_uniform"))
@@ -54,6 +62,12 @@ RESUME_CONFIG_FIELDS = (
     "ppo_epochs", "minibatch_size", "clip_coef", "actor_learning_rate",
     "critic_learning_rate", "entropy_coef", "value_loss_coef", "max_grad_norm", "hidden_dim",
     "actor_log_std_init",
+)
+
+TAM_RESUME_CONFIG_FIELDS = (
+    "tam_actor_gru_hidden_dim", "tam_critic_gru_hidden_dim", "tam_recurrent_sequence_length",
+    "tam_attention_heads", "tam_token_dim", "tam_actor_hidden_layers", "tam_critic_hidden_layers",
+    "tam_state_memory", "tam_attention", "tam_inactive_mask", "tam_value_loss_type", "tam_huber_delta",
 )
 
 
@@ -81,12 +95,16 @@ class HAPPOTrainer:
             raise ValueError("invalid method_variant")
         if c["actor_variant"] != "vanilla" and c["method_variant"] != "baseline":
             raise ValueError("non-baseline methods require actor_variant='vanilla'")
-        if c["critic_variant"] not in ("mlp", "relational"):
-            raise ValueError("critic_variant must be 'mlp' or 'relational'")
+        if c["critic_variant"] not in ("mlp", "relational", "tam_attention"):
+            raise ValueError("critic_variant must be 'mlp', 'relational' or 'tam_attention'")
         if c["critic_variant"] == "relational" and (
             c["actor_variant"] != "vanilla" or c["method_variant"] != "baseline"
         ):
             raise ValueError("relational critic is only supported with vanilla actors and baseline HAPPO")
+        if (c["actor_variant"] == "tam") != (c["critic_variant"] == "tam_attention"):
+            raise ValueError("actor_variant='tam' and critic_variant='tam_attention' must be used together")
+        if c["actor_variant"] == "tam" and c["tam_value_loss_type"] != "huber":
+            raise ValueError("TAM critic currently requires tam_value_loss_type='huber'")
         self.agp_enabled = c["method_variant"] == "agp"
         self.credit_enabled = c["method_variant"] in CREDIT_METHODS
         if float(c["agp_lambda"]) < 0.0:
@@ -144,6 +162,14 @@ class HAPPOTrainer:
                 observation_dim=OBS_DIM, action_dim=3, hidden_dim=int(c["hidden_dim"]),
                 recurrent_hidden_dim=int(c["recurrent_hidden_dim"]),
             ).to(self.device)
+        elif c["actor_variant"] == "tam":
+            self.actors = TAMIndependentActors(
+                observation_dim=OBS_DIM, action_dim=3,
+                recurrent_hidden_dim=int(c["tam_actor_gru_hidden_dim"]),
+                hidden_layers=tuple(c["tam_actor_hidden_layers"]),
+                log_std_init=float(c["actor_log_std_init"]),
+                state_memory=bool(c["tam_state_memory"]),
+            ).to(self.device)
         elif c["actor_variant"] in LEGACY_PCTA_FAMILY:
             self.actors = PCTAIndependentActors(
                 observation_dim=OBS_DIM, action_dim=3,
@@ -166,11 +192,22 @@ class HAPPOTrainer:
         else:
             raise ValueError(
                 "actor_variant must be 'vanilla', 'hrta', 'structured_uniform', 'recurrent', "
-                "'pcta', 'pcta_attention_only', 'pcta_uniform' or 'pcta_v2'"
+                "'tam', 'pcta', 'pcta_attention_only', 'pcta_uniform' or 'pcta_v2'"
             )
         if c["actor_variant"] in LEGACY_PCTA_FAMILY and float(c["pcta_consistency_coef"]) < 0.0:
             raise ValueError("pcta_consistency_coef cannot be negative")
-        if c["critic_variant"] == "relational":
+        if c["critic_variant"] == "tam_attention":
+            self.critic = TAMAttentionCritic(
+                GLOBAL_STATE_DIM,
+                recurrent_hidden_dim=int(c["tam_critic_gru_hidden_dim"]),
+                token_dim=int(c["tam_token_dim"]),
+                attention_heads=int(c["tam_attention_heads"]),
+                hidden_layers=tuple(c["tam_critic_hidden_layers"]),
+                state_memory=bool(c["tam_state_memory"]),
+                attention=bool(c["tam_attention"]),
+                inactive_mask=bool(c["tam_inactive_mask"]),
+            ).to(self.device)
+        elif c["critic_variant"] == "relational":
             self.critic = RelationalCentralizedCritic(GLOBAL_STATE_DIM).to(self.device)
         else:
             self.critic = CentralizedCritic(GLOBAL_STATE_DIM, int(c["hidden_dim"])).to(self.device)
@@ -194,9 +231,14 @@ class HAPPOTrainer:
         self.observations, self.global_states, self.active_masks, _ = self.vector_env.reset()
         if self.is_recurrent:
             self.actor_hidden_states = np.zeros(
-                (int(c["num_envs"]), len(RED_IDS), int(c["recurrent_hidden_dim"])), dtype=np.float32,
+                (int(c["num_envs"]), len(RED_IDS), self.actor_recurrent_hidden_dim), dtype=np.float32,
             )
             self.actor_recurrent_masks = np.zeros((int(c["num_envs"]), len(RED_IDS)), dtype=np.float32)
+        if self.is_tam:
+            self.critic_hidden_states = np.zeros(
+                (int(c["num_envs"]), int(c["tam_critic_gru_hidden_dim"])), dtype=np.float32,
+            )
+            self.critic_recurrent_masks = np.zeros(int(c["num_envs"]), dtype=np.float32)
         self.env_steps = 0
         self.completed_episodes: list[dict[str, Any]] = []
         self.last_rollout_metrics = self._empty_rollout_metrics()
@@ -246,6 +288,18 @@ class HAPPOTrainer:
                 "head_dim": int(self.config["hidden_dim"]),
                 "action_dim": 3,
             }
+        if self.config["actor_variant"] == "tam":
+            return {
+                "observation_dim": OBS_DIM, "raw_observation_dim": OBS_DIM,
+                "state_memory_first": True,
+                "gru_input_dim": OBS_DIM,
+                "recurrent_hidden_dim": int(self.config["tam_actor_gru_hidden_dim"]),
+                "temporal_projection_dim": OBS_DIM,
+                "fusion_dim": 2 * OBS_DIM,
+                "hidden_layers": list(self.config["tam_actor_hidden_layers"]),
+                "action_dim": 3,
+                "state_memory": bool(self.config["tam_state_memory"]),
+            }
         if self.config["actor_variant"] in ("hrta", "structured_uniform"):
             return {
                 "entity_dim": int(self.config["hrta_entity_dim"]),
@@ -261,7 +315,9 @@ class HAPPOTrainer:
         return {"per_agent": per_agent, "total": sum(per_agent)}
 
     @property
-    def critic_architecture(self) -> dict[str, int]:
+    def critic_architecture(self) -> dict[str, Any]:
+        if self.config["critic_variant"] == "tam_attention":
+            return self.critic.architecture()
         if self.config["critic_variant"] == "relational":
             return RelationalCentralizedCritic.architecture()
         return {"state_dim": GLOBAL_STATE_DIM, "hidden_dim": int(self.config["hidden_dim"])}
@@ -272,7 +328,35 @@ class HAPPOTrainer:
 
     @property
     def is_recurrent(self) -> bool:
-        return self.config["actor_variant"] == "recurrent"
+        return self.config["actor_variant"] in ("recurrent", "tam")
+
+    @property
+    def is_tam(self) -> bool:
+        return self.config["actor_variant"] == "tam"
+
+    @property
+    def actor_recurrent_hidden_dim(self) -> int:
+        field = "tam_actor_gru_hidden_dim" if self.is_tam else "recurrent_hidden_dim"
+        return int(self.config[field])
+
+    @property
+    def recurrent_sequence_length(self) -> int:
+        field = "tam_recurrent_sequence_length" if self.is_tam else "recurrent_sequence_length"
+        return int(self.config[field])
+
+    @property
+    def tam_metadata(self) -> dict[str, Any]:
+        if not self.is_tam:
+            return {}
+        return {
+            "tam_state_memory": bool(self.config["tam_state_memory"]),
+            "tam_inactive_mask": bool(self.config["tam_inactive_mask"]),
+            "tam_entropy_regularization": True,
+            "tam_attention_critic": bool(self.config["tam_attention"]),
+            "tam_actor_gru_hidden_dim": int(self.config["tam_actor_gru_hidden_dim"]),
+            "tam_critic_gru_hidden_dim": int(self.config["tam_critic_gru_hidden_dim"]),
+            "independent_actor_count": len(RED_IDS), "sequential_happo_update": True,
+        }
 
     @property
     def pcta_attention_mode(self) -> str | None:
@@ -303,9 +387,14 @@ class HAPPOTrainer:
         return {}
 
     def make_buffer(self, horizon: int) -> RolloutBuffer:
+        if self.is_tam:
+            return TAMRolloutBuffer(
+                horizon, int(self.config["num_envs"]), self.actor_recurrent_hidden_dim,
+                int(self.config["tam_critic_gru_hidden_dim"]),
+            )
         if self.is_recurrent:
             return RecurrentRolloutBuffer(
-                horizon, int(self.config["num_envs"]), int(self.config["recurrent_hidden_dim"]),
+                horizon, int(self.config["num_envs"]), self.actor_recurrent_hidden_dim,
             )
         if self.credit_enabled:
             return CreditRolloutBuffer(
@@ -341,7 +430,7 @@ class HAPPOTrainer:
         if checkpoint_variant == "pcta" and checkpoint_architecture is not None:
             checkpoint_architecture = dict(checkpoint_architecture)
             checkpoint_architecture.setdefault("attention_mode", "learned")
-        if checkpoint_variant in ("hrta", "structured_uniform", "recurrent", *PCTA_FAMILY) and checkpoint_architecture != self.actor_architecture:
+        if checkpoint_variant in ("hrta", "structured_uniform", "recurrent", "tam", *PCTA_FAMILY) and checkpoint_architecture != self.actor_architecture:
             raise RuntimeError(
                 f"incompatible actor architecture: checkpoint={checkpoint_architecture!r} "
                 f"current={self.actor_architecture!r}"
@@ -456,6 +545,7 @@ class HAPPOTrainer:
             actions: list[np.ndarray] = []
             log_probs: list[np.ndarray] = []
             next_hidden = np.empty_like(self.actor_hidden_states)
+            next_critic_hidden = np.empty_like(self.critic_hidden_states) if self.is_tam else None
             with torch.no_grad():
                 for agent, actor in enumerate(self.actors.actors):
                     action, log_prob, hidden = actor.sample_step(
@@ -466,25 +556,61 @@ class HAPPOTrainer:
                     actions.append(action.cpu().numpy())
                     log_probs.append(log_prob.cpu().numpy())
                     next_hidden[:, agent] = hidden.cpu().numpy()
-                values = self.critic(torch.as_tensor(self.global_states, device=self.device)).cpu().numpy()
+                if self.is_tam:
+                    values_t, critic_hidden_t = self.critic.forward_step(
+                        torch.as_tensor(self.global_states, device=self.device),
+                        torch.as_tensor(self.critic_hidden_states, device=self.device),
+                        torch.as_tensor(self.critic_recurrent_masks, device=self.device),
+                    )
+                    values = values_t.cpu().numpy()
+                    next_critic_hidden[:] = critic_hidden_t.cpu().numpy()
+                else:
+                    values = self.critic(torch.as_tensor(self.global_states, device=self.device)).cpu().numpy()
             action_array = np.stack(actions, axis=1)
             log_prob_array = np.stack(log_probs, axis=1)
+            if self.is_tam and bool(self.config["tam_inactive_mask"]):
+                action_array *= self.active_masks[:, :, None]
             next_obs, next_states, rewards, terminated, truncated, next_masks, infos = self.vector_env.step(action_array)
             done = np.logical_or(terminated, truncated)
-            next_recurrent_masks = next_masks.astype(np.float32) * (~done)[:, None].astype(np.float32)
+            if self.is_tam and not bool(self.config["tam_inactive_mask"]):
+                next_recurrent_masks = np.broadcast_to((~done)[:, None], next_masks.shape).astype(np.float32).copy()
+            else:
+                next_recurrent_masks = next_masks.astype(np.float32) * (~done)[:, None].astype(np.float32)
             next_hidden *= next_recurrent_masks[:, :, None]
-            self.buffer.insert(
-                self.observations, self.global_states, action_array, log_prob_array, rewards, values,
-                terminated, truncated, self.active_masks, self.actor_hidden_states,
-                self.actor_recurrent_masks, next_hidden,
-            )
+            if self.is_tam:
+                assert isinstance(self.buffer, TAMRolloutBuffer) and next_critic_hidden is not None
+                next_critic_masks = (~done).astype(np.float32)
+                next_critic_hidden *= next_critic_masks[:, None]
+                self.buffer.insert(
+                    self.observations, self.global_states, action_array, log_prob_array, rewards, values,
+                    terminated, truncated, self.active_masks, self.actor_hidden_states,
+                    self.actor_recurrent_masks, next_hidden, self.critic_hidden_states,
+                    self.critic_recurrent_masks, next_critic_hidden,
+                )
+            else:
+                self.buffer.insert(
+                    self.observations, self.global_states, action_array, log_prob_array, rewards, values,
+                    terminated, truncated, self.active_masks, self.actor_hidden_states,
+                    self.actor_recurrent_masks, next_hidden,
+                )
             completed.extend(info["episode_summary"] for info in infos if "episode_summary" in info)
             self.observations, self.global_states, self.active_masks = next_obs, next_states, next_masks
             self.actor_hidden_states = next_hidden
             self.actor_recurrent_masks = next_recurrent_masks
+            if self.is_tam:
+                self.critic_hidden_states = next_critic_hidden
+                self.critic_recurrent_masks = next_critic_masks
             self.env_steps += self.buffer.num_envs
         with torch.no_grad():
-            last_values = self.critic(torch.as_tensor(self.global_states, device=self.device)).cpu().numpy()
+            if self.is_tam:
+                last_values, _ = self.critic.forward_step(
+                    torch.as_tensor(self.global_states, device=self.device),
+                    torch.as_tensor(self.critic_hidden_states, device=self.device),
+                    torch.as_tensor(self.critic_recurrent_masks, device=self.device),
+                )
+                last_values = last_values.cpu().numpy()
+            else:
+                last_values = self.critic(torch.as_tensor(self.global_states, device=self.device)).cpu().numpy()
         self.buffer.compute_returns_and_advantages(
             last_values, float(self.config["gamma"]), float(self.config["gae_lambda"]),
         )
@@ -801,7 +927,7 @@ class HAPPOTrainer:
             raise TypeError("recurrent log-prob evaluation requires RecurrentRolloutBuffer")
         result = torch.empty((buffer.horizon, buffer.num_envs), device=self.device)
         groups: dict[int, list[tuple[int, int, int]]] = {}
-        for spec in buffer.chunks(int(self.config["recurrent_sequence_length"])):
+        for spec in buffer.chunks(self.recurrent_sequence_length):
             groups.setdefault(spec[2] - spec[1], []).append(spec)
         actor = self.actors.actors[agent]
         with torch.no_grad():
@@ -819,6 +945,8 @@ class HAPPOTrainer:
         c = self.config
         old_log_probs = torch.as_tensor(buffer.log_probs, device=self.device)
         active_masks = torch.as_tensor(buffer.active_masks, device=self.device)
+        if self.is_tam and not bool(c["tam_inactive_mask"]):
+            active_masks = torch.ones_like(active_masks)
         advantages = torch.as_tensor(buffer.advantages, device=self.device)
         factor = torch.ones_like(advantages)
         num_agents = len(RED_IDS)
@@ -827,7 +955,7 @@ class HAPPOTrainer:
         entropies: list[float] = []
         clip = float(c["clip_coef"])
         mini = int(c["minibatch_size"])
-        sequence_length = int(c["recurrent_sequence_length"])
+        sequence_length = self.recurrent_sequence_length
         groups: dict[int, list[tuple[int, int, int]]] = {}
         for spec in buffer.chunks(sequence_length):
             groups.setdefault(spec[2] - spec[1], []).append(spec)
@@ -876,20 +1004,51 @@ class HAPPOTrainer:
             )
             self.last_recurrent_factor_history.append(factor.detach().cpu().numpy().copy())
 
-        states = torch.as_tensor(buffer.global_states.reshape(-1, GLOBAL_STATE_DIM), device=self.device)
-        returns = torch.as_tensor(buffer.returns.reshape(-1), device=self.device)
-        total = len(returns)
         critic_losses: list[float] = []
-        for _ in range(int(c["ppo_epochs"])):
-            sample_order = self.rng.permutation(total)
-            for start in range(0, total, mini):
-                indices = torch.as_tensor(sample_order[start:start + mini], device=self.device)
-                value_loss = (self.critic(states[indices]) - returns[indices]).square().mean()
-                self.critic_optimizer.zero_grad()
-                (float(c["value_loss_coef"]) * value_loss).backward()
-                nn.utils.clip_grad_norm_(self.critic.parameters(), float(c["max_grad_norm"]))
-                self.critic_optimizer.step()
-                critic_losses.append(float(value_loss.item()))
+        if self.is_tam:
+            if not isinstance(buffer, TAMRolloutBuffer):
+                raise TypeError("TAM critic requires TAMRolloutBuffer")
+            for _ in range(int(c["ppo_epochs"])):
+                for length, all_specs in groups.items():
+                    chunks_per_batch = max(1, mini // length)
+                    shuffled = self.rng.permutation(len(all_specs))
+                    for start_index in range(0, len(all_specs), chunks_per_batch):
+                        specs = [all_specs[int(index)] for index in shuffled[start_index:start_index + chunks_per_batch]]
+                        state_batch = torch.as_tensor(np.stack([
+                            buffer.global_states[start:end, env] for env, start, end in specs
+                        ]), device=self.device)
+                        initial_hidden = torch.as_tensor(np.stack([
+                            buffer.critic_hidden_states[start, env] for env, start, _ in specs
+                        ]), device=self.device)
+                        masks = torch.as_tensor(np.stack([
+                            buffer.critic_recurrent_masks[start:end, env] for env, start, end in specs
+                        ]), device=self.device)
+                        targets = torch.as_tensor(np.stack([
+                            buffer.returns[start:end, env] for env, start, end in specs
+                        ]), device=self.device)
+                        predicted, _ = self.critic.evaluate_values_sequence(state_batch, initial_hidden, masks)
+                        value_loss = nn.functional.huber_loss(
+                            predicted, targets, delta=float(c["tam_huber_delta"]), reduction="mean",
+                        )
+                        self.critic_optimizer.zero_grad()
+                        (float(c["value_loss_coef"]) * value_loss).backward()
+                        nn.utils.clip_grad_norm_(self.critic.parameters(), float(c["max_grad_norm"]))
+                        self.critic_optimizer.step()
+                        critic_losses.append(float(value_loss.item()))
+        else:
+            states = torch.as_tensor(buffer.global_states.reshape(-1, GLOBAL_STATE_DIM), device=self.device)
+            returns = torch.as_tensor(buffer.returns.reshape(-1), device=self.device)
+            total = len(returns)
+            for _ in range(int(c["ppo_epochs"])):
+                sample_order = self.rng.permutation(total)
+                for start in range(0, total, mini):
+                    indices = torch.as_tensor(sample_order[start:start + mini], device=self.device)
+                    value_loss = (self.critic(states[indices]) - returns[indices]).square().mean()
+                    self.critic_optimizer.zero_grad()
+                    (float(c["value_loss_coef"]) * value_loss).backward()
+                    nn.utils.clip_grad_norm_(self.critic.parameters(), float(c["max_grad_norm"]))
+                    self.critic_optimizer.step()
+                    critic_losses.append(float(value_loss.item()))
         flat_actor_losses = [value for rows in actor_losses for value in rows]
         metrics: dict[str, Any] = {
             f"actor_{agent}_loss": float(np.mean(actor_losses[agent])) if actor_losses[agent] else 0.0
@@ -915,6 +1074,9 @@ class HAPPOTrainer:
         payload = {"environment_version": self.environment_config["environment_version"], "environment_profile": self.config["environment_profile"], "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM, "actor_variant": self.config["actor_variant"], "critic_variant": self.config["critic_variant"], "method_variant": self.config["method_variant"], "reward_mode": self.reward_mode, "reward_shaping_mode": self.reward_shaping_mode if self.reward_mode not in ROLE_REWARD_MODES else None, "shaping_gamma": self.shaping_gamma if self.reward_mode not in ROLE_REWARD_MODES else None, "training_gamma": float(self.config["gamma"]), "actor_architecture": self.actor_architecture, "critic_architecture": self.critic_architecture, "critic_parameter_count": self.critic_parameter_count, "actors": self.actors.state_dict(), "critic": self.critic.state_dict(), "config": self.config}
         payload.update(self.pcta_metadata)
         payload.update(self.credit_metadata)
+        payload.update(self.tam_metadata)
+        if self.is_tam:
+            payload["algorithm"] = "happo"
         if self.credit_enabled:
             assert self.credit_critic is not None
             payload["credit_critic"] = self.credit_critic.state_dict()
@@ -960,6 +1122,9 @@ class HAPPOTrainer:
         }
         state.update(self.pcta_metadata)
         state.update(self.credit_metadata)
+        state.update(self.tam_metadata)
+        if self.is_tam:
+            state["algorithm"] = "happo"
         if self.credit_enabled:
             assert self.credit_critic is not None and self.credit_critic_optimizer is not None
             state["credit_critic"] = self.credit_critic.state_dict()
@@ -967,6 +1132,9 @@ class HAPPOTrainer:
         if self.is_recurrent:
             state["rollout_state"]["actor_hidden_states"] = self.actor_hidden_states.copy()
             state["rollout_state"]["actor_recurrent_masks"] = self.actor_recurrent_masks.copy()
+        if self.is_tam:
+            state["rollout_state"]["critic_hidden_states"] = self.critic_hidden_states.copy()
+            state["rollout_state"]["critic_recurrent_masks"] = self.critic_recurrent_masks.copy()
         return state
 
     def save_checkpoint(self, path: str | Path) -> None:
@@ -1053,7 +1221,14 @@ class HAPPOTrainer:
                 raise RuntimeError(
                     f"resume config mismatch: {field} checkpoint={checkpoint_value!r} current={current_value!r}"
                 )
-        if self.is_recurrent:
+        if self.is_tam:
+            for field in TAM_RESUME_CONFIG_FIELDS:
+                if saved_config.get(field, DEFAULTS[field]) != self.config.get(field):
+                    raise RuntimeError(
+                        f"resume config mismatch: {field} checkpoint={saved_config.get(field, DEFAULTS[field])!r} "
+                        f"current={self.config.get(field)!r}"
+                    )
+        if self.is_recurrent and not self.is_tam:
             for field in ("recurrent_hidden_dim", "recurrent_sequence_length"):
                 if saved_config.get(field) != self.config.get(field):
                     raise RuntimeError(
@@ -1088,12 +1263,24 @@ class HAPPOTrainer:
             self.actor_hidden_states = np.asarray(rollout["actor_hidden_states"], dtype=np.float32)
             self.actor_recurrent_masks = np.asarray(rollout["actor_recurrent_masks"], dtype=np.float32)
             expected_hidden = (
-                int(self.config["num_envs"]), len(RED_IDS), int(self.config["recurrent_hidden_dim"]),
+                int(self.config["num_envs"]), len(RED_IDS), self.actor_recurrent_hidden_dim,
             )
             if self.actor_hidden_states.shape != expected_hidden:
                 raise RuntimeError("checkpoint recurrent hidden-state shape mismatch")
             if self.actor_recurrent_masks.shape != (int(self.config["num_envs"]), len(RED_IDS)):
                 raise RuntimeError("checkpoint recurrent mask shape mismatch")
+        if self.is_tam:
+            for field in ("critic_hidden_states", "critic_recurrent_masks"):
+                if field not in rollout:
+                    raise RuntimeError("TAM checkpoint is missing critic hidden-state continuation data")
+            self.critic_hidden_states = np.asarray(rollout["critic_hidden_states"], dtype=np.float32)
+            self.critic_recurrent_masks = np.asarray(rollout["critic_recurrent_masks"], dtype=np.float32)
+            if self.critic_hidden_states.shape != (
+                int(self.config["num_envs"]), int(self.config["tam_critic_gru_hidden_dim"]),
+            ):
+                raise RuntimeError("checkpoint TAM critic hidden-state shape mismatch")
+            if self.critic_recurrent_masks.shape != (int(self.config["num_envs"]),):
+                raise RuntimeError("checkpoint TAM critic recurrent mask shape mismatch")
         self.vector_env.set_env_states(
             rollout["environment_states"],
             np.asarray(rollout["vector_reset_counts"], dtype=np.int64),

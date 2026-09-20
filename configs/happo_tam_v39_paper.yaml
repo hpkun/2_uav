@@ -1,0 +1,33 @@
+training:
+  environment_profile: main
+  seed: 1
+  device: cpu
+  num_envs: 16
+  rollout_steps: 128
+  gamma: 0.99
+  gae_lambda: 0.95
+  ppo_epochs: 4
+  minibatch_size: 256
+  clip_coef: 0.2
+  actor_learning_rate: 0.0005
+  critic_learning_rate: 0.0005
+  entropy_coef: 0.01
+  value_loss_coef: 0.5
+  max_grad_norm: 10.0
+  hidden_dim: 128
+  actor_log_std_init: -0.25
+  actor_variant: tam
+  critic_variant: tam_attention
+  method_variant: baseline
+  tam_actor_gru_hidden_dim: 128
+  tam_critic_gru_hidden_dim: 128
+  tam_recurrent_sequence_length: 16
+  tam_attention_heads: 4
+  tam_token_dim: 128
+  tam_actor_hidden_layers: [256, 128]
+  tam_critic_hidden_layers: [256, 128]
+  tam_state_memory: true
+  tam_attention: true
+  tam_inactive_mask: true
+  tam_value_loss_type: huber
+  tam_huber_delta: 10.0

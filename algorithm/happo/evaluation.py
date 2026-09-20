@@ -99,14 +99,23 @@ def evaluate_recurrent_actors(
     profile: str,
     seed: int = 1000,
     device: str = "cpu",
+    deterministic: bool = True,
+    action_seed: int | None = None,
+    inactive_mask: bool = True,
 ) -> list[dict[str, Any]]:
-    """Deterministically evaluate recurrent actors with episode-safe hidden masks."""
+    """Evaluate recurrent actors with episode-safe hidden masks and action RNG."""
     records: list[dict[str, Any]] = []
     env = HeterogeneousMAVUAVAirCombatEnv(env_config, profile=profile)
     for episode in range(int(episodes)):
         observations, _ = env.reset(seed=seed + episode)
+        if not deterministic and action_seed is not None:
+            episode_action_seed = int(action_seed) + episode
+            torch.manual_seed(episode_action_seed)
+            if torch.device(device).type == "cuda" and torch.cuda.is_available():
+                torch.cuda.manual_seed_all(episode_action_seed)
         hidden = [actor.initial_hidden(1, device=device) for actor in actors.actors]
         recurrent_masks = torch.zeros((len(RED_IDS), 1), device=device)
+        active_masks = env.active_masks.copy()
         done = False
         while not done:
             actions: list[np.ndarray] = []
@@ -115,15 +124,19 @@ def evaluate_recurrent_actors(
                 for index, aid in enumerate(env.red_ids):
                     action, _, actor_hidden = actors.actors[index].sample_step(
                         torch.as_tensor(observations[aid], device=device).unsqueeze(0),
-                        hidden[index], recurrent_masks[index], deterministic=True,
+                        hidden[index], recurrent_masks[index], deterministic=deterministic,
                     )
-                    actions.append(action.squeeze(0).cpu().numpy())
+                    action_np = action.squeeze(0).cpu().numpy()
+                    if inactive_mask and active_masks[index] <= 0.5:
+                        action_np = np.zeros_like(action_np)
+                    actions.append(action_np)
                     next_hidden.append(actor_hidden)
             observations, _, terminated, truncated, info = env.step(np.asarray(actions))
             done = terminated or truncated
             if not done:
                 active = torch.as_tensor(info["active_masks"], device=device)
-                recurrent_masks = active[:, None]
+                recurrent_masks = active[:, None] if inactive_mask else torch.ones_like(active[:, None])
                 hidden = [state * recurrent_masks[index] for index, state in enumerate(next_hidden)]
+                active_masks = np.asarray(info["active_masks"], dtype=np.float32)
         records.append(info["episode_summary"])
     return records
