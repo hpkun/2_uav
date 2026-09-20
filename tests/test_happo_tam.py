@@ -11,6 +11,7 @@ from algorithm.happo import HAPPOTrainer, preceding_factor_update
 from algorithm.happo.evaluation import evaluate_recurrent_actors
 from algorithm.happo.tam import TAMAttentionCritic, TAMGaussianActor, TAMIndependentActors
 from algorithm.happo.tam_buffer import TAMRolloutBuffer
+import algorithm.happo.trainer as trainer_module
 from algorithm.train_happo import _algorithm_name
 from env.mavuav import GLOBAL_STATE_DIM, OBS_DIM, RED_IDS, load_environment_config
 
@@ -85,6 +86,27 @@ def test_tam_critic_parses_exact_state_and_masks_dead_entities():
     assert critic.last_attention_key_padding_mask[:, 0].all()
     assert not critic.last_attention_key_padding_mask[:, 1].any()
     assert not critic.last_attention_key_padding_mask[:, -1].any()
+    assert isinstance(critic.value_head[1], torch.nn.LayerNorm)
+    assert tuple(critic.value_head[1].normalized_shape) == (24,)
+    assert isinstance(critic.value_head[4], torch.nn.LayerNorm)
+    assert tuple(critic.value_head[4].normalized_shape) == (12,)
+    architecture = critic.architecture()
+    assert architecture["post_attention_layer_norm_dims"] == [24, 12]
+    assert architecture["attention_residual_layer_norm"] is True
+
+
+def test_tam_environment_contract_accepts_only_v39_and_expected_reward(monkeypatch):
+    valid = HAPPOTrainer(_env(2), _config(rollout_steps=1))
+    valid.close()
+
+    non_v39 = deepcopy(load_environment_config(ROOT / "configs" / "env_v38.yaml"))
+    non_v39["simulation"]["max_decision_steps"] = 2
+    with pytest.raises(ValueError, match="TAM-HAPPO requires"):
+        HAPPOTrainer(non_v39, _config(rollout_steps=1))
+
+    monkeypatch.setattr(trainer_module, "_resolved_reward_mode", lambda config: "absolute")
+    with pytest.raises(ValueError, match="heterogeneous_role_coupled_gate_v1"):
+        HAPPOTrainer(_env(2), _config(rollout_steps=1))
 
 
 def test_tam_buffer_stores_actor_and_critic_pre_step_hidden():
@@ -173,8 +195,14 @@ def test_tam_huber_update_checkpoint_round_trip_and_metadata(tmp_path):
     source.save_checkpoint(checkpoint)
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
     assert payload["actor_variant"] == "tam" and payload["critic_variant"] == "tam_attention"
-    assert payload["algorithm"] == "happo" and payload["tam_state_memory"] is True
+    assert payload["algorithm"] == "tam_happo" and payload["base_algorithm"] == "happo"
+    assert payload["tam_state_memory"] is True
     assert payload["independent_actor_count"] == 4 and payload["sequential_happo_update"] is True
+    weights = tmp_path / "tam_weights.pt"
+    source.save(weights)
+    weights_payload = torch.load(weights, map_location="cpu", weights_only=False)
+    assert weights_payload["algorithm"] == "tam_happo"
+    assert weights_payload["base_algorithm"] == "happo"
     restored = HAPPOTrainer(_env(20), config)
     assert restored.load_checkpoint(checkpoint) == source.env_steps
     assert np.array_equal(restored.actor_hidden_states, source.actor_hidden_states)

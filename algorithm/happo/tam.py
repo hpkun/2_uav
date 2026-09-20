@@ -133,9 +133,11 @@ class TAMAttentionCritic(nn.Module):
         )
         self.attention_norm = nn.LayerNorm(self.token_dim)
         self.value_head = nn.Sequential(
-            nn.Linear(self.token_dim, self.hidden_layers[0]), nn.Tanh(),
-            nn.Linear(self.hidden_layers[0], self.hidden_layers[1]), nn.Tanh(),
-            nn.LayerNorm(self.hidden_layers[1]), nn.Linear(self.hidden_layers[1], 1),
+            nn.Linear(self.token_dim, self.hidden_layers[0]),
+            nn.LayerNorm(self.hidden_layers[0]), nn.Tanh(),
+            nn.Linear(self.hidden_layers[0], self.hidden_layers[1]),
+            nn.LayerNorm(self.hidden_layers[1]), nn.Tanh(),
+            nn.Linear(self.hidden_layers[1], 1),
         )
         self.last_attention_key_padding_mask: torch.Tensor | None = None
         self.last_token_count = self.ENTITY_COUNT + 1
@@ -194,6 +196,8 @@ class TAMAttentionCritic(nn.Module):
             "recurrent_hidden_dim": self.recurrent_hidden_dim, "token_dim": self.token_dim,
             "attention_heads": self.attention_heads, "attention_layers": 1,
             "token_count": self.ENTITY_COUNT + 1, "hidden_layers": list(self.hidden_layers),
+            "post_attention_layer_norm_dims": list(self.hidden_layers),
+            "attention_residual_layer_norm": True,
             "state_only_value": True, "state_memory": self.state_memory,
             "attention": self.attention_enabled, "inactive_mask": self.inactive_mask,
         }

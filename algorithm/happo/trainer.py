@@ -82,6 +82,15 @@ def _restore_cuda_rng_state(states: list[torch.Tensor] | None) -> None:
         torch.cuda.set_rng_state_all([state.detach().cpu() for state in states])
 
 
+def _resolved_reward_mode(environment_config: Mapping[str, Any]) -> str:
+    version = environment_config["environment_version"]
+    shaping_mode = str(environment_config.get("shaping", {}).get("mode", "absolute"))
+    return ("heterogeneous_role_v1" if version.endswith("v3_7") else
+            "heterogeneous_role_coupled_v1" if version.endswith("v3_8") else
+            "heterogeneous_role_coupled_gate_v1" if version.endswith("v3_9") else
+            shaping_mode)
+
+
 class HAPPOTrainer:
     def __init__(self, env_config: str | Path | Mapping[str, Any] | None = None, config: Mapping[str, Any] | None = None) -> None:
         self.config = deepcopy(DEFAULTS)
@@ -116,10 +125,15 @@ class HAPPOTrainer:
         shaping = self.environment_config.get("shaping", {})
         self.reward_shaping_mode = str(shaping.get("mode", "absolute"))
         version = self.environment_config["environment_version"]
-        self.reward_mode = ("heterogeneous_role_v1" if version.endswith("v3_7") else
-                            "heterogeneous_role_coupled_v1" if version.endswith("v3_8") else
-                            "heterogeneous_role_coupled_gate_v1" if version.endswith("v3_9") else
-                            self.reward_shaping_mode)
+        self.reward_mode = _resolved_reward_mode(self.environment_config)
+        if c["actor_variant"] == "tam" and (
+            version != "heterogeneous_mavuav_4v4_v3_9"
+            or self.reward_mode != "heterogeneous_role_coupled_gate_v1"
+        ):
+            raise ValueError(
+                "TAM-HAPPO requires heterogeneous_mavuav_4v4_v3_9 with "
+                "heterogeneous_role_coupled_gate_v1 reward"
+            )
         if self.credit_enabled and (
             version != "heterogeneous_mavuav_4v4_v3_9"
             or self.reward_mode != "heterogeneous_role_coupled_gate_v1"
@@ -1076,7 +1090,8 @@ class HAPPOTrainer:
         payload.update(self.credit_metadata)
         payload.update(self.tam_metadata)
         if self.is_tam:
-            payload["algorithm"] = "happo"
+            payload["algorithm"] = "tam_happo"
+            payload["base_algorithm"] = "happo"
         if self.credit_enabled:
             assert self.credit_critic is not None
             payload["credit_critic"] = self.credit_critic.state_dict()
@@ -1124,7 +1139,8 @@ class HAPPOTrainer:
         state.update(self.credit_metadata)
         state.update(self.tam_metadata)
         if self.is_tam:
-            state["algorithm"] = "happo"
+            state["algorithm"] = "tam_happo"
+            state["base_algorithm"] = "happo"
         if self.credit_enabled:
             assert self.credit_critic is not None and self.credit_critic_optimizer is not None
             state["credit_critic"] = self.credit_critic.state_dict()
