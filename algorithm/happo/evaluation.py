@@ -1,4 +1,4 @@
-"""Deterministic HAPPO evaluation against the canonical Blue strategy."""
+"""HAPPO policy evaluation against the canonical Blue strategy."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -38,10 +38,25 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, float]:
     }
 
 
-def evaluate_actors(actors: Any, env_config: str | Path | Mapping[str, Any] | None, episodes: int, profile: str, seed: int = 1000, device: str = "cpu", attention_records: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+def evaluate_actors(
+    actors: Any,
+    env_config: str | Path | Mapping[str, Any] | None,
+    episodes: int,
+    profile: str,
+    seed: int = 1000,
+    device: str = "cpu",
+    attention_records: list[dict[str, Any]] | None = None,
+    deterministic: bool = True,
+    action_seed: int | None = None,
+) -> list[dict[str, Any]]:
     records = []; env = HeterogeneousMAVUAVAirCombatEnv(env_config, profile=profile)
     for episode in range(int(episodes)):
         observations, _ = env.reset(seed=seed + episode); done = False; decision_step = 0
+        if not deterministic and action_seed is not None:
+            episode_action_seed = int(action_seed) + episode
+            torch.manual_seed(episode_action_seed)
+            if torch.device(device).type == "cuda" and torch.cuda.is_available():
+                torch.cuda.manual_seed_all(episode_action_seed)
         attention_start = len(attention_records) if attention_records is not None else 0
         while not done:
             actions = []
@@ -65,7 +80,7 @@ def evaluate_actors(actors: Any, env_config: str | Path | Mapping[str, Any] | No
                             row[f"{blue_id}_alive"] = int(observation[start + 9] > 0.5)
                             row[f"{blue_id}_direct_or_datalink_visible"] = int(observation[start + 10] > 0.5 or observation[start + 11] > 0.5)
                         attention_records.append(row)
-                    action, _ = actor.sample(actor_observation, deterministic=True)
+                    action, _ = actor.sample(actor_observation, deterministic=deterministic)
                     actions.append(action.squeeze(0).cpu().numpy())
             observations, _, terminated, truncated, info = env.step(np.asarray(actions))
             done = terminated or truncated

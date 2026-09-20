@@ -1,4 +1,4 @@
-"""Deterministically evaluate a HAPPO checkpoint without resuming training."""
+"""Evaluate a HAPPO checkpoint without resuming training."""
 from __future__ import annotations
 
 import sys
@@ -29,6 +29,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--episodes", type=int, default=100)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--env-config", type=Path)
+    parser.add_argument(
+        "--action-mode", choices=("deterministic", "stochastic"), default="deterministic",
+    )
+    parser.add_argument("--action-seed", type=int, default=2000)
     return parser.parse_args()
 
 
@@ -109,7 +113,12 @@ def main(expected_critic_variant: str = "mlp") -> None:
         method_variant if method_variant in ("cf_happo", "rdc_happo") else
         "happo_agp" if method_variant == "agp" else "happo"
     )
-    records = evaluate_actors(actors, env_config, args.episodes, args.profile, seed=1000, device=device)
+    deterministic = args.action_mode == "deterministic"
+    records = evaluate_actors(
+        actors, env_config, args.episodes, args.profile, seed=1000, device=device,
+        deterministic=deterministic,
+        action_seed=None if deterministic else args.action_seed,
+    )
     rows.append({
             "checkpoint": checkpoint.name, "sampled_steps": int(payload.get("sampled_steps", 0)),
             "algorithm": algorithm,
@@ -117,6 +126,7 @@ def main(expected_critic_variant: str = "mlp") -> None:
             "critic_variant": critic_variant,
             "blue_target_strategy": "nearest_red_aircraft", "training_profile": training_profile,
             "evaluation_profile": args.profile, "episodes": args.episodes,
+            "action_mode": args.action_mode, "action_seed": args.action_seed,
             "environment_version": env_config["environment_version"],
             "reward_mode": reward_mode,
             "reward_shaping_mode": reward_mode if reward_mode not in ROLE_REWARD_MODES else None,
@@ -125,17 +135,19 @@ def main(expected_critic_variant: str = "mlp") -> None:
             **summarize_records(records),
         })
     label = checkpoint.stem.removeprefix("checkpoint_")
-    csv_path = checkpoint.parent / f"evaluation_{label}.csv"
+    suffix = "" if deterministic else "_stochastic"
+    csv_path = checkpoint.parent / f"evaluation_{label}{suffix}.csv"
     with csv_path.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=list(rows[0].keys()))
         writer.writeheader()
         writer.writerows(rows)
         stream.flush()
-    summary_path = checkpoint.parent / f"evaluation_{label}_summary.json"
+    summary_path = checkpoint.parent / f"evaluation_{label}{suffix}_summary.json"
     with summary_path.open("w", encoding="utf-8") as stream:
         json.dump({
             "algorithm": algorithm, "checkpoint": str(checkpoint), "training_profile": training_profile,
             "evaluation_profile": args.profile, "method_variant": method_variant,
+            "action_mode": args.action_mode, "action_seed": args.action_seed,
             "environment_version": env_config["environment_version"],
             "reward_mode": reward_mode,
             "reward_shaping_mode": reward_mode if reward_mode not in ROLE_REWARD_MODES else None,

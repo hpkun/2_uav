@@ -1,0 +1,157 @@
+============================================================
+HAPPO TRAINING
+Run: happo_v39_nominal_seed3_750k_20260919_131254
+Profile: learnability
+Seed: 3
+Device: cuda
+Envs: 16
+Method: baseline
+Critic: mlp
+Rollout: 128
+Target steps: 750,000
+Checkpoint interval: 250,000
+Evaluation interval: 250,000
+Log interval: 50,000
+============================================================
+[TRAIN] 51,200 / 750,000 (6.8%)
+        elapsed 00:01:28 | speed 580.4 steps/s | ETA 00:20:04
+        episodes +760 / total 760
+        return -102.29 | W/B/D 0.0% / 32.9% / 67.1%
+        MAV survival 67.1% | UAV survivors 0.17
+        Red kills 0.00 | Blue kills 0.00 | ep length 66.6
+        actor loss [-0.015, -0.023, -0.021, -0.020]
+        critic loss 1469.620 | entropy 3.487
+[TRAIN] 100,352 / 750,000 (13.4%)
+        elapsed 00:03:19 | speed 445.0 steps/s | ETA 00:24:20
+        episodes +656 / total 1416
+        return -37.00 | W/B/D 0.0% / 1.8% / 98.2%
+        MAV survival 98.2% | UAV survivors 1.06
+        Red kills 0.00 | Blue kills 0.02 | ep length 74.9
+        actor loss [-0.016, -0.017, -0.017, -0.021]
+        critic loss 76.657 | entropy 3.448
+[TRAIN] 151,552 / 750,000 (20.2%)
+        elapsed 00:04:59 | speed 511.0 steps/s | ETA 00:19:31
+        episodes +684 / total 2100
+        return -27.98 | W/B/D 0.0% / 1.2% / 98.8%
+        MAV survival 98.8% | UAV survivors 1.93
+        Red kills 0.00 | Blue kills 0.04 | ep length 74.8
+        actor loss [-0.015, -0.023, -0.016, -0.022]
+        critic loss 46.324 | entropy 3.435
+[TRAIN] 200,704 / 750,000 (26.8%)
+        elapsed 00:06:27 | speed 555.9 steps/s | ETA 00:16:28
+        episodes +655 / total 2755
+        return -24.83 | W/B/D 0.0% / 0.2% / 99.8%
+        MAV survival 99.8% | UAV survivors 1.94
+        Red kills 0.00 | Blue kills 0.05 | ep length 75.0
+        actor loss [-0.025, -0.020, -0.022, -0.017]
+        critic loss 7.283 | entropy 3.420
+[TRAIN] 251,904 / 750,000 (33.6%)
+        elapsed 00:08:11 | speed 491.8 steps/s | ETA 00:16:53
+        episodes +688 / total 3443
+        return 58.03 | W/B/D 0.4% / 0.0% / 99.6%
+        MAV survival 100.0% | UAV survivors 1.68
+        Red kills 0.82 | Blue kills 0.28 | ep length 74.9
+        actor loss [-0.021, -0.018, -0.025, -0.017]
+        critic loss 775.412 | entropy 3.376
+[CKPT] milestone 250,000 crossed at step 251,904 | checkpoint_251904.pt
+[EVAL] step 251,904 | nearest_red_aircraft
+       win 0.0% | blue 0.0% | draw 100.0%
+       return 0.49 | Red kills 0.22 | MAV survival 100.0%
+[TRAIN] 301,056 / 750,000 (40.1%)
+        elapsed 00:09:33 | speed 603.9 steps/s | ETA 00:12:23
+        episodes +746 / total 4189
+        return 271.72 | W/B/D 26.3% / 0.4% / 73.3%
+        MAV survival 99.6% | UAV survivors 1.76
+        Red kills 2.67 | Blue kills 0.18 | ep length 65.8
+        actor loss [-0.021, -0.024, -0.027, -0.023]
+        critic loss 3219.337 | entropy 3.313
+[TRAIN] 350,208 / 750,000 (46.7%)
+        elapsed 00:10:53 | speed 614.7 steps/s | ETA 00:10:50
+        episodes +883 / total 5072
+        return 365.57 | W/B/D 54.0% / 1.0% / 45.0%
+        MAV survival 99.0% | UAV survivors 2.27
+        Red kills 3.27 | Blue kills 0.01 | ep length 55.5
+        actor loss [-0.025, -0.022, -0.017, -0.022]
+        critic loss 4457.293 | entropy 3.266
+[TRAIN] 401,408 / 750,000 (53.5%)
+        elapsed 00:12:43 | speed 464.0 steps/s | ETA 00:12:31
+        episodes +1019 / total 6091
+        return 404.22 | W/B/D 67.3% / 1.1% / 31.6%
+        MAV survival 98.9% | UAV survivors 2.49
+        Red kills 3.50 | Blue kills 0.00 | ep length 50.4
+        actor loss [-0.026, -0.029, -0.017, -0.019]
+        critic loss 3735.938 | entropy 3.213
+[TRAIN] 450,560 / 750,000 (60.1%)
+        elapsed 00:14:15 | speed 535.1 steps/s | ETA 00:09:20
+        episodes +1030 / total 7121
+        return 419.19 | W/B/D 72.7% / 3.5% / 23.8%
+        MAV survival 96.5% | UAV survivors 2.62
+        Red kills 3.63 | Blue kills 0.01 | ep length 47.7
+        actor loss [-0.024, -0.025, -0.022, -0.020]
+        critic loss 2842.395 | entropy 3.180
+[TRAIN] 501,760 / 750,000 (66.9%)
+        elapsed 00:15:39 | speed 609.2 steps/s | ETA 00:06:47
+        episodes +1069 / total 8190
+        return 421.75 | W/B/D 72.3% / 1.3% / 26.4%
+        MAV survival 98.7% | UAV survivors 2.58
+        Red kills 3.62 | Blue kills 0.02 | ep length 47.9
+        actor loss [-0.024, -0.022, -0.025, -0.027]
+        critic loss 2485.022 | entropy 3.142
+[CKPT] milestone 500,000 crossed at step 501,760 | checkpoint_501760.pt
+[EVAL] step 501,760 | nearest_red_aircraft
+       win 52.0% | blue 4.0% | draw 44.0%
+       return 374.56 | Red kills 3.42 | MAV survival 96.0%
+[TRAIN] 550,912 / 750,000 (73.5%)
+        elapsed 00:17:32 | speed 433.2 steps/s | ETA 00:07:40
+        episodes +1082 / total 9272
+        return 442.23 | W/B/D 78.1% / 0.3% / 21.6%
+        MAV survival 99.7% | UAV survivors 2.64
+        Red kills 3.73 | Blue kills 0.01 | ep length 45.6
+        actor loss [-0.021, -0.023, -0.029, -0.022]
+        critic loss 1686.424 | entropy 3.094
+[TRAIN] 600,064 / 750,000 (80.0%)
+        elapsed 00:18:56 | speed 587.0 steps/s | ETA 00:04:15
+        episodes +1129 / total 10401
+        return 455.07 | W/B/D 82.0% / 0.0% / 18.0%
+        MAV survival 100.0% | UAV survivors 2.74
+        Red kills 3.80 | Blue kills 0.00 | ep length 43.5
+        actor loss [-0.023, -0.026, -0.018, -0.022]
+        critic loss 1275.953 | entropy 3.043
+[TRAIN] 651,264 / 750,000 (86.8%)
+        elapsed 00:20:20 | speed 607.6 steps/s | ETA 00:02:42
+        episodes +1205 / total 11606
+        return 457.90 | W/B/D 83.7% / 0.7% / 15.7%
+        MAV survival 99.3% | UAV survivors 2.80
+        Red kills 3.82 | Blue kills 0.00 | ep length 42.5
+        actor loss [-0.019, -0.026, -0.021, -0.026]
+        critic loss 1184.857 | entropy 2.997
+[TRAIN] 700,416 / 750,000 (93.4%)
+        elapsed 00:22:13 | speed 434.9 steps/s | ETA 00:01:54
+        episodes +1175 / total 12781
+        return 449.47 | W/B/D 83.7% / 4.7% / 11.6%
+        MAV survival 95.3% | UAV survivors 2.81
+        Red kills 3.81 | Blue kills 0.00 | ep length 41.8
+        actor loss [-0.020, -0.023, -0.020, -0.027]
+        critic loss 1651.709 | entropy 2.977
+[TRAIN] 750,000 / 750,000 (100.0%)
+        elapsed 00:23:44 | speed 546.8 steps/s | ETA 00:00:00
+        episodes +1217 / total 13998
+        return 463.21 | W/B/D 86.2% / 0.8% / 13.0%
+        MAV survival 99.2% | UAV survivors 2.81
+        Red kills 3.84 | Blue kills 0.00 | ep length 40.8
+        actor loss [-0.024, -0.018, -0.023, -0.022]
+        critic loss 1217.900 | entropy 2.953
+[CKPT] milestone 750,000 crossed at step 750,000 | checkpoint_750000.pt
+[TRAIN] optimization finished at 750,000 steps
+[FINAL EVAL] step 750,000 | nearest_red_aircraft
+       win 79.0% | blue 10.0% | draw 11.0%
+       return 427.80 | Red kills 3.75 | MAV survival 90.0%
+============================================================
+TRAINING COMPLETE
+Steps: 750,000
+Elapsed training time: 00:23:44
+Final evaluation time: 00:00:36
+Completed episodes: 13998
+Final checkpoint: checkpoint_final.pt
+Run folder: /mnt/c/Users/HPK/Desktop/2_uav/outputs/happo_v39_nominal_seed3_750k_20260919_131254
+============================================================

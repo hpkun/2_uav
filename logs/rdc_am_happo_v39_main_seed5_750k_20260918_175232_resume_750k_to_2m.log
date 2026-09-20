@@ -1,0 +1,323 @@
+============================================================
+RDC_HAPPO TRAINING
+Run: rdc_am_happo_v39_main_seed5_750k_20260918_175232
+Profile: main
+Seed: 5
+Device: cuda
+Envs: 16
+Method: rdc_happo
+Critic: mlp
+Rollout: 128
+Target steps: 2,000,000
+Checkpoint interval: 250,000
+Evaluation interval: 250,000
+Log interval: 50,000
+Resume checkpoint: checkpoint_final.pt
+Resume steps: 750,000
+Target steps: 2,000,000
+============================================================
+[TRAIN] 801,200 / 2,000,000 (40.1%)
+        elapsed 00:01:26 | speed 592.6 steps/s | ETA 00:33:43
+        episodes +770 / total 10942
+        return 256.93 | W/B/D 24.0% / 0.3% / 75.7%
+        MAV survival 99.7% | UAV survivors 2.04
+        Red kills 2.50 | Blue kills 0.09 | ep length 66.6
+        actor loss [-0.023, -0.021, -0.025, -0.019]
+        critic loss 2359.823 | entropy 2.916
+        credit loss V/B 455.4687 / 508.1192
+        raw Aabs [38.700508, 42.560959, 52.114838, 39.534157] | Astd [60.428974, 63.643158, 69.229263, 61.377277] | degenerate [0, 0, 0, 0]
+        RDC comp abs S/M/U1/U2/U3 [41.887016, 0.171539, 1.770676, 0.664146, 1.907624] | component return std [117.317513, 0.292022, 3.38354, 2.298368, 3.386697]
+[TRAIN] 850,352 / 2,000,000 (42.5%)
+        elapsed 00:02:49 | speed 594.4 steps/s | ETA 00:32:14
+        episodes +769 / total 11711
+        return 281.95 | W/B/D 30.3% / 0.4% / 69.3%
+        MAV survival 99.6% | UAV survivors 2.09
+        Red kills 2.68 | Blue kills 0.11 | ep length 63.9
+        actor loss [-0.025, -0.022, -0.028, -0.020]
+        critic loss 2697.655 | entropy 2.863
+        credit loss V/B 525.3916 / 583.6448
+        raw Aabs [36.240765, 38.063652, 50.487617, 36.716011] | Astd [54.405369, 56.562325, 63.760857, 54.879871] | degenerate [0, 0, 0, 0]
+        RDC comp abs S/M/U1/U2/U3 [38.659992, 0.162338, 1.570583, 0.762939, 1.987647] | component return std [126.491875, 0.288806, 3.230875, 2.564902, 3.244994]
+[TRAIN] 901,552 / 2,000,000 (45.1%)
+        elapsed 00:04:16 | speed 591.9 steps/s | ETA 00:30:56
+        episodes +783 / total 12494
+        return 271.55 | W/B/D 25.7% / 0.8% / 73.6%
+        MAV survival 99.2% | UAV survivors 2.07
+        Red kills 2.64 | Blue kills 0.14 | ep length 65.6
+        actor loss [-0.024, -0.021, -0.021, -0.024]
+        critic loss 2327.057 | entropy 2.814
+        credit loss V/B 451.8827 / 503.3135
+        raw Aabs [32.273052, 36.974083, 53.431786, 33.073006] | Astd [54.177559, 57.987579, 68.630585, 54.588928] | degenerate [0, 0, 0, 0]
+        RDC comp abs S/M/U1/U2/U3 [36.676109, 0.152362, 1.906043, 0.741295, 2.234028] | component return std [116.01693, 0.246469, 2.822305, 2.351424, 3.185041]
+[TRAIN] 950,704 / 2,000,000 (47.5%)
+        elapsed 00:05:39 | speed 591.2 steps/s | ETA 00:29:35
+        episodes +749 / total 13243
+        return 255.67 | W/B/D 22.7% / 2.8% / 74.5%
+        MAV survival 97.2% | UAV survivors 2.08
+        Red kills 2.55 | Blue kills 0.18 | ep length 65.5
+        actor loss [-0.026, -0.022, -0.026, -0.020]
+        critic loss 2327.268 | entropy 2.761
+        credit loss V/B 457.1341 / 517.8584
+        raw Aabs [28.414505, 29.819815, 45.068745, 29.344183] | Astd [45.914303, 47.165569, 60.023037, 46.764648] | degenerate [0, 0, 0, 0]
+        RDC comp abs S/M/U1/U2/U3 [30.96615, 0.159252, 1.864394, 0.662371, 2.039618] | component return std [119.380363, 0.265419, 3.535544, 2.216484, 3.506018]
+[TRAIN] 1,001,904 / 2,000,000 (50.1%)
+        elapsed 00:07:05 | speed 595.9 steps/s | ETA 00:27:55
+        episodes +793 / total 14036
+        return 257.75 | W/B/D 24.6% / 3.9% / 71.5%
+        MAV survival 96.1% | UAV survivors 2.08
+        Red kills 2.58 | Blue kills 0.24 | ep length 64.7
+        actor loss [-0.022, -0.025, -0.021, -0.022]
+        critic loss 2346.076 | entropy 2.701
+        credit loss V/B 457.0031 / 531.6700
+        raw Aabs [29.037411, 31.236423, 46.816933, 29.028997] | Astd [49.862259, 51.074142, 61.58614, 49.553352] | degenerate [0, 0, 0, 0]
+        RDC comp abs S/M/U1/U2/U3 [31.691692, 0.166492, 1.456519, 0.71727, 2.084082] | component return std [121.853149, 0.271236, 3.118612, 2.275197, 3.354707]
+[CKPT] milestone 1,000,000 crossed at step 1,001,904 | checkpoint_1001904.pt
+[EVAL] step 1,001,904 | nearest_red_aircraft
+       win 2.0% | blue 16.0% | draw 82.0%
+       return 89.84 | Red kills 1.40 | MAV survival 84.0%
+[TRAIN] 1,051,056 / 2,000,000 (52.6%)
+        elapsed 00:08:26 | speed 606.5 steps/s | ETA 00:26:05
+        episodes +771 / total 14807
+        return 257.05 | W/B/D 26.2% / 5.8% / 68.0%
+        MAV survival 94.2% | UAV survivors 2.11
+        Red kills 2.59 | Blue kills 0.26 | ep length 63.7
+        actor loss [-0.021, -0.019, -0.027, -0.025]
+        critic loss 2609.757 | entropy 2.644
+        credit loss V/B 503.8265 / 583.2523
+        raw Aabs [32.398827, 35.808495, 52.200623, 32.347061] | Astd [50.596027, 53.049648, 66.957542, 49.9659] | degenerate [0, 0, 0, 0]
+        RDC comp abs S/M/U1/U2/U3 [35.681366, 0.133833, 1.846135, 0.671008, 1.920165] | component return std [127.202316, 0.234445, 3.770054, 2.085582, 3.386954]
+[TRAIN] 1,100,208 / 2,000,000 (55.0%)
+        elapsed 00:09:48 | speed 596.8 steps/s | ETA 00:25:08
+        episodes +771 / total 15578
+        return 259.00 | W/B/D 26.1% / 3.0% / 70.9%
+        MAV survival 97.0% | UAV survivors 2.08
+        Red kills 2.55 | Blue kills 0.34 | ep length 63.9
+        actor loss [-0.028, -0.026, -0.024, -0.021]
+        critic loss 2588.190 | entropy 2.597
+        credit loss V/B 501.8716 / 582.2794
+        raw Aabs [24.356646, 28.130535, 46.859886, 24.589121] | Astd [44.08147, 47.677174, 61.644749, 44.336483] | degenerate [0, 0, 0, 0]
+        RDC comp abs S/M/U1/U2/U3 [28.379557, 0.167217, 1.787534, 0.622896, 2.004908] | component return std [116.610596, 0.27718, 3.480437, 1.857485, 3.349687]
+[TRAIN] 1,151,408 / 2,000,000 (57.6%)
+        elapsed 00:11:14 | speed 592.9 steps/s | ETA 00:23:51
+        episodes +822 / total 16400
+        return 279.55 | W/B/D 29.9% / 2.3% / 67.8%
+        MAV survival 97.7% | UAV survivors 2.10
+        Red kills 2.70 | Blue kills 0.31 | ep length 62.1
+        actor loss [-0.022, -0.021, -0.031, -0.024]
+        critic loss 2447.754 | entropy 2.548
+        credit loss V/B 478.8219 / 557.8042
+        raw Aabs [34.216278, 36.368301, 51.300026, 34.500443] | Astd [49.856201, 52.133171, 61.217823, 50.001163] | degenerate [0, 0, 0, 0]
+        RDC comp abs S/M/U1/U2/U3 [37.013317, 0.161311, 1.558752, 0.728662, 1.966233] | component return std [142.572495, 0.307661, 3.834263, 2.152108, 3.407568]
+[TRAIN] 1,200,560 / 2,000,000 (60.0%)
+        elapsed 00:12:36 | speed 599.9 steps/s | ETA 00:22:13
+        episodes +774 / total 17174
+        return 274.26 | W/B/D 27.4% / 1.2% / 71.4%
+        MAV survival 98.8% | UAV survivors 2.06
+        Red kills 2.65 | Blue kills 0.32 | ep length 63.6
+        actor loss [-0.025, -0.015, -0.027, -0.026]
+        critic loss 2201.802 | entropy 2.507
+        credit loss V/B 421.8427 / 482.3689
+        raw Aabs [34.342232, 35.632912, 50.880524, 34.02282] | Astd [52.445, 52.924316, 63.970203, 51.847355] | degenerate [0, 0, 0, 0]
+        RDC comp abs S/M/U1/U2/U3 [36.473358, 0.176545, 1.627001, 0.675853, 1.969673] | component return std [139.693954, 0.299381, 3.93016, 2.011103, 3.467005]
+[TRAIN] 1,251,760 / 2,000,000 (62.6%)
+        elapsed 00:14:03 | speed 591.3 steps/s | ETA 00:21:05
+        episodes +851 / total 18025
+        return 302.64 | W/B/D 37.0% / 0.7% / 62.3%
+        MAV survival 99.3% | UAV survivors 2.06
+        Red kills 2.82 | Blue kills 0.36 | ep length 60.1
+        actor loss [-0.020, -0.021, -0.021, -0.031]
+        critic loss 2472.599 | entropy 2.470
+        credit loss V/B 467.6879 / 524.7899
+        raw Aabs [31.276688, 33.97842, 50.702003, 31.302597] | Astd [48.143948, 51.5681, 62.959232, 48.97908] | degenerate [0, 0, 0, 0]
+        RDC comp abs S/M/U1/U2/U3 [34.529968, 0.184413, 1.714315, 0.57153, 2.029177] | component return std [135.3134, 0.284709, 4.070825, 1.95963, 3.322775]
+[CKPT] milestone 1,250,000 crossed at step 1,251,760 | checkpoint_1251760.pt
+[EVAL] step 1,251,760 | nearest_red_aircraft
+       win 30.0% | blue 0.0% | draw 70.0%
+       return 277.58 | Red kills 2.64 | MAV survival 100.0%
+[TRAIN] 1,300,912 / 2,000,000 (65.0%)
+        elapsed 00:15:24 | speed 603.6 steps/s | ETA 00:19:18
+        episodes +803 / total 18828
+        return 301.89 | W/B/D 34.5% / 0.1% / 65.4%
+        MAV survival 99.9% | UAV survivors 2.13
+        Red kills 2.83 | Blue kills 0.28 | ep length 61.0
+        actor loss [-0.029, -0.023, -0.023, -0.023]
+        critic loss 2325.824 | entropy 2.430
+        credit loss V/B 447.9572 / 508.3204
+        raw Aabs [33.614819, 36.456993, 50.751568, 32.676773] | Astd [53.093407, 55.580856, 64.952446, 52.95813] | degenerate [0, 0, 0, 0]
+        RDC comp abs S/M/U1/U2/U3 [36.064575, 0.191555, 1.828179, 0.682235, 2.235669] | component return std [125.702637, 0.29747, 3.56476, 1.975102, 3.204882]
+[TRAIN] 1,350,064 / 2,000,000 (67.5%)
+        elapsed 00:16:46 | speed 598.4 steps/s | ETA 00:18:06
+        episodes +839 / total 19667
+        return 318.35 | W/B/D 39.6% / 0.0% / 60.4%
+        MAV survival 100.0% | UAV survivors 2.15
+        Red kills 2.93 | Blue kills 0.30 | ep length 58.9
+        actor loss [-0.030, -0.018, -0.025, -0.021]
+        critic loss 2312.409 | entropy 2.393
+        credit loss V/B 444.8196 / 499.6442
+        raw Aabs [37.374123, 38.119312, 54.56847, 37.689781] | Astd [57.039993, 57.759975, 70.110199, 57.188042] | degenerate [0, 0, 0, 0]
+        RDC comp abs S/M/U1/U2/U3 [39.918644, 0.219071, 1.667678, 0.698031, 2.351101] | component return std [142.321732, 0.347253, 3.959116, 1.831463, 3.498873]
+[TRAIN] 1,401,264 / 2,000,000 (70.1%)
+        elapsed 00:18:13 | speed 594.5 steps/s | ETA 00:16:47
+        episodes +859 / total 20526
+        return 318.95 | W/B/D 38.5% / 0.0% / 61.5%
+        MAV survival 100.0% | UAV survivors 2.08
+        Red kills 2.95 | Blue kills 0.31 | ep length 59.5
+        actor loss [-0.031, -0.020, -0.020, -0.021]
+        critic loss 2197.726 | entropy 2.342
+        credit loss V/B 423.6395 / 467.1915
+        raw Aabs [32.516548, 33.73978, 49.316765, 31.944834] | Astd [52.700394, 54.184612, 65.272751, 52.07291] | degenerate [0, 0, 0, 0]
+        RDC comp abs S/M/U1/U2/U3 [34.37767, 0.19433, 1.856344, 0.531156, 2.286628] | component return std [126.676651, 0.300759, 4.173006, 1.527112, 3.558003]
+[TRAIN] 1,450,416 / 2,000,000 (72.5%)
+        elapsed 00:19:35 | speed 599.1 steps/s | ETA 00:15:17
+        episodes +828 / total 21354
+        return 317.35 | W/B/D 39.3% / 0.1% / 60.6%
+        MAV survival 99.9% | UAV survivors 2.00
+        Red kills 2.94 | Blue kills 0.31 | ep length 59.4
+        actor loss [-0.029, -0.019, -0.025, -0.017]
+        critic loss 2264.311 | entropy 2.306
+        credit loss V/B 435.6857 / 489.7710
+        raw Aabs [30.462107, 31.391792, 45.727345, 30.722422] | Astd [48.36845, 47.879761, 58.532635, 48.368935] | degenerate [0, 0, 0, 0]
+        RDC comp abs S/M/U1/U2/U3 [32.404896, 0.182533, 1.850065, 0.524895, 2.267293] | component return std [131.53627, 0.316088, 3.899274, 1.916925, 3.688014]
+[TRAIN] 1,501,616 / 2,000,000 (75.1%)
+        elapsed 00:21:01 | speed 594.3 steps/s | ETA 00:13:59
+        episodes +839 / total 22193
+        return 313.68 | W/B/D 36.5% / 1.0% / 62.6%
+        MAV survival 99.0% | UAV survivors 2.00
+        Red kills 2.95 | Blue kills 0.30 | ep length 61.1
+        actor loss [-0.021, -0.022, -0.023, -0.025]
+        critic loss 2134.002 | entropy 2.262
+        credit loss V/B 412.6513 / 458.7817
+        raw Aabs [31.853333, 32.413536, 41.768185, 32.093571] | Astd [46.275467, 46.276516, 54.167145, 46.825462] | degenerate [0, 0, 0, 0]
+        RDC comp abs S/M/U1/U2/U3 [33.043758, 0.159295, 1.759554, 0.553771, 2.13941] | component return std [128.485931, 0.279716, 3.569722, 1.836331, 3.610635]
+[CKPT] milestone 1,500,000 crossed at step 1,501,616 | checkpoint_1501616.pt
+[EVAL] step 1,501,616 | nearest_red_aircraft
+       win 40.0% | blue 16.0% | draw 44.0%
+       return 309.60 | Red kills 3.16 | MAV survival 84.0%
+[TRAIN] 1,550,768 / 2,000,000 (77.5%)
+        elapsed 00:22:22 | speed 607.5 steps/s | ETA 00:12:20
+        episodes +820 / total 23013
+        return 319.73 | W/B/D 40.2% / 3.0% / 56.7%
+        MAV survival 97.0% | UAV survivors 2.03
+        Red kills 3.01 | Blue kills 0.36 | ep length 60.0
+        actor loss [-0.025, -0.024, -0.026, -0.022]
+        critic loss 2458.900 | entropy 2.222
+        credit loss V/B 462.9003 / 520.4725
+        raw Aabs [34.771591, 35.302124, 44.598221, 34.027267] | Astd [51.978065, 52.895111, 58.789253, 51.786213] | degenerate [0, 0, 0, 0]
+        RDC comp abs S/M/U1/U2/U3 [35.651901, 0.164704, 1.631942, 0.628289, 1.990366] | component return std [134.430542, 0.302527, 3.979002, 1.794466, 3.385348]
+[TRAIN] 1,601,968 / 2,000,000 (80.1%)
+        elapsed 00:23:48 | speed 591.1 steps/s | ETA 00:11:13
+        episodes +877 / total 23890
+        return 327.83 | W/B/D 44.1% / 0.3% / 55.5%
+        MAV survival 99.7% | UAV survivors 2.05
+        Red kills 2.99 | Blue kills 0.33 | ep length 58.4
+        actor loss [-0.028, -0.018, -0.031, -0.019]
+        critic loss 2496.369 | entropy 2.162
+        credit loss V/B 485.7985 / 540.2595
+        raw Aabs [35.546814, 37.387012, 44.699158, 36.418808] | Astd [56.368961, 57.268661, 64.485237, 56.248131] | degenerate [0, 0, 0, 0]
+        RDC comp abs S/M/U1/U2/U3 [37.363346, 0.153249, 1.537978, 0.749124, 2.011676] | component return std [146.663681, 0.2789, 3.846298, 2.296404, 3.222094]
+[TRAIN] 1,651,120 / 2,000,000 (82.6%)
+        elapsed 00:25:11 | speed 591.3 steps/s | ETA 00:09:50
+        episodes +866 / total 24756
+        return 344.13 | W/B/D 47.7% / 0.5% / 51.8%
+        MAV survival 99.5% | UAV survivors 2.17
+        Red kills 3.11 | Blue kills 0.30 | ep length 56.8
+        actor loss [-0.030, -0.023, -0.023, -0.024]
+        critic loss 2377.867 | entropy 2.106
+        credit loss V/B 470.0164 / 519.8186
+        raw Aabs [41.658672, 43.709896, 50.829891, 41.527454] | Astd [57.555946, 58.93288, 65.01545, 57.725857] | degenerate [0, 0, 0, 0]
+        RDC comp abs S/M/U1/U2/U3 [43.087753, 0.175614, 1.660996, 0.827455, 2.122685] | component return std [140.091507, 0.316399, 3.593202, 2.514829, 3.264757]
+[TRAIN] 1,700,272 / 2,000,000 (85.0%)
+        elapsed 00:26:35 | speed 591.3 steps/s | ETA 00:08:27
+        episodes +852 / total 25608
+        return 340.20 | W/B/D 45.3% / 0.1% / 54.6%
+        MAV survival 99.9% | UAV survivors 2.18
+        Red kills 3.09 | Blue kills 0.29 | ep length 57.5
+        actor loss [-0.023, -0.028, -0.024, -0.023]
+        critic loss 2283.107 | entropy 2.083
+        credit loss V/B 439.3441 / 497.4364
+        raw Aabs [34.398254, 36.307388, 46.214394, 33.351646] | Astd [53.908661, 56.304192, 61.731758, 52.993938] | degenerate [0, 0, 0, 0]
+        RDC comp abs S/M/U1/U2/U3 [35.976711, 0.188939, 1.649299, 0.85622, 2.02068] | component return std [128.59584, 0.29767, 3.863626, 2.414245, 3.401034]
+[TRAIN] 1,751,472 / 2,000,000 (87.6%)
+        elapsed 00:28:00 | speed 597.0 steps/s | ETA 00:06:56
+        episodes +893 / total 26501
+        return 335.68 | W/B/D 46.4% / 0.0% / 53.6%
+        MAV survival 100.0% | UAV survivors 2.18
+        Red kills 3.03 | Blue kills 0.34 | ep length 57.4
+        actor loss [-0.029, -0.020, -0.028, -0.021]
+        critic loss 2300.615 | entropy 2.033
+        credit loss V/B 441.8422 / 497.7094
+        raw Aabs [35.843781, 36.731888, 45.434132, 36.033325] | Astd [51.398655, 51.443985, 59.081203, 51.274109] | degenerate [0, 0, 0, 0]
+        RDC comp abs S/M/U1/U2/U3 [37.279987, 0.160583, 1.557266, 1.156231, 2.047176] | component return std [142.827286, 0.311061, 3.855002, 2.814956, 3.216077]
+[CKPT] milestone 1,750,000 crossed at step 1,751,472 | checkpoint_1751472.pt
+[EVAL] step 1,751,472 | nearest_red_aircraft
+       win 44.0% | blue 0.0% | draw 56.0%
+       return 322.92 | Red kills 2.94 | MAV survival 100.0%
+[TRAIN] 1,800,624 / 2,000,000 (90.0%)
+        elapsed 00:29:22 | speed 601.2 steps/s | ETA 00:05:32
+        episodes +861 / total 27362
+        return 344.98 | W/B/D 49.1% / 0.1% / 50.8%
+        MAV survival 99.9% | UAV survivors 2.19
+        Red kills 3.10 | Blue kills 0.35 | ep length 57.0
+        actor loss [-0.025, -0.024, -0.024, -0.022]
+        critic loss 2269.173 | entropy 1.988
+        credit loss V/B 436.0268 / 477.1864
+        raw Aabs [33.932007, 37.338299, 44.435963, 35.366554] | Astd [50.236366, 52.272224, 60.659134, 51.614719] | degenerate [0, 0, 0, 0]
+        RDC comp abs S/M/U1/U2/U3 [36.413658, 0.182692, 1.47491, 1.253721, 2.29506] | component return std [133.433167, 0.311489, 3.204107, 3.049529, 3.257627]
+[TRAIN] 1,851,824 / 2,000,000 (92.6%)
+        elapsed 00:30:48 | speed 595.0 steps/s | ETA 00:04:09
+        episodes +911 / total 28273
+        return 354.17 | W/B/D 50.8% / 0.0% / 49.2%
+        MAV survival 100.0% | UAV survivors 2.24
+        Red kills 3.17 | Blue kills 0.25 | ep length 56.3
+        actor loss [-0.029, -0.023, -0.022, -0.022]
+        critic loss 2247.145 | entropy 1.955
+        credit loss V/B 431.1327 / 472.0611
+        raw Aabs [37.515125, 38.672009, 44.863277, 36.722652] | Astd [53.528435, 53.556458, 57.171078, 52.025269] | degenerate [0, 0, 0, 0]
+        RDC comp abs S/M/U1/U2/U3 [38.441555, 0.18675, 1.556755, 1.040393, 2.08432] | component return std [136.784775, 0.374121, 3.655785, 3.124479, 3.387754]
+[TRAIN] 1,900,976 / 2,000,000 (95.0%)
+        elapsed 00:32:11 | speed 590.9 steps/s | ETA 00:02:48
+        episodes +871 / total 29144
+        return 355.77 | W/B/D 48.5% / 0.1% / 51.4%
+        MAV survival 99.9% | UAV survivors 2.23
+        Red kills 3.21 | Blue kills 0.24 | ep length 56.5
+        actor loss [-0.034, -0.020, -0.023, -0.025]
+        critic loss 2123.014 | entropy 1.910
+        credit loss V/B 407.7525 / 452.4415
+        raw Aabs [34.838287, 37.699684, 45.438881, 35.66367] | Astd [51.174679, 53.686031, 58.951019, 52.64851] | degenerate [0, 0, 0, 0]
+        RDC comp abs S/M/U1/U2/U3 [37.217117, 0.189682, 1.503374, 1.038587, 2.31855] | component return std [148.553207, 0.358667, 3.919777, 2.779014, 3.74573]
+[TRAIN] 1,950,128 / 2,000,000 (97.5%)
+        elapsed 00:33:34 | speed 592.0 steps/s | ETA 00:01:24
+        episodes +900 / total 30044
+        return 364.96 | W/B/D 53.2% / 0.0% / 46.8%
+        MAV survival 100.0% | UAV survivors 2.21
+        Red kills 3.25 | Blue kills 0.27 | ep length 54.6
+        actor loss [-0.026, -0.017, -0.029, -0.024]
+        critic loss 2173.042 | entropy 1.887
+        credit loss V/B 411.0397 / 455.9636
+        raw Aabs [33.946701, 35.581474, 47.629505, 35.102356] | Astd [51.236916, 52.383255, 59.477318, 51.694546] | degenerate [0, 0, 0, 0]
+        RDC comp abs S/M/U1/U2/U3 [36.660454, 0.179684, 1.667052, 0.862947, 2.074203] | component return std [144.090134, 0.308506, 3.835212, 2.697369, 3.398226]
+[TRAIN] 2,000,000 / 2,000,000 (100.0%)
+        elapsed 00:34:58 | speed 597.2 steps/s | ETA 00:00:00
+        episodes +892 / total 30936
+        return 355.24 | W/B/D 49.9% / 0.0% / 50.1%
+        MAV survival 100.0% | UAV survivors 2.20
+        Red kills 3.19 | Blue kills 0.29 | ep length 55.8
+        actor loss [-0.031, -0.023, -0.026, -0.022]
+        critic loss 2028.090 | entropy 1.854
+        credit loss V/B 393.4412 / 432.9908
+        raw Aabs [32.247086, 32.46199, 41.519909, 30.892677] | Astd [46.869839, 46.147854, 50.88261, 43.520947] | degenerate [0, 0, 0, 0]
+        RDC comp abs S/M/U1/U2/U3 [33.268742, 0.154027, 1.591409, 0.907729, 1.798381] | component return std [121.889366, 0.294496, 4.04535, 2.778414, 3.687554]
+[CKPT] milestone 2,000,000 crossed at step 2,000,000 | checkpoint_2000000.pt
+[TRAIN] optimization finished at 2,000,000 steps
+[FINAL EVAL] step 2,000,000 | nearest_red_aircraft
+       win 52.0% | blue 0.0% | draw 48.0%
+       return 361.83 | Red kills 3.24 | MAV survival 100.0%
+============================================================
+TRAINING COMPLETE
+Steps: 2,000,000
+Elapsed training time: 00:34:58
+Final evaluation time: 00:00:49
+Completed episodes: 30936
+Final checkpoint: checkpoint_final.pt
+Run folder: /mnt/c/Users/HPK/Desktop/2_uav/outputs/rdc_am_happo_v39_main_seed5_750k_20260918_175232
+============================================================
