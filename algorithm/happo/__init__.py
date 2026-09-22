@@ -8,6 +8,7 @@ from .tam_buffer import TAMRolloutBuffer
 from .trainer import HAPPOTrainer, preceding_factor_update
 from .credit_buffer import CreditRolloutBuffer
 from .counterfactual_credit import ActionMarginalCreditCritic
+from .rgaa import RoleAdvantageRolloutBuffer, RoleValueNetwork
 from algorithm.modules.pcta import PCTAActor, PCTAIndependentActors, pursuit_consistency
 from algorithm.modules.pcta_v2 import PCTAv2Actor, PCTAv2IndependentActors, target_behavior_diagnostics
 
@@ -16,6 +17,7 @@ __all__ = [
     "RolloutBuffer", "RecurrentRolloutBuffer", "sequence_chunks", "HAPPOTrainer",
     "preceding_factor_update", "RelationalCentralizedCritic",
     "CreditRolloutBuffer", "ActionMarginalCreditCritic",
+    "RoleAdvantageRolloutBuffer", "RoleValueNetwork",
     "PCTAActor", "PCTAIndependentActors", "pursuit_consistency",
     "PCTAv2Actor", "PCTAv2IndependentActors", "target_behavior_diagnostics",
     "TAMGaussianActor", "TAMIndependentActors", "TAMAttentionCritic", "TAMRolloutBuffer",

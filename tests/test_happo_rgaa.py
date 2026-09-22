@@ -1,0 +1,296 @@
+from __future__ import annotations
+
+from copy import deepcopy
+from pathlib import Path
+import json
+import subprocess
+import sys
+
+import numpy as np
+import pytest
+import torch
+import yaml
+
+from algorithm.common.buffer import RolloutBuffer
+from algorithm.happo.rgaa import (
+    RGAA_METHOD, RoleAdvantageRolloutBuffer, extract_role_rewards,
+)
+from algorithm.happo.trainer import HAPPOTrainer, preceding_factor_update
+from algorithm.train_happo import _algorithm_name
+from env.mavuav import OBS_DIM, RED_IDS, load_environment_config
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def short_v39():
+    config = deepcopy(load_environment_config("configs/env_v39.yaml"))
+    config["simulation"]["max_decision_steps"] = 2
+    return config
+
+
+def trainer_config(**updates):
+    config = {
+        "method_variant": RGAA_METHOD, "actor_variant": "vanilla", "critic_variant": "mlp",
+        "environment_profile": "learnability", "device": "cpu", "num_envs": 1,
+        "rollout_steps": 2, "ppo_epochs": 1, "minibatch_size": 8,
+        "hidden_dim": 16, "seed": 17, "role_advantage_coef": 0.5,
+    }
+    config.update(updates)
+    return config
+
+
+def test_vanilla_buffer_is_unchanged_and_rgaa_uses_role_buffer():
+    vanilla = HAPPOTrainer(short_v39(), trainer_config(method_variant="baseline"))
+    rgaa = HAPPOTrainer(short_v39(), trainer_config())
+    try:
+        assert type(vanilla.buffer) is RolloutBuffer
+        assert isinstance(rgaa.buffer, RoleAdvantageRolloutBuffer)
+    finally:
+        vanilla.close(); rgaa.close()
+
+
+def test_role_reward_extraction_uses_exact_environment_fields():
+    infos = [{
+        "mav_process_reward": 1.25, "uav1_process_reward": -2.0,
+        "uav2_process_reward": 3.5, "uav3_process_reward": 4.75,
+        "event_reward": 999.0,
+    }]
+    np.testing.assert_array_equal(
+        extract_role_rewards(infos), np.asarray([[1.25, -2.0, 3.5, 4.75]], np.float32),
+    )
+
+
+def test_role_gae_matches_team_boundary_semantics_for_terminated_and_truncated():
+    buffer = RoleAdvantageRolloutBuffer(3, 2)
+    buffer.position = 3
+    buffer.role_rewards[:] = 1.0
+    buffer.role_values[:] = 0.0
+    buffer.terminated[1, 0] = True
+    buffer.truncated[1, 1] = True
+    buffer.compute_role_returns_and_advantages(np.full((2, 4), 9.0, np.float32), 1.0, 1.0)
+    np.testing.assert_array_equal(buffer.role_advantages[:, 0, 0], [2.0, 1.0, 10.0])
+    np.testing.assert_array_equal(buffer.role_advantages[:, 1, 0], [2.0, 1.0, 10.0])
+
+
+def test_coef_zero_combined_advantage_is_exact_team_normalized_advantage():
+    trainer = HAPPOTrainer(short_v39(), trainer_config(role_advantage_coef=0.0))
+    try:
+        trainer.collect_rollout(); trainer.update()
+        assert torch.equal(
+            trainer.last_rgaa_combined_advantages,
+            trainer.last_rgaa_team_normalized_advantages,
+        )
+    finally:
+        trainer.close()
+
+
+def test_uavs_share_one_role_critic_while_all_actors_remain_independent():
+    trainer = HAPPOTrainer(short_v39(), trainer_config())
+    try:
+        assert trainer.mav_role_critic is not trainer.uav_role_critic
+        assert len({id(actor) for actor in trainer.actors.actors}) == len(RED_IDS)
+        assert trainer.rgaa_metadata["role_critic_sharing"]["UAV1-UAV3"] == "shared"
+    finally:
+        trainer.close()
+
+
+def test_shared_uav_role_critic_receives_all_active_uav_samples():
+    trainer = HAPPOTrainer(short_v39(), trainer_config(minibatch_size=100))
+    seen = []
+    hook = trainer.uav_role_critic.register_forward_hook(
+        lambda _module, inputs, _output: seen.append(int(inputs[0].shape[0])),
+    )
+    try:
+        observations = torch.randn(5, 4, OBS_DIM)
+        targets = torch.randn(5, 4)
+        active = torch.ones(5, 4)
+        trainer._train_role_critics(observations, targets, active)
+        assert seen == [15]
+    finally:
+        hook.remove(); trainer.close()
+
+
+def test_dead_uav_samples_have_zero_role_correction():
+    trainer = HAPPOTrainer(short_v39(), trainer_config())
+    try:
+        trainer.collect_rollout()
+        trainer.buffer.active_masks[:, :, 2] = 0.0
+        trainer.buffer.role_advantages[:, :, 2] = 123.0
+        trainer.update()
+        assert torch.count_nonzero(trainer.last_rgaa_role_normalized_advantages[:, 2]) == 0
+    finally:
+        trainer.close()
+
+
+def test_main_critic_and_role_critics_are_parameter_independent():
+    trainer = HAPPOTrainer(short_v39(), trainer_config())
+    try:
+        groups = [
+            {id(p) for p in trainer.critic.parameters()},
+            {id(p) for p in trainer.mav_role_critic.parameters()},
+            {id(p) for p in trainer.uav_role_critic.parameters()},
+        ]
+        assert not (groups[0] & groups[1] or groups[0] & groups[2] or groups[1] & groups[2])
+    finally:
+        trainer.close()
+
+
+def test_rgaa_factor_history_uses_unchanged_preceding_factor_formula():
+    trainer = HAPPOTrainer(short_v39(), trainer_config())
+    try:
+        trainer.collect_rollout(); metrics = trainer.update()
+        observations = torch.as_tensor(trainer.buffer.observations.reshape(-1, 4, OBS_DIM))
+        actions = torch.as_tensor(trainer.buffer.actions.reshape(-1, 4, 3))
+        old = torch.as_tensor(trainer.buffer.log_probs.reshape(-1, 4))
+        active = torch.as_tensor(trainer.buffer.active_masks.reshape(-1, 4))
+        expected = torch.ones_like(old[:, 0])
+        assert np.array_equal(trainer.last_rgaa_factor_history[0], expected.numpy())
+        for history_index, agent in enumerate(metrics["agent_update_order"], start=1):
+            with torch.no_grad():
+                new, _ = trainer.actors.actors[agent].evaluate_actions(
+                    observations[:, agent], actions[:, agent],
+                )
+            expected = preceding_factor_update(expected, old[:, agent], new, active[:, agent])
+            np.testing.assert_allclose(
+                trainer.last_rgaa_factor_history[history_index], expected.numpy(), rtol=1e-5, atol=1e-6,
+            )
+    finally:
+        trainer.close()
+
+
+def test_rgaa_checkpoint_resume_restores_role_critics_and_optimizers(tmp_path):
+    source = HAPPOTrainer(short_v39(), trainer_config())
+    source.train_update()
+    checkpoint = tmp_path / "rgaa.pt"
+    source.save_checkpoint(checkpoint)
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    assert payload["algorithm"] == "rgaa_happo"
+    assert payload["base_algorithm"] == "happo"
+    assert payload["method_variant"] == RGAA_METHOD
+    assert payload["role_advantage_coef"] == 0.5
+    assert payload["role_critic_sharing"] == {"MAV": "independent", "UAV1-UAV3": "shared"}
+    assert "role_critic_mav_optimizer_state" in payload
+    assert "role_critic_uav_optimizer_state" in payload
+    restored = HAPPOTrainer(short_v39(), trainer_config())
+    try:
+        assert restored.load_checkpoint(checkpoint) == source.env_steps
+        for left, right in zip(source.mav_role_critic.parameters(), restored.mav_role_critic.parameters()):
+            assert torch.equal(left, right)
+        for left, right in zip(source.uav_role_critic.parameters(), restored.uav_role_critic.parameters()):
+            assert torch.equal(left, right)
+        assert restored.mav_role_critic_optimizer.state_dict()["state"]
+        assert restored.uav_role_critic_optimizer.state_dict()["state"]
+    finally:
+        source.close(); restored.close()
+
+
+def test_rgaa_resume_rejects_method_and_coefficient_mismatch(tmp_path):
+    source = HAPPOTrainer(short_v39(), trainer_config())
+    checkpoint = tmp_path / "rgaa.pt"
+    source.save_checkpoint(checkpoint); source.close()
+    baseline = HAPPOTrainer(short_v39(), trainer_config(method_variant="baseline"))
+    changed = HAPPOTrainer(short_v39(), trainer_config(role_advantage_coef=0.25))
+    try:
+        with pytest.raises(RuntimeError, match="resume method mismatch"):
+            baseline.load_checkpoint(checkpoint)
+        with pytest.raises(RuntimeError, match="role_advantage_coef"):
+            changed.load_checkpoint(checkpoint)
+    finally:
+        baseline.close(); changed.close()
+
+
+def test_rgaa_config_is_a_strict_single_method_extension_of_entropy001_screen():
+    with open("configs/happo_entropy001_logstd025_screen.yaml", encoding="utf-8") as stream:
+        baseline = yaml.safe_load(stream)["training"]
+    with open("configs/happo_rgaa_v39.yaml", encoding="utf-8") as stream:
+        rgaa = yaml.safe_load(stream)["training"]
+    assert _algorithm_name("vanilla", RGAA_METHOD, "mlp") == "rgaa_happo"
+    assert rgaa.pop("role_advantage_coef") == 0.5
+    rgaa["method_variant"] = "baseline"
+    assert rgaa == baseline
+
+
+def test_vanilla_evaluator_loads_rgaa_actor_without_using_role_critics(tmp_path):
+    trainer = HAPPOTrainer(short_v39(), trainer_config())
+    checkpoint = tmp_path / "rgaa.pt"
+    try:
+        trainer.save_checkpoint(checkpoint)
+    finally:
+        trainer.close()
+    result = subprocess.run(
+        [
+            sys.executable, "algorithm/evaluate_happo.py", str(checkpoint),
+            "--profile", "learnability", "--episodes", "1", "--device", "cpu",
+        ],
+        cwd=ROOT, capture_output=True, text=True, timeout=180,
+    )
+    assert result.returncode == 0, result.stderr
+    summary = json.loads((tmp_path / "evaluation_rgaa_summary.json").read_text())
+    assert summary["algorithm"] == "rgaa_happo"
+    assert summary["method_variant"] == RGAA_METHOD
+
+
+def test_rgaa_strict_environment_and_reward_contract():
+    old = deepcopy(short_v39()); old["environment_version"] = "heterogeneous_mavuav_4v4_v3_8"
+    wrong_reward = deepcopy(short_v39()); wrong_reward["role_reward"]["mode"] = "wrong"
+    with pytest.raises(ValueError):
+        HAPPOTrainer(old, trainer_config())
+    with pytest.raises(ValueError):
+        HAPPOTrainer(wrong_reward, trainer_config())
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"actor_variant": "tam", "critic_variant": "tam_attention"},
+        {"actor_variant": "pcta_v2"},
+        {"critic_variant": "relational"},
+    ],
+)
+def test_rgaa_rejects_other_algorithm_architecture_combinations(updates):
+    with pytest.raises(ValueError):
+        HAPPOTrainer(short_v39(), trainer_config(**updates))
+
+
+def test_rgaa_update_exposes_named_finite_diagnostics():
+    trainer = HAPPOTrainer(short_v39(), trainer_config())
+    try:
+        _, metrics = trainer.train_update()
+        expected = {"role_advantage_coef", "mav_role_critic_loss", "uav_role_critic_loss"}
+        for aid in RED_IDS:
+            expected.update({
+                f"role_adv_mean_abs_{aid}", f"role_adv_std_{aid}",
+                f"normalized_role_adv_mean_abs_{aid}", f"normalized_role_adv_std_{aid}",
+                f"combined_adv_mean_abs_{aid}", f"mean_role_reward_{aid}",
+            })
+        assert expected <= metrics.keys()
+        assert all(np.isfinite(metrics[key]) for key in expected)
+    finally:
+        trainer.close()
+
+
+def test_rgaa_preserves_seed_matched_vanilla_actor_and_team_critic_initialization():
+    baseline = HAPPOTrainer(short_v39(), trainer_config(method_variant="baseline"))
+    rgaa = HAPPOTrainer(short_v39(), trainer_config())
+    try:
+        for left, right in zip(baseline.actors.parameters(), rgaa.actors.parameters()):
+            assert torch.equal(left, right)
+        for left, right in zip(baseline.critic.parameters(), rgaa.critic.parameters()):
+            assert torch.equal(left, right)
+    finally:
+        baseline.close(); rgaa.close()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_rgaa_tiny_cuda_update_is_finite():
+    trainer = HAPPOTrainer(
+        short_v39(), trainer_config(device="cuda", rollout_steps=1, minibatch_size=4),
+    )
+    try:
+        _, metrics = trainer.train_update()
+        assert all(np.isfinite(value) for value in metrics.values() if isinstance(value, float))
+        assert next(trainer.mav_role_critic.parameters()).is_cuda
+        assert next(trainer.uav_role_critic.parameters()).is_cuda
+    finally:
+        trainer.close()

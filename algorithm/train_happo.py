@@ -68,6 +68,22 @@ RDC_FIELDS = (
     "credit_component_return_std_uav1_role", "credit_component_return_std_uav2_role",
     "credit_component_return_std_uav3_role",
 )
+RGAA_FIELDS = (
+    "role_advantage_coef", "mav_role_critic_loss", "uav_role_critic_loss",
+    *(f"role_adv_raw_mean_abs_{i}" for i in range(len(RED_IDS))),
+    *(f"role_adv_raw_std_{i}" for i in range(len(RED_IDS))),
+    *(f"role_adv_normalized_mean_abs_{i}" for i in range(len(RED_IDS))),
+    *(f"role_adv_normalized_std_{i}" for i in range(len(RED_IDS))),
+    *(f"combined_adv_mean_abs_{i}" for i in range(len(RED_IDS))),
+    *(f"role_adv_degenerate_agent_{i}" for i in range(len(RED_IDS))),
+    *(f"role_reward_mean_{i}" for i in range(len(RED_IDS))),
+    *(f"role_adv_mean_abs_{aid}" for aid in RED_IDS),
+    *(f"role_adv_std_{aid}" for aid in RED_IDS),
+    *(f"normalized_role_adv_mean_abs_{aid}" for aid in RED_IDS),
+    *(f"normalized_role_adv_std_{aid}" for aid in RED_IDS),
+    *(f"combined_adv_mean_abs_{aid}" for aid in RED_IDS),
+    *(f"mean_role_reward_{aid}" for aid in RED_IDS),
+)
 LOSS_FIELDS = (*(f"actor_{i}_loss" for i in range(len(RED_IDS))), "critic_loss", "entropy")
 
 
@@ -89,6 +105,7 @@ def _algorithm_name(
             "agp": "happo_agp",
             "cf_happo": "cf_happo",
             "rdc_happo": "rdc_happo",
+            "rgaa": "rgaa_happo",
         }
         try:
             return method_names[method_variant]
@@ -393,6 +410,17 @@ def _progress_lines(
                 f"        RDC comp abs S/M/U1/U2/U3 {[round(value, 6) for value in component_abs]} | "
                 f"component return std {[round(value, 6) for value in return_std]}"
             )
+    if window.updates and "mav_role_critic_loss" in window.updates[0]:
+        latest = window.updates[-1]
+        raw_abs = [latest[f"role_adv_raw_mean_abs_{i}"] for i in range(len(RED_IDS))]
+        combined_abs = [latest[f"combined_adv_mean_abs_{i}"] for i in range(len(RED_IDS))]
+        lines.append(
+            "        RGAA role critic M/U "
+            f"{np.mean([u['mav_role_critic_loss'] for u in window.updates]):.4f} / "
+            f"{np.mean([u['uav_role_critic_loss'] for u in window.updates]):.4f} | "
+            f"raw Aabs {[round(v, 6) for v in raw_abs]} | "
+            f"combined Aabs {[round(v, 6) for v in combined_abs]}"
+        )
     if window.updates and "pcta_consistency_loss" in window.updates[0]:
         valid_pairs = sum(int(update["pcta_valid_temporal_pairs"]) for update in window.updates)
         lines.append(
@@ -465,6 +493,7 @@ def _initial_resolved(
         **trainer.pcta_metadata,
         **trainer.credit_metadata,
         **trainer.tam_metadata,
+        **trainer.rgaa_metadata,
     }
 
 
@@ -589,6 +618,8 @@ def main(
             training_fields = TRAINING_FIELDS + CREDIT_FIELDS + RDC_FIELDS
         elif method_variant == "cf_happo":
             training_fields = TRAINING_FIELDS + CF_FIELDS
+        elif method_variant == "rgaa":
+            training_fields = TRAINING_FIELDS + RGAA_FIELDS
         else:
             training_fields = TRAINING_FIELDS
         configured_horizon = int(trainer.config["rollout_steps"])
@@ -692,6 +723,7 @@ def main(
             **trainer.pcta_metadata,
             **trainer.credit_metadata,
             **trainer.tam_metadata,
+            **trainer.rgaa_metadata,
         }
         with (run_dir / "summary.json").open("w", encoding="utf-8") as stream:
             json.dump(summary, stream, indent=2, ensure_ascii=False)

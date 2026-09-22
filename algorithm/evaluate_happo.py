@@ -84,7 +84,7 @@ def main(expected_critic_variant: str = "mlp") -> None:
     if actor_variant != "vanilla":
         raise RuntimeError("incompatible actor architecture: vanilla evaluator requires a vanilla checkpoint")
     method_variant = payload.get("method_variant", trainer_config.get("method_variant", "baseline"))
-    if method_variant not in ("baseline", "agp", "cf_happo", "rdc_happo"):
+    if method_variant not in ("baseline", "agp", "cf_happo", "rdc_happo", "rgaa"):
         raise RuntimeError(f"unsupported HAPPO method_variant: {method_variant!r}")
     critic_variant = payload.get("critic_variant", trainer_config.get("critic_variant", "mlp"))
     if critic_variant != expected_critic_variant:
@@ -110,6 +110,7 @@ def main(expected_critic_variant: str = "mlp") -> None:
     rows = []
     algorithm = (
         "rc_happo" if critic_variant == "relational" else
+        "rgaa_happo" if method_variant == "rgaa" else
         method_variant if method_variant in ("cf_happo", "rdc_happo") else
         "happo_agp" if method_variant == "agp" else "happo"
     )
