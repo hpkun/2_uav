@@ -22,6 +22,7 @@ training:
   critic_variant: mlp
   method_variant: rgaa
   role_advantage_coef: 0.5
+  role_aux_reward_mode: process_plus_own_loss
   agp_lambda: 0.5
   hrta_entity_dim: 32
   hrta_role_dim: 16

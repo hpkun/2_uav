@@ -30,8 +30,8 @@ from .counterfactual_credit import (
     credit_component_names, extract_credit_components, normalize_credit_advantage,
 )
 from .rgaa import (
-    RGAA_METHOD, RoleAdvantageRolloutBuffer, RoleValueNetwork,
-    extract_role_rewards, normalize_active_advantage,
+    RGAA_METHOD, ROLE_AUX_REWARD_MODE, RoleAdvantageRolloutBuffer, RoleValueNetwork,
+    extract_rgaa_auxiliary_rewards, normalize_active_advantage,
 )
 
 
@@ -44,6 +44,7 @@ DEFAULTS = {
     "actor_variant": "vanilla", "critic_variant": "mlp", "method_variant": "baseline",
     "agp_lambda": 0.5,
     "role_advantage_coef": 0.5,
+    "role_aux_reward_mode": ROLE_AUX_REWARD_MODE,
     "hrta_entity_dim": 32, "hrta_role_dim": 16, "hrta_fusion_hidden_dim": 64,
     "recurrent_hidden_dim": 128, "recurrent_sequence_length": 16,
     "pcta_context_dim": 64, "pcta_enemy_dim": 32, "pcta_hidden_dim": 128,
@@ -173,6 +174,10 @@ class HAPPOTrainer:
             )
         if self.rgaa_enabled and float(c["role_advantage_coef"]) < 0.0:
             raise ValueError("role_advantage_coef cannot be negative")
+        if self.rgaa_enabled and c["role_aux_reward_mode"] != ROLE_AUX_REWARD_MODE:
+            raise ValueError(
+                f"RGAA role_aux_reward_mode must be {ROLE_AUX_REWARD_MODE!r}"
+            )
         self.shaping_gamma = float(shaping.get("gamma", 0.0))
         if self.reward_shaping_mode == "potential" and not np.isclose(self.shaping_gamma, float(c["gamma"]), rtol=0.0, atol=1e-12):
             raise ValueError(
@@ -475,6 +480,7 @@ class HAPPOTrainer:
             "role_critic_architecture": self.mav_role_critic.architecture(),
             "role_critic_sharing": {"MAV": "independent", "UAV1-UAV3": "shared"},
             "role_advantage_version": 1,
+            "role_aux_reward_mode": str(self.config["role_aux_reward_mode"]),
         }
 
     def _role_values(self, observations: np.ndarray) -> np.ndarray:
@@ -589,10 +595,18 @@ class HAPPOTrainer:
             elif self.rgaa_enabled:
                 if not isinstance(self.buffer, RoleAdvantageRolloutBuffer):
                     raise TypeError("RGAA requires RoleAdvantageRolloutBuffer")
+                auxiliary = extract_rgaa_auxiliary_rewards(
+                    infos, self.environment_config["reward"],
+                )
                 self.buffer.insert(
                     self.observations, self.global_states, action_array, log_prob_array,
                     training_rewards, values, terminated, truncated, self.active_masks,
-                    role_rewards=extract_role_rewards(infos), role_values=role_values,
+                    role_rewards=auxiliary.auxiliary_rewards,
+                    role_process_rewards=auxiliary.process_rewards,
+                    own_loss_events=auxiliary.own_loss_events,
+                    boundary_loss_events=auxiliary.boundary_loss_events,
+                    blue_attack_loss_events=auxiliary.blue_attack_loss_events,
+                    role_values=role_values,
                 )
             else:
                 self.buffer.insert(self.observations, self.global_states, action_array, log_prob_array, training_rewards, values, terminated, truncated, self.active_masks)
@@ -1101,15 +1115,28 @@ class HAPPOTrainer:
                 observations, role_returns, active_masks,
             ))
             rgaa_metrics["role_advantage_coef"] = float(c["role_advantage_coef"])
-            role_reward_array = self.buffer.role_rewards.reshape(-1, num_agents)
+            process_reward_array = self.buffer.role_process_rewards.reshape(-1, num_agents)
+            auxiliary_reward_array = self.buffer.role_rewards.reshape(-1, num_agents)
             for agent in range(num_agents):
                 active_np = self.buffer.active_masks.reshape(-1, num_agents)[:, agent] > 0.5
                 rgaa_metrics[f"role_reward_mean_{agent}"] = (
-                    float(role_reward_array[active_np, agent].mean()) if active_np.any() else 0.0
+                    float(process_reward_array[active_np, agent].mean()) if active_np.any() else 0.0
                 )
                 rgaa_metrics[f"mean_role_reward_{RED_IDS[agent]}"] = rgaa_metrics[
                     f"role_reward_mean_{agent}"
                 ]
+                rgaa_metrics[f"mean_aux_reward_{RED_IDS[agent]}"] = (
+                    float(auxiliary_reward_array[active_np, agent].mean()) if active_np.any() else 0.0
+                )
+                rgaa_metrics[f"own_loss_count_{RED_IDS[agent]}"] = float(
+                    self.buffer.own_loss_events[:, :, agent].sum()
+                )
+                rgaa_metrics[f"own_boundary_loss_count_{RED_IDS[agent]}"] = float(
+                    self.buffer.boundary_loss_events[:, :, agent].sum()
+                )
+                rgaa_metrics[f"own_blue_attack_loss_count_{RED_IDS[agent]}"] = float(
+                    self.buffer.blue_attack_loss_events[:, :, agent].sum()
+                )
         metrics: dict[str, Any] = {f"actor_{i}_loss": float(np.mean(actor_losses[i])) if actor_losses[i] else 0.0 for i in range(num_agents)}
         metrics.update({"actor_loss": float(np.mean([v for rows in actor_losses for v in rows])), "critic_loss": float(np.mean(critic_losses)), "entropy": float(np.mean(entropies)), "agent_update_order": order})
         metrics.update(credit_metrics)
@@ -1474,6 +1501,7 @@ class HAPPOTrainer:
             expected_rgaa = self.rgaa_metadata
             for field in (
                 "role_critic_architecture", "role_critic_sharing", "role_advantage_version",
+                "role_aux_reward_mode",
             ):
                 if data.get(field) != expected_rgaa[field]:
                     raise RuntimeError(f"incompatible RGAA checkpoint contract: {field}")
@@ -1602,7 +1630,10 @@ class HAPPOTrainer:
                 self.config["role_advantage_coef"]
             ):
                 raise RuntimeError("incompatible RGAA role_advantage_coef")
-            for field in ("role_critic_architecture", "role_critic_sharing", "role_advantage_version"):
+            for field in (
+                "role_critic_architecture", "role_critic_sharing", "role_advantage_version",
+                "role_aux_reward_mode",
+            ):
                 if data.get(field) != self.rgaa_metadata[field]:
                     raise RuntimeError(f"incompatible RGAA checkpoint contract: {field}")
         if data.get("environment_profile") != self.config["environment_profile"]:

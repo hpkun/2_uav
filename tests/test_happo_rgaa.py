@@ -13,7 +13,8 @@ import yaml
 
 from algorithm.common.buffer import RolloutBuffer
 from algorithm.happo.rgaa import (
-    RGAA_METHOD, RoleAdvantageRolloutBuffer, extract_role_rewards,
+    RGAA_METHOD, ROLE_AUX_REWARD_MODE, RoleAdvantageRolloutBuffer,
+    extract_rgaa_auxiliary_rewards,
 )
 from algorithm.happo.trainer import HAPPOTrainer, preceding_factor_update
 from algorithm.train_happo import _algorithm_name
@@ -50,15 +51,83 @@ def test_vanilla_buffer_is_unchanged_and_rgaa_uses_role_buffer():
         vanilla.close(); rgaa.close()
 
 
-def test_role_reward_extraction_uses_exact_environment_fields():
+def _aux_info(death_causes=None, **updates):
+    info = {
+        "mav_process_reward": 1.25, "uav1_process_reward": -2.0,
+        "uav2_process_reward": 3.5, "uav3_process_reward": 4.75,
+        "death_causes": death_causes or {},
+    }
+    info.update(updates)
+    return info
+
+
+def _reward_config():
+    return {"mav_loss": -73.0, "uav_loss": -11.0}
+
+
+def test_no_death_auxiliary_reward_equals_exact_process_reward():
     infos = [{
         "mav_process_reward": 1.25, "uav1_process_reward": -2.0,
         "uav2_process_reward": 3.5, "uav3_process_reward": 4.75,
-        "event_reward": 999.0,
+        "death_causes": {}, "event_reward": 999.0,
     }]
+    batch = extract_rgaa_auxiliary_rewards(infos, _reward_config())
     np.testing.assert_array_equal(
-        extract_role_rewards(infos), np.asarray([[1.25, -2.0, 3.5, 4.75]], np.float32),
+        batch.process_rewards, np.asarray([[1.25, -2.0, 3.5, 4.75]], np.float32),
     )
+    np.testing.assert_array_equal(batch.auxiliary_rewards, batch.process_rewards)
+    assert not batch.own_loss_events.any()
+
+
+def test_uav_boundary_and_blue_attack_losses_are_agent_local_and_config_driven():
+    boundary = extract_rgaa_auxiliary_rewards(
+        [_aux_info({"UAV1": "boundary"})], _reward_config(),
+    )
+    np.testing.assert_array_equal(
+        boundary.auxiliary_rewards,
+        np.asarray([[1.25, -13.0, 3.5, 4.75]], np.float32),
+    )
+    np.testing.assert_array_equal(boundary.own_loss_events, [[0.0, 1.0, 0.0, 0.0]])
+    np.testing.assert_array_equal(boundary.boundary_loss_events, boundary.own_loss_events)
+
+    attacked = extract_rgaa_auxiliary_rewards(
+        [_aux_info({"UAV2": "blue_attack"})], _reward_config(),
+    )
+    np.testing.assert_array_equal(
+        attacked.auxiliary_rewards,
+        np.asarray([[1.25, -2.0, -7.5, 4.75]], np.float32),
+    )
+    np.testing.assert_array_equal(attacked.own_loss_events, [[0.0, 0.0, 1.0, 0.0]])
+    np.testing.assert_array_equal(attacked.blue_attack_loss_events, attacked.own_loss_events)
+
+
+@pytest.mark.parametrize("cause", ["boundary", "blue_attack"])
+def test_mav_own_loss_uses_configured_mav_penalty(cause):
+    batch = extract_rgaa_auxiliary_rewards(
+        [_aux_info({"MAV": cause})], _reward_config(),
+    )
+    np.testing.assert_array_equal(
+        batch.auxiliary_rewards,
+        np.asarray([[-71.75, -2.0, 3.5, 4.75]], np.float32),
+    )
+    np.testing.assert_array_equal(batch.own_loss_events, [[1.0, 0.0, 0.0, 0.0]])
+
+
+def test_blue_kill_shared_event_and_other_uav_loss_do_not_pollute_auxiliary_rewards():
+    batch = extract_rgaa_auxiliary_rewards(
+        [_aux_info(
+            {"Blue1": "red_attack", "UAV3": "blue_attack"},
+            event_reward=9999.0, terminal_reward=8888.0, safety_reward=7777.0,
+        )],
+        _reward_config(),
+    )
+    np.testing.assert_array_equal(
+        batch.auxiliary_rewards,
+        np.asarray([[1.25, -2.0, 3.5, -6.25]], np.float32),
+    )
+    assert batch.auxiliary_rewards[0, 0] == batch.process_rewards[0, 0]
+    assert batch.auxiliary_rewards[0, 1] == batch.process_rewards[0, 1]
+    assert batch.auxiliary_rewards[0, 2] == batch.process_rewards[0, 2]
 
 
 def test_role_gae_matches_team_boundary_semantics_for_terminated_and_truncated():
@@ -84,13 +153,14 @@ def test_role_gae_stops_at_individual_uav_death_but_alive_uav_continues():
     buffer.active_masks[:] = 1.0
     # UAV1 is alive before action t=0, dies during that transition, while the episode continues.
     buffer.active_masks[1:, 0, 1] = 0.0
+    buffer.role_rewards[0, 0, 1] = -10.0
     buffer.role_rewards[1:, 0, 1] = 100.0
     buffer.compute_role_returns_and_advantages(
         np.zeros((1, 4), np.float32),
         np.asarray([[1.0, 0.0, 1.0, 1.0]], np.float32),
         1.0, 1.0,
     )
-    assert buffer.role_advantages[0, 0, 1] == 1.0
+    assert buffer.role_advantages[0, 0, 1] == -10.0
     np.testing.assert_array_equal(buffer.role_advantages[:, 0, 2], [3.0, 2.0, 1.0])
 
 
@@ -150,6 +220,46 @@ def test_rgaa_combined_advantage_is_exact_formula_and_actual_ppo_input():
         assert torch.any(
             trainer.last_rgaa_combined_advantages[active]
             != trainer.last_rgaa_team_normalized_advantages[active]
+        )
+    finally:
+        trainer.close()
+
+
+def test_own_loss_auxiliary_signal_reaches_actor_ppo_input():
+    trainer = HAPPOTrainer(
+        short_v39(), trainer_config(
+            role_advantage_coef=0.5, num_envs=2, rollout_steps=1, minibatch_size=8,
+        ),
+    )
+    try:
+        trainer.collect_rollout()
+        batch = extract_rgaa_auxiliary_rewards(
+            [
+                _aux_info({"UAV1": "boundary"}, mav_process_reward=0.0,
+                          uav1_process_reward=0.0, uav2_process_reward=0.0,
+                          uav3_process_reward=0.0),
+                _aux_info({}, mav_process_reward=0.0, uav1_process_reward=0.0,
+                          uav2_process_reward=0.0, uav3_process_reward=0.0),
+            ],
+            trainer.environment_config["reward"],
+        )
+        trainer.buffer.role_rewards[0] = batch.auxiliary_rewards
+        trainer.buffer.role_values[0] = 0.0
+        last_active = np.ones((2, len(RED_IDS)), np.float32)
+        last_active[0, 1] = 0.0
+        trainer.buffer.compute_role_returns_and_advantages(
+            np.zeros((2, len(RED_IDS)), np.float32), last_active, 1.0, 1.0,
+        )
+        trainer.update()
+        active = torch.as_tensor(trainer.buffer.active_masks.reshape(-1, len(RED_IDS)))[:, 1] > 0.5
+        assert torch.any(trainer.last_rgaa_role_normalized_advantages[active, 1] != 0.0)
+        assert torch.any(
+            trainer.last_rgaa_combined_advantages[active, 1]
+            != trainer.last_rgaa_team_normalized_advantages[active, 1]
+        )
+        assert torch.equal(
+            trainer.last_rgaa_ppo_normalized_advantages[:, 1],
+            trainer.last_rgaa_combined_advantages[:, 1],
         )
     finally:
         trainer.close()
@@ -275,6 +385,7 @@ def test_rgaa_checkpoint_resume_restores_role_critics_and_optimizers(tmp_path):
     assert payload["base_algorithm"] == "happo"
     assert payload["method_variant"] == RGAA_METHOD
     assert payload["role_advantage_coef"] == 0.5
+    assert payload["role_aux_reward_mode"] == ROLE_AUX_REWARD_MODE
     assert payload["role_critic_sharing"] == {"MAV": "independent", "UAV1-UAV3": "shared"}
     assert "role_critic_mav_optimizer_state" in payload
     assert "role_critic_uav_optimizer_state" in payload
@@ -307,6 +418,21 @@ def test_rgaa_resume_rejects_method_and_coefficient_mismatch(tmp_path):
         baseline.close(); changed.close()
 
 
+def test_rgaa_resume_rejects_legacy_process_only_auxiliary_semantics(tmp_path):
+    source = HAPPOTrainer(short_v39(), trainer_config())
+    payload = source.checkpoint_state()
+    source.close()
+    payload.pop("role_aux_reward_mode")
+    checkpoint = tmp_path / "legacy_process_only_rgaa.pt"
+    torch.save(payload, checkpoint)
+    target = HAPPOTrainer(short_v39(), trainer_config())
+    try:
+        with pytest.raises(RuntimeError, match="role_aux_reward_mode"):
+            target.load_checkpoint(checkpoint)
+    finally:
+        target.close()
+
+
 def test_rgaa_config_is_a_strict_single_method_extension_of_entropy001_screen():
     with open("configs/happo_entropy001_logstd025_screen.yaml", encoding="utf-8") as stream:
         baseline = yaml.safe_load(stream)["training"]
@@ -314,6 +440,7 @@ def test_rgaa_config_is_a_strict_single_method_extension_of_entropy001_screen():
         rgaa = yaml.safe_load(stream)["training"]
     assert _algorithm_name("vanilla", RGAA_METHOD, "mlp") == "rgaa_happo"
     assert rgaa.pop("role_advantage_coef") == 0.5
+    assert rgaa.pop("role_aux_reward_mode") == ROLE_AUX_REWARD_MODE
     rgaa["method_variant"] = "baseline"
     assert rgaa == baseline
 
@@ -370,6 +497,8 @@ def test_rgaa_update_exposes_named_finite_diagnostics():
                 f"role_adv_mean_abs_{aid}", f"role_adv_std_{aid}",
                 f"normalized_role_adv_mean_abs_{aid}", f"normalized_role_adv_std_{aid}",
                 f"combined_adv_mean_abs_{aid}", f"mean_role_reward_{aid}",
+                f"mean_aux_reward_{aid}", f"own_loss_count_{aid}",
+                f"own_boundary_loss_count_{aid}", f"own_blue_attack_loss_count_{aid}",
             })
         assert expected <= metrics.keys()
         assert all(np.isfinite(metrics[key]) for key in expected)

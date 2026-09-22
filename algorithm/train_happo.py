@@ -83,6 +83,10 @@ RGAA_FIELDS = (
     *(f"normalized_role_adv_std_{aid}" for aid in RED_IDS),
     *(f"combined_adv_mean_abs_{aid}" for aid in RED_IDS),
     *(f"mean_role_reward_{aid}" for aid in RED_IDS),
+    *(f"mean_aux_reward_{aid}" for aid in RED_IDS),
+    *(f"own_loss_count_{aid}" for aid in RED_IDS),
+    *(f"own_boundary_loss_count_{aid}" for aid in RED_IDS),
+    *(f"own_blue_attack_loss_count_{aid}" for aid in RED_IDS),
 )
 LOSS_FIELDS = (*(f"actor_{i}_loss" for i in range(len(RED_IDS))), "critic_loss", "entropy")
 
