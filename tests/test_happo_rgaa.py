@@ -121,6 +121,76 @@ def test_coef_zero_combined_advantage_is_exact_team_normalized_advantage():
         trainer.close()
 
 
+def _force_nonzero_role_advantages(trainer: HAPPOTrainer) -> None:
+    assert isinstance(trainer.buffer, RoleAdvantageRolloutBuffer)
+    sample_count = trainer.buffer.horizon * trainer.buffer.num_envs
+    pattern = np.linspace(-2.0, 2.0, sample_count, dtype=np.float32)
+    for agent in range(len(RED_IDS)):
+        trainer.buffer.role_advantages[:, :, agent] = pattern.reshape(
+            trainer.buffer.horizon, trainer.buffer.num_envs,
+        ) + np.float32(agent * 0.25)
+
+
+def test_rgaa_combined_advantage_is_exact_formula_and_actual_ppo_input():
+    trainer = HAPPOTrainer(short_v39(), trainer_config(role_advantage_coef=0.5))
+    try:
+        trainer.collect_rollout()
+        _force_nonzero_role_advantages(trainer)
+        trainer.update()
+        expected = (
+            trainer.last_rgaa_team_normalized_advantages
+            + 0.5 * trainer.last_rgaa_role_normalized_advantages
+        )
+        assert torch.equal(trainer.last_rgaa_combined_advantages, expected)
+        assert torch.equal(
+            trainer.last_rgaa_ppo_normalized_advantages,
+            trainer.last_rgaa_combined_advantages,
+        )
+        active = torch.as_tensor(trainer.buffer.active_masks.reshape(-1, len(RED_IDS))) > 0.5
+        assert torch.any(
+            trainer.last_rgaa_combined_advantages[active]
+            != trainer.last_rgaa_team_normalized_advantages[active]
+        )
+    finally:
+        trainer.close()
+
+
+def _controlled_main_update(method: str, coefficient: float):
+    trainer = HAPPOTrainer(
+        short_v39(), trainer_config(method_variant=method, role_advantage_coef=coefficient),
+    )
+    try:
+        trainer.collect_rollout()
+        rollout = {
+            "observations": trainer.buffer.observations.copy(),
+            "actions": trainer.buffer.actions.copy(),
+            "advantages": trainer.buffer.advantages.copy(),
+        }
+        if method == RGAA_METHOD:
+            _force_nonzero_role_advantages(trainer)
+        trainer.update()
+        return {
+            "rollout": rollout,
+            "actors": [parameter.detach().clone() for parameter in trainer.actors.parameters()],
+            "critic": [parameter.detach().clone() for parameter in trainer.critic.parameters()],
+        }
+    finally:
+        trainer.close()
+
+
+def test_controlled_role_signal_changes_actor_update_but_not_team_critic():
+    vanilla = _controlled_main_update("baseline", 0.0)
+    zero = _controlled_main_update(RGAA_METHOD, 0.0)
+    guided = _controlled_main_update(RGAA_METHOD, 0.5)
+    for key in vanilla["rollout"]:
+        assert np.array_equal(vanilla["rollout"][key], zero["rollout"][key])
+        assert np.array_equal(vanilla["rollout"][key], guided["rollout"][key])
+    assert all(torch.equal(left, right) for left, right in zip(vanilla["actors"], zero["actors"]))
+    assert any(not torch.equal(left, right) for left, right in zip(vanilla["actors"], guided["actors"]))
+    assert all(torch.equal(left, right) for left, right in zip(vanilla["critic"], zero["critic"]))
+    assert all(torch.equal(left, right) for left, right in zip(vanilla["critic"], guided["critic"]))
+
+
 def test_uavs_share_one_role_critic_while_all_actors_remain_independent():
     trainer = HAPPOTrainer(short_v39(), trainer_config())
     try:

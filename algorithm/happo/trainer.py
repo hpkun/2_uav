@@ -932,6 +932,9 @@ class HAPPOTrainer:
             self.last_rgaa_combined_advantages = torch.zeros_like(
                 self.last_rgaa_team_normalized_advantages,
             )
+            self.last_rgaa_ppo_normalized_advantages = torch.zeros_like(
+                self.last_rgaa_team_normalized_advantages,
+            )
         factor = torch.ones_like(advantages)
         order = [int(v) for v in self.rng.permutation(num_agents)]
         actor_losses: list[list[float]] = [[] for _ in RED_IDS]; entropies: list[float] = []
@@ -1010,12 +1013,14 @@ class HAPPOTrainer:
                 rgaa_metrics[f"combined_adv_mean_abs_{label}"] = rgaa_metrics[f"combined_adv_mean_abs_{agent}"]
             else:
                 normalized = agent_advantages.clone()
-            if not self.credit_enabled and active.any():
+            if not self.credit_enabled and not self.rgaa_enabled and active.any():
                 normalized = (
                     agent_advantages - agent_advantages[active].mean()
                 ) / agent_advantages[active].std(unbiased=False).clamp_min(1e-8)
             if self.credit_enabled:
                 self.last_credit_normalized_advantages[:, agent] = normalized.detach()
+            if self.rgaa_enabled:
+                self.last_rgaa_ppo_normalized_advantages[:, agent] = normalized.detach()
             for _ in range(int(c["ppo_epochs"])):
                 sample_order = self.rng.permutation(total)
                 for start in range(0, total, mini):
