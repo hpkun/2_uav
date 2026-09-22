@@ -66,11 +66,47 @@ def test_role_gae_matches_team_boundary_semantics_for_terminated_and_truncated()
     buffer.position = 3
     buffer.role_rewards[:] = 1.0
     buffer.role_values[:] = 0.0
+    buffer.active_masks[:] = 1.0
     buffer.terminated[1, 0] = True
     buffer.truncated[1, 1] = True
-    buffer.compute_role_returns_and_advantages(np.full((2, 4), 9.0, np.float32), 1.0, 1.0)
+    buffer.compute_role_returns_and_advantages(
+        np.full((2, 4), 9.0, np.float32), np.ones((2, 4), np.float32), 1.0, 1.0,
+    )
     np.testing.assert_array_equal(buffer.role_advantages[:, 0, 0], [2.0, 1.0, 10.0])
     np.testing.assert_array_equal(buffer.role_advantages[:, 1, 0], [2.0, 1.0, 10.0])
+
+
+def test_role_gae_stops_at_individual_uav_death_but_alive_uav_continues():
+    buffer = RoleAdvantageRolloutBuffer(3, 1)
+    buffer.position = 3
+    buffer.role_rewards[:] = 1.0
+    buffer.role_values[:] = 0.0
+    buffer.active_masks[:] = 1.0
+    # UAV1 is alive before action t=0, dies during that transition, while the episode continues.
+    buffer.active_masks[1:, 0, 1] = 0.0
+    buffer.role_rewards[1:, 0, 1] = 100.0
+    buffer.compute_role_returns_and_advantages(
+        np.zeros((1, 4), np.float32),
+        np.asarray([[1.0, 0.0, 1.0, 1.0]], np.float32),
+        1.0, 1.0,
+    )
+    assert buffer.role_advantages[0, 0, 1] == 1.0
+    np.testing.assert_array_equal(buffer.role_advantages[:, 0, 2], [3.0, 2.0, 1.0])
+
+
+def test_role_gae_last_step_uses_trainer_bootstrap_active_mask():
+    buffer = RoleAdvantageRolloutBuffer(1, 1)
+    buffer.position = 1
+    buffer.role_rewards[:] = 1.0
+    buffer.role_values[:] = 2.0
+    buffer.active_masks[:] = 1.0
+    buffer.compute_role_returns_and_advantages(
+        np.full((1, 4), 100.0, np.float32),
+        np.asarray([[1.0, 0.0, 1.0, 1.0]], np.float32),
+        1.0, 1.0,
+    )
+    assert buffer.role_advantages[0, 0, 1] == -1.0
+    assert buffer.role_advantages[0, 0, 2] == 99.0
 
 
 def test_coef_zero_combined_advantage_is_exact_team_normalized_advantage():
@@ -172,6 +208,7 @@ def test_rgaa_checkpoint_resume_restores_role_critics_and_optimizers(tmp_path):
     assert payload["role_critic_sharing"] == {"MAV": "independent", "UAV1-UAV3": "shared"}
     assert "role_critic_mav_optimizer_state" in payload
     assert "role_critic_uav_optimizer_state" in payload
+    assert "rgaa_numpy_rng" in payload
     restored = HAPPOTrainer(short_v39(), trainer_config())
     try:
         assert restored.load_checkpoint(checkpoint) == source.env_steps
@@ -280,6 +317,87 @@ def test_rgaa_preserves_seed_matched_vanilla_actor_and_team_critic_initializatio
             assert torch.equal(left, right)
     finally:
         baseline.close(); rgaa.close()
+
+
+def test_rgaa_role_initialization_preserves_global_torch_rng_state():
+    vanilla = HAPPOTrainer(short_v39(), trainer_config(method_variant="baseline"))
+    vanilla_state = torch.get_rng_state().clone()
+    vanilla.close()
+    rgaa = HAPPOTrainer(short_v39(), trainer_config(role_advantage_coef=0.0))
+    try:
+        assert torch.equal(torch.get_rng_state(), vanilla_state)
+    finally:
+        rgaa.close()
+
+
+def _main_parameter_snapshots(method: str, updates: int):
+    trainer = HAPPOTrainer(
+        short_v39(), trainer_config(method_variant=method, role_advantage_coef=0.0),
+    )
+    snapshots = []
+    try:
+        for _ in range(updates):
+            trainer.train_update()
+            snapshots.append((
+                [parameter.detach().clone() for parameter in trainer.actors.parameters()],
+                [parameter.detach().clone() for parameter in trainer.critic.parameters()],
+            ))
+    finally:
+        trainer.close()
+    return snapshots
+
+
+def test_rgaa_coef_zero_matches_vanilla_after_one_complete_update():
+    vanilla = _main_parameter_snapshots("baseline", 1)[0]
+    rgaa = _main_parameter_snapshots(RGAA_METHOD, 1)[0]
+    assert all(torch.equal(left, right) for left, right in zip(vanilla[0], rgaa[0]))
+    assert all(torch.equal(left, right) for left, right in zip(vanilla[1], rgaa[1]))
+
+
+def test_rgaa_coef_zero_matches_vanilla_after_two_complete_updates():
+    vanilla = _main_parameter_snapshots("baseline", 2)
+    rgaa = _main_parameter_snapshots(RGAA_METHOD, 2)
+    for vanilla_step, rgaa_step in zip(vanilla, rgaa):
+        assert all(torch.equal(left, right) for left, right in zip(vanilla_step[0], rgaa_step[0]))
+        assert all(torch.equal(left, right) for left, right in zip(vanilla_step[1], rgaa_step[1]))
+
+
+def test_role_critic_training_advances_only_rgaa_numpy_rng():
+    trainer = HAPPOTrainer(short_v39(), trainer_config())
+    try:
+        observations = torch.zeros(8, 4, OBS_DIM)
+        targets = torch.arange(32, dtype=torch.float32).reshape(8, 4)
+        active = torch.ones(8, 4)
+        main_before = deepcopy(trainer.rng.bit_generator.state)
+        auxiliary_before = deepcopy(trainer.rgaa_rng.bit_generator.state)
+        trainer._train_role_critics(observations, targets, active)
+        assert trainer.rng.bit_generator.state == main_before
+        assert trainer.rgaa_rng.bit_generator.state != auxiliary_before
+    finally:
+        trainer.close()
+
+
+def test_checkpoint_resume_restores_exact_auxiliary_rng_continuation(tmp_path):
+    source = HAPPOTrainer(short_v39(), trainer_config())
+    observations = torch.zeros(8, 4, OBS_DIM)
+    targets = torch.arange(32, dtype=torch.float32).reshape(8, 4)
+    active = torch.ones(8, 4)
+    source._train_role_critics(observations, targets, active)
+    checkpoint = tmp_path / "rgaa_rng.pt"
+    source.save_checkpoint(checkpoint)
+    restored = HAPPOTrainer(short_v39(), trainer_config())
+    try:
+        restored.load_checkpoint(checkpoint)
+        assert restored.rgaa_rng.bit_generator.state == source.rgaa_rng.bit_generator.state
+        source._train_role_critics(observations, targets, active)
+        restored._train_role_critics(observations, targets, active)
+        assert restored.rgaa_rng.bit_generator.state == source.rgaa_rng.bit_generator.state
+        for left, right in zip(source.mav_role_critic.parameters(), restored.mav_role_critic.parameters()):
+            assert torch.equal(left, right)
+        for left, right in zip(source.uav_role_critic.parameters(), restored.uav_role_critic.parameters()):
+            assert torch.equal(left, right)
+    finally:
+        source.close(); restored.close()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")

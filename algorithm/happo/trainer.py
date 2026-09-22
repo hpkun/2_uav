@@ -96,6 +96,11 @@ def _resolved_reward_mode(environment_config: Mapping[str, Any]) -> str:
             shaping_mode)
 
 
+def _rgaa_auxiliary_seed(training_seed: int) -> int:
+    """Derive a stable auxiliary seed without advancing either main RNG."""
+    return (int(training_seed) + 0x52474141) % (2**63 - 1)
+
+
 class HAPPOTrainer:
     def __init__(self, env_config: str | Path | Mapping[str, Any] | None = None, config: Mapping[str, Any] | None = None) -> None:
         self.config = deepcopy(DEFAULTS)
@@ -127,6 +132,10 @@ class HAPPOTrainer:
         self.device = torch.device(c["device"])
         torch.manual_seed(int(c["seed"]))
         self.rng = np.random.default_rng(int(c["seed"]))
+        self.rgaa_rng = (
+            np.random.default_rng(_rgaa_auxiliary_seed(int(c["seed"])))
+            if self.rgaa_enabled else None
+        )
         self.environment_config = load_environment_config(env_config)
         shaping = self.environment_config.get("shaping", {})
         self.reward_shaping_mode = str(shaping.get("mode", "absolute"))
@@ -262,12 +271,14 @@ class HAPPOTrainer:
             self.credit_critic = None
             self.credit_critic_optimizer = None
         if self.rgaa_enabled:
-            self.mav_role_critic = RoleValueNetwork(
-                hidden_dim=int(c["hidden_dim"]),
-            ).to(self.device)
-            self.uav_role_critic = RoleValueNetwork(
-                hidden_dim=int(c["hidden_dim"]),
-            ).to(self.device)
+            with torch.random.fork_rng(devices=[]):
+                torch.random.default_generator.manual_seed(
+                    _rgaa_auxiliary_seed(int(c["seed"])),
+                )
+                mav_role_critic = RoleValueNetwork(hidden_dim=int(c["hidden_dim"]))
+                uav_role_critic = RoleValueNetwork(hidden_dim=int(c["hidden_dim"]))
+            self.mav_role_critic = mav_role_critic.to(self.device)
+            self.uav_role_critic = uav_role_critic.to(self.device)
             self.mav_role_critic_optimizer = torch.optim.Adam(
                 self.mav_role_critic.parameters(), lr=float(c["critic_learning_rate"]),
             )
@@ -595,6 +606,7 @@ class HAPPOTrainer:
                 raise TypeError("RGAA rollout state is incomplete")
             self.buffer.compute_role_returns_and_advantages(
                 self._role_values(self.observations),
+                self.active_masks,
                 float(self.config["gamma"]), float(self.config["gae_lambda"]),
             )
         if self.credit_enabled:
@@ -814,6 +826,8 @@ class HAPPOTrainer:
             self.mav_role_critic_optimizer, self.uav_role_critic_optimizer,
         )):
             raise RuntimeError("RGAA role critic training state is unavailable")
+        if self.rgaa_rng is None:
+            raise RuntimeError("RGAA auxiliary RNG is unavailable")
         c = self.config
         mini = int(c["minibatch_size"])
         losses: dict[str, list[float]] = {"mav": [], "uav": []}
@@ -831,7 +845,7 @@ class HAPPOTrainer:
         for name, critic, optimizer, inputs, values, active in datasets:
             indices = torch.nonzero(active, as_tuple=False).squeeze(-1).cpu().numpy()
             for _ in range(int(c["ppo_epochs"])):
-                order = self.rng.permutation(indices)
+                order = self.rgaa_rng.permutation(indices)
                 for start in range(0, len(order), mini):
                     idx = torch.as_tensor(order[start:start + mini], device=self.device)
                     if not len(idx):
@@ -1367,6 +1381,8 @@ class HAPPOTrainer:
             state["role_critic_uav"] = self.uav_role_critic.state_dict()
             state["role_critic_mav_optimizer_state"] = self.mav_role_critic_optimizer.state_dict()
             state["role_critic_uav_optimizer_state"] = self.uav_role_critic_optimizer.state_dict()
+            assert self.rgaa_rng is not None
+            state["rgaa_numpy_rng"] = deepcopy(self.rgaa_rng.bit_generator.state)
         if self.is_recurrent:
             state["rollout_state"]["actor_hidden_states"] = self.actor_hidden_states.copy()
             state["rollout_state"]["actor_recurrent_masks"] = self.actor_recurrent_masks.copy()
@@ -1459,6 +1475,7 @@ class HAPPOTrainer:
             required = (
                 "role_critic_mav", "role_critic_uav",
                 "role_critic_mav_optimizer_state", "role_critic_uav_optimizer_state",
+                "rgaa_numpy_rng",
             )
             if any(field not in data for field in required):
                 raise RuntimeError("RGAA checkpoint is missing role critic training state")
@@ -1514,6 +1531,9 @@ class HAPPOTrainer:
             self.mav_role_critic_optimizer.load_state_dict(data["role_critic_mav_optimizer_state"])
             self.uav_role_critic_optimizer.load_state_dict(data["role_critic_uav_optimizer_state"])
         self.rng.bit_generator.state = deepcopy(data["trainer_numpy_rng"])
+        if self.rgaa_enabled:
+            assert self.rgaa_rng is not None
+            self.rgaa_rng.bit_generator.state = deepcopy(data["rgaa_numpy_rng"])
         torch.set_rng_state(data["torch_rng"].cpu())
         _restore_cuda_rng_state(data.get("cuda_rng"))
         rollout = data["rollout_state"]

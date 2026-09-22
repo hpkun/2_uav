@@ -94,15 +94,23 @@ class RoleAdvantageRolloutBuffer(RolloutBuffer):
         self.role_values[index] = np.asarray(role_values, dtype=np.float32)
 
     def compute_role_returns_and_advantages(
-        self, last_values: np.ndarray, gamma: float, gae_lambda: float,
+        self,
+        last_values: np.ndarray,
+        last_active_masks: np.ndarray,
+        gamma: float,
+        gae_lambda: float,
     ) -> None:
         if self.position != self.horizon:
             raise RuntimeError("role GAE requires a complete fixed-horizon rollout")
         next_values = np.asarray(last_values, dtype=np.float32)
+        next_active_masks = np.asarray(last_active_masks, dtype=np.float32)
+        expected_shape = (self.num_envs, self.num_agents)
+        if next_values.shape != expected_shape or next_active_masks.shape != expected_shape:
+            raise ValueError(f"last role values and active masks must have shape {expected_shape}")
         gae = np.zeros((self.num_envs, self.num_agents), dtype=np.float32)
         for step in reversed(range(self.horizon)):
             boundary = np.logical_or(self.terminated[step], self.truncated[step]).astype(np.float32)
-            continuation = (1.0 - boundary)[:, None]
+            continuation = (1.0 - boundary)[:, None] * next_active_masks
             delta = (
                 self.role_rewards[step]
                 + gamma * next_values * continuation
@@ -111,4 +119,5 @@ class RoleAdvantageRolloutBuffer(RolloutBuffer):
             gae = delta + gamma * gae_lambda * continuation * gae
             self.role_advantages[step] = gae
             next_values = self.role_values[step]
+            next_active_masks = self.active_masks[step]
         self.role_returns[:] = self.role_advantages + self.role_values
