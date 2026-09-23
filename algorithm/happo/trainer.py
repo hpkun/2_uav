@@ -1163,7 +1163,9 @@ class HAPPOTrainer:
                     active_lambda = adaptive_lambda[active]
                     active_consistency = consistency[active]
                     conflict = active_consistency < 0.0
-                    agreement = active_consistency > 0.0
+                    # ``agreement`` denotes the complete non-conflict set in
+                    # the one-sided gate, including neutral consistency.
+                    agreement = active_consistency >= 0.0
                     label = RED_IDS[agent]
                     for suffix in (str(agent), label):
                         rgaa_metrics[f"cr_lambda_mean_{suffix}"] = float(active_lambda.mean().item()) if active.any() else 0.0

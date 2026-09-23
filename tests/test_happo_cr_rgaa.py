@@ -83,16 +83,39 @@ def test_attention_mask_blocks_dead_keys_and_all_inactive_is_finite():
     assert 0.0 <= diagnostics["cr_attention_entropy"] <= 1.0
 
 
-def test_conflict_gate_bounds_monotonicity_and_exact_fusion():
-    team = torch.tensor([1.0, 0.0, 1.0])
-    role = torch.tensor([1.0, 0.0, -1.0])
+def test_one_sided_conflict_gate_neutral_positive_bounds_monotonicity_and_exact_fusion():
+    team = torch.tensor([1.0, 0.0, 1.0, 1.0, 100.0])
+    role = torch.tensor([1.0, 0.0, -0.25, -1.0, -100.0])
     combined, lambdas, consistency = conflict_aware_fusion(
         team, role, role_advantage_coef=0.5, beta=2.0, lambda_floor_ratio=0.2,
     )
     assert torch.equal(consistency, team * role)
     assert torch.allclose(combined, team + lambdas * role)
-    assert torch.all((lambdas >= 0.1) & (lambdas <= 0.5))
-    assert lambdas[0] > lambdas[1] > lambdas[2]
+    assert lambdas[0] == 0.5
+    assert lambdas[1] == 0.5
+    assert 0.1 <= lambdas[2] < 0.5
+    assert lambdas[2] > lambdas[3] > lambdas[4] >= 0.1
+    assert torch.isclose(lambdas[4], torch.tensor(0.1), atol=1e-6)
+
+
+def test_normal_forward_skips_attention_weights_and_matches_detailed_values(monkeypatch):
+    critic = RelationalRoleValueNetwork(hidden_dim=16, relational_dim=16, attention_heads=4)
+    observations = torch.randn(3, 4, OBS_DIM)
+    active = torch.tensor([[1, 1, 1, 1], [1, 0, 1, 1], [0, 0, 0, 0]], dtype=torch.float32)
+    calls = []
+    original = critic.attention.forward
+
+    def recording_forward(*args, **kwargs):
+        calls.append(kwargs.copy())
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(critic.attention, "forward", recording_forward)
+    normal = critic(observations, active, return_details=False)
+    detailed = critic(observations, active, return_details=True)
+    assert calls[0]["need_weights"] is False
+    assert calls[1]["need_weights"] is True
+    assert calls[1]["average_attn_weights"] is False
+    assert torch.allclose(normal, detailed.values, rtol=1e-6, atol=1e-7)
 
 
 def test_cr_rgaa_initializes_independently_and_preserves_main_initialization_rng():
@@ -213,7 +236,7 @@ def test_cr_checkpoint_exact_resume_rng_and_cross_method_rejection(tmp_path):
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
     assert payload["algorithm"] == "cr_rgaa_happo"
     assert payload["method_variant"] == CR_RGAA_METHOD
-    assert payload["credit_gate"]["type"] == "analytic_consistency_sigmoid_v1"
+    assert payload["credit_gate"]["type"] == "one_sided_conflict_exponential_v2"
     assert payload["relational_role_critic"]["correction_zero_initialized"] is True
     restored = HAPPOTrainer(short_v39(), trainer_config())
     rgaa = HAPPOTrainer(short_v39(), trainer_config(method_variant=RGAA_METHOD))
@@ -240,6 +263,14 @@ def test_cr_checkpoint_exact_resume_rng_and_cross_method_rejection(tmp_path):
         rgaa.save_checkpoint(rgaa_checkpoint)
         with pytest.raises(RuntimeError, match="resume method mismatch"):
             restored.load_checkpoint(rgaa_checkpoint)
+        old_gate = deepcopy(payload)
+        old_gate["credit_gate"] = {
+            **old_gate["credit_gate"], "type": "analytic_consistency_sigmoid_v1",
+        }
+        old_gate_checkpoint = tmp_path / "old_gate.pt"
+        torch.save(old_gate, old_gate_checkpoint)
+        with pytest.raises(RuntimeError, match="credit_gate"):
+            restored.load_checkpoint(old_gate_checkpoint)
     finally:
         source.close(); restored.close(); rgaa.close()
 
@@ -287,5 +318,9 @@ def test_cr_rgaa_tiny_cuda_update_is_finite():
         _, metrics = trainer.train_update()
         assert all(np.isfinite(value) for value in metrics.values() if isinstance(value, float))
         assert next(trainer.relational_role_critic.parameters()).is_cuda
+        weights = torch.full((2, 4, 4, 4), 0.25, device="cuda")
+        masks = torch.ones(2, 4, device="cuda")
+        diagnostics = attention_diagnostics(weights, masks)
+        assert all(np.isfinite(value) for value in diagnostics.values())
     finally:
         trainer.close()

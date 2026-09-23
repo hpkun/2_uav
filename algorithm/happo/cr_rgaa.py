@@ -13,7 +13,7 @@ from .rgaa import RoleValueNetwork
 
 CR_RGAA_METHOD = "cr_rgaa"
 CR_RGAA_VERSION = 1
-CR_GATE_VERSION = "analytic_consistency_sigmoid_v1"
+CR_GATE_VERSION = "one_sided_conflict_exponential_v2"
 CR_RELATIONAL_CRITIC_VERSION = 1
 
 
@@ -107,12 +107,19 @@ class RelationalRoleValueNetwork(nn.Module):
         safe_key_padding_mask = key_padding_mask.clone()
         if all_inactive.any():
             safe_key_padding_mask[all_inactive, 0] = False
-        attended, weights = self.attention(
-            tokens, tokens, tokens,
-            key_padding_mask=safe_key_padding_mask,
-            need_weights=True,
-            average_attn_weights=False,
-        )
+        if return_details:
+            attended, weights = self.attention(
+                tokens, tokens, tokens,
+                key_padding_mask=safe_key_padding_mask,
+                need_weights=True,
+                average_attn_weights=False,
+            )
+        else:
+            attended, _ = self.attention(
+                tokens, tokens, tokens,
+                key_padding_mask=safe_key_padding_mask,
+                need_weights=False,
+            )
         context = self.attention_norm(tokens + attended)
         context = context * active.unsqueeze(-1)
         features = torch.cat((tokens, context), dim=-1)
@@ -123,9 +130,10 @@ class RelationalRoleValueNetwork(nn.Module):
         residuals = torch.cat((mav_residual[:, None], uav_residual), dim=1)
         residuals = residuals * active
         values = (local_values + self.relational_value_coef * residuals) * active
-        weights = weights.masked_fill(~active[:, None, :, None], 0.0)
-        weights = weights.masked_fill(~active[:, None, None, :], 0.0)
         if return_details:
+            assert weights is not None
+            weights = weights.masked_fill(~active[:, None, :, None], 0.0)
+            weights = weights.masked_fill(~active[:, None, None, :], 0.0)
             return RelationalRoleOutput(values, residuals, weights)
         return values
 
@@ -158,16 +166,17 @@ def conflict_aware_fusion(
     beta: float,
     lambda_floor_ratio: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Apply the deterministic analytic consistency gate without renormalizing."""
+    """Suppress role credit only when it conflicts with the team advantage."""
     if role_advantage_coef < 0.0 or beta < 0.0:
         raise ValueError("role_advantage_coef and beta must be non-negative")
     if not 0.0 <= lambda_floor_ratio <= 1.0:
         raise ValueError("lambda_floor_ratio must lie in [0,1]")
     consistency = team_normalized * role_normalized
-    gate = torch.sigmoid(float(beta) * consistency)
-    adaptive_lambda = float(role_advantage_coef) * (
-        float(lambda_floor_ratio) + (1.0 - float(lambda_floor_ratio)) * gate
-    )
+    conflict_magnitude = torch.relu(-consistency)
+    lambda_min = float(role_advantage_coef) * float(lambda_floor_ratio)
+    adaptive_lambda = lambda_min + (
+        float(role_advantage_coef) - lambda_min
+    ) * torch.exp(-float(beta) * conflict_magnitude)
     combined = team_normalized + adaptive_lambda * role_normalized
     return combined, adaptive_lambda, consistency
 
@@ -177,6 +186,10 @@ def attention_diagnostics(
     active_masks: torch.Tensor,
 ) -> dict[str, float]:
     """Summarize head-averaged attention over active queries and keys only."""
+    # Diagnostics are outside the gradient path.  One bulk device transfer
+    # avoids repeated CUDA synchronization from scalar extraction below.
+    attention_weights = attention_weights.detach().cpu()
+    active_masks = active_masks.detach().cpu()
     active = active_masks > 0.5
     weights = attention_weights.mean(dim=1)
     entropy_values: list[torch.Tensor] = []
