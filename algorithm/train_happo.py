@@ -88,6 +88,20 @@ RGAA_FIELDS = (
     *(f"own_boundary_loss_count_{aid}" for aid in RED_IDS),
     *(f"own_blue_attack_loss_count_{aid}" for aid in RED_IDS),
 )
+CR_RGAA_FIELDS = RGAA_FIELDS + (
+    "cr_role_critic_total_loss", "cr_relational_residual_abs_mean",
+    "cr_relational_residual_abs_mean_MAV", "cr_relational_residual_abs_mean_UAV",
+    "cr_attention_entropy", "cr_attention_self_mass", "cr_attention_mav_to_uav_mass",
+    "cr_attention_uav_to_mav_mass", "cr_attention_uav_to_other_uav_mass",
+    "cr_lambda_mean", "cr_conflict_rate",
+    *(f"cr_lambda_mean_{aid}" for aid in RED_IDS),
+    *(f"cr_lambda_std_{aid}" for aid in RED_IDS),
+    *(f"cr_conflict_rate_{aid}" for aid in RED_IDS),
+    *(f"cr_agreement_rate_{aid}" for aid in RED_IDS),
+    *(f"cr_lambda_on_conflict_mean_{aid}" for aid in RED_IDS),
+    *(f"cr_lambda_on_agreement_mean_{aid}" for aid in RED_IDS),
+    *(f"cr_consistency_product_mean_{aid}" for aid in RED_IDS),
+)
 LOSS_FIELDS = (*(f"actor_{i}_loss" for i in range(len(RED_IDS))), "critic_loss", "entropy")
 
 
@@ -110,6 +124,7 @@ def _algorithm_name(
             "cf_happo": "cf_happo",
             "rdc_happo": "rdc_happo",
             "rgaa": "rgaa_happo",
+            "cr_rgaa": "cr_rgaa_happo",
         }
         try:
             return method_names[method_variant]
@@ -498,6 +513,7 @@ def _initial_resolved(
         **trainer.credit_metadata,
         **trainer.tam_metadata,
         **trainer.rgaa_metadata,
+        **trainer.cr_rgaa_metadata,
     }
 
 
@@ -604,6 +620,17 @@ def main(
                 f"Resume checkpoint: {args.resume.expanduser().resolve().name}",
                 f"Resume steps: {resumed_steps:,}", f"Target steps: {args.steps:,}",
             ])
+        if method_variant == "cr_rgaa":
+            lambda_base = float(trainer.config["role_advantage_coef"])
+            lambda_floor = lambda_base * float(trainer.config["cr_rgaa_lambda_floor_ratio"])
+            start_lines.extend([
+                "Relational role critic: enabled",
+                "Conflict-aware gate: enabled",
+                f"Lambda base/range: {lambda_base:g} / [{lambda_floor:g}, {lambda_base:g}]",
+                "Attention: 1 layer / "
+                f"{int(trainer.config['cr_rgaa_attention_heads'])} heads / "
+                f"dim {int(trainer.config['cr_rgaa_relational_dim'])}",
+            ])
         if fallback:
             start_lines.append(f"Device fallback: {fallback}")
         start_lines.append(separator)
@@ -624,6 +651,8 @@ def main(
             training_fields = TRAINING_FIELDS + CF_FIELDS
         elif method_variant == "rgaa":
             training_fields = TRAINING_FIELDS + RGAA_FIELDS
+        elif method_variant == "cr_rgaa":
+            training_fields = TRAINING_FIELDS + CR_RGAA_FIELDS
         else:
             training_fields = TRAINING_FIELDS
         configured_horizon = int(trainer.config["rollout_steps"])
@@ -728,6 +757,7 @@ def main(
             **trainer.credit_metadata,
             **trainer.tam_metadata,
             **trainer.rgaa_metadata,
+            **trainer.cr_rgaa_metadata,
         }
         with (run_dir / "summary.json").open("w", encoding="utf-8") as stream:
             json.dump(summary, stream, indent=2, ensure_ascii=False)
