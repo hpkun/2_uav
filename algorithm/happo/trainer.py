@@ -974,18 +974,18 @@ class HAPPOTrainer:
                 idx = torch.as_tensor(order[start:start + mini], device=self.device)
                 if not len(idx):
                     continue
-                output = self.relational_role_critic(
-                    observations[idx], active_masks[idx], return_details=True,
+                values = self.relational_role_critic(
+                    observations[idx], active_masks[idx],
                 )
                 losses: list[torch.Tensor] = []
                 mav_active = active_masks[idx, 0] > 0.5
                 if mav_active.any():
-                    mav_loss = (output.values[mav_active, 0] - targets[idx][mav_active, 0]).square().mean()
+                    mav_loss = (values[mav_active, 0] - targets[idx][mav_active, 0]).square().mean()
                     mav_losses.append(float(mav_loss.detach().item()))
                     losses.append(0.5 * mav_loss)
                 uav_active = active_masks[idx, 1:] > 0.5
                 if uav_active.any():
-                    uav_loss = (output.values[:, 1:][uav_active] - targets[idx, 1:][uav_active]).square().mean()
+                    uav_loss = (values[:, 1:][uav_active] - targets[idx, 1:][uav_active]).square().mean()
                     uav_losses.append(float(uav_loss.detach().item()))
                     losses.append(0.5 * uav_loss)
                 if not losses:

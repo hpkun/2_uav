@@ -118,6 +118,33 @@ def test_normal_forward_skips_attention_weights_and_matches_detailed_values(monk
     assert torch.allclose(normal, detailed.values, rtol=1e-6, atol=1e-7)
 
 
+def test_trainer_role_critic_minibatches_skip_weights_and_single_diagnostic_requests_them(monkeypatch):
+    trainer = HAPPOTrainer(
+        short_v39(), trainer_config(ppo_epochs=2, minibatch_size=3),
+    )
+    calls = []
+    original = trainer.relational_role_critic.attention.forward
+
+    def recording_forward(*args, **kwargs):
+        calls.append(kwargs.copy())
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(trainer.relational_role_critic.attention, "forward", recording_forward)
+    observations = torch.randn(8, 4, OBS_DIM)
+    targets = torch.randn(8, 4)
+    active = torch.ones(8, 4)
+    try:
+        metrics = trainer._train_cr_relational_role_critic(observations, targets, active)
+        expected_optimization_calls = 2 * 3  # epochs * ceil(8 / minibatch_size)
+        assert len(calls) == expected_optimization_calls + 1
+        assert all(call["need_weights"] is False for call in calls[:-1])
+        assert calls[-1]["need_weights"] is True
+        assert calls[-1]["average_attn_weights"] is False
+        assert all(np.isfinite(value) for value in metrics.values())
+    finally:
+        trainer.close()
+
+
 def test_cr_rgaa_initializes_independently_and_preserves_main_initialization_rng():
     baseline = HAPPOTrainer(short_v39(), trainer_config(method_variant="baseline"))
     baseline_rng = torch.get_rng_state().clone()
