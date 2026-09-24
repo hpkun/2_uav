@@ -14,7 +14,7 @@ from tools.audit_role_guided_run import (
     CR_CONTINUOUS_FIELDS, EPISODE_FIELDS, analyze_training_rows, audit_episodes,
     death_summary, ensure_output_directory, exploratory_correlations,
     load_actor_only_checkpoint, pearson_or_none, validate_checkpoint_contract, validate_death_accounting,
-    write_outputs, _categorize_cause,
+    validate_run_data_contract, write_outputs, _categorize_cause,
 )
 
 
@@ -123,8 +123,25 @@ def test_death_cause_agent_aggregate_alive_boundary_blue_and_other():
 
 def test_death_accounting_invariant_rejects_missing_cause():
     bad = _episode(0, {}, uavs=2)
-    with pytest.raises(AssertionError, match="death accounting"):
+    with pytest.raises(AssertionError, match="accounting"):
         validate_death_accounting(bad)
+
+
+def test_agent_level_mav_death_accounting_checks_both_directions():
+    summary_dead_cause_alive = _episode(0, {}, mav=False, uavs=3, outcome="blue")
+    with pytest.raises(AssertionError, match="MAV"):
+        validate_death_accounting(summary_dead_cause_alive)
+    summary_alive_cause_dead = _episode(0, {"MAV": "boundary"}, mav=True, uavs=3)
+    with pytest.raises(AssertionError, match="MAV"):
+        validate_death_accounting(summary_alive_cause_dead)
+
+
+def test_agent_level_uav_survivor_count_must_match_alive_causes_and_valid_record_passes():
+    mismatch = _episode(0, {"UAV1": "boundary"}, uavs=3)
+    with pytest.raises(AssertionError, match="UAV"):
+        validate_death_accounting(mismatch)
+    valid = _episode(0, {"MAV": "blue_attack", "UAV1": "boundary"}, mav=False, uavs=2)
+    validate_death_accounting(valid)
 
 
 def _training_row(step, completed, *, metric=None, mav_boundary=0, uav_boundary=0, blue=0):
@@ -137,6 +154,50 @@ def _training_row(step, completed, *, metric=None, mav_boundary=0, uav_boundary=
         row[f"own_blue_attack_loss_count_{aid}"] = blue
         row[f"own_loss_count_{aid}"] = boundary + blue
     return row
+
+
+@pytest.mark.parametrize("method", ["rgaa", "cr_rgaa"])
+def test_run_data_contract_accepts_normal_role_guided_training_rows(method):
+    rows = [
+        {**_training_row(500_000, 20), "method_variant": method},
+        {**_training_row(1_000_000, 40), "method_variant": method},
+    ]
+    validate_run_data_contract(
+        rows, {"sampled_steps": 1_000_000}, {"method_variant": method},
+    )
+
+
+def test_run_data_contract_rejects_final_step_mismatch_and_nonpositive_completed():
+    rows = [_training_row(500_000, 20), _training_row(1_000_000, 40)]
+    with pytest.raises(RuntimeError, match="sampled_steps mismatch"):
+        validate_run_data_contract(
+            rows, {"sampled_steps": 2_000_000}, {"method_variant": "cr_rgaa"},
+        )
+    rows[-1]["completed_episodes"] = 0
+    with pytest.raises(ValueError, match="completed_episodes"):
+        validate_run_data_contract(
+            rows, {"sampled_steps": 1_000_000}, {"method_variant": "cr_rgaa"},
+        )
+
+
+@pytest.mark.parametrize("steps", [[500_000, 500_000], [500_000, 499_999]])
+def test_run_data_contract_rejects_duplicate_or_decreasing_steps(steps):
+    rows = [_training_row(steps[0], 10), _training_row(steps[1], 20)]
+    with pytest.raises(ValueError, match="strictly increasing"):
+        validate_run_data_contract(
+            rows, {"sampled_steps": steps[-1]}, {"method_variant": "rgaa"},
+        )
+
+
+def test_run_data_contract_rejects_training_checkpoint_method_mismatch():
+    rows = [
+        {**_training_row(500_000, 10), "method_variant": "rgaa"},
+        {**_training_row(1_000_000, 20), "method_variant": "rgaa"},
+    ]
+    with pytest.raises(RuntimeError, match="method_variant mismatch"):
+        validate_run_data_contract(
+            rows, {"sampled_steps": 1_000_000}, {"method_variant": "cr_rgaa"},
+        )
 
 
 def test_phase_boundaries_episode_deltas_event_sums_and_normalization():

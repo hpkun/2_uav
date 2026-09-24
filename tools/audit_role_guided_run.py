@@ -118,10 +118,20 @@ def _categorize_cause(cause: str) -> str:
 
 
 def validate_death_accounting(record: Mapping[str, Any]) -> None:
+    mav_alive_from_cause = record["MAV_death_cause"] == "alive"
+    if mav_alive_from_cause != bool(record["mav_survived"]):
+        raise AssertionError(
+            "MAV death-cause accounting disagrees with mav_survived"
+        )
+    uav_alive_from_causes = sum(
+        record[f"{aid}_death_cause"] == "alive" for aid in RED_IDS[1:]
+    )
+    if uav_alive_from_causes != int(record["red_uav_survivors"]):
+        raise AssertionError(
+            "UAV death-cause accounting disagrees with red_uav_survivors"
+        )
     final_alive = int(bool(record["mav_survived"])) + int(record["red_uav_survivors"])
     recorded_deaths = sum(record[f"{aid}_death_cause"] != "alive" for aid in RED_IDS)
-    if final_alive != int(bool(record["mav_survived"])) + int(record["red_uav_survivors"]):
-        raise AssertionError("Red final alive accounting is inconsistent")
     if recorded_deaths != len(RED_IDS) - final_alive:
         raise AssertionError(
             f"Red death accounting mismatch: causes={recorded_deaths}, expected={len(RED_IDS)-final_alive}"
@@ -351,6 +361,43 @@ def read_training_csv(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(stream))
 
 
+def validate_run_data_contract(
+    training_rows: Sequence[Mapping[str, Any]],
+    payload: Mapping[str, Any],
+    contract: Mapping[str, Any],
+) -> None:
+    """Require one continuous training history matching the final checkpoint."""
+    if not training_rows:
+        raise ValueError("training.csv is empty")
+    steps: list[int] = []
+    for index, row in enumerate(training_rows):
+        value = _finite_number(row.get("sampled_steps"))
+        if value is None or not float(value).is_integer():
+            raise ValueError(f"invalid sampled_steps at training.csv row {index + 2}")
+        steps.append(int(value))
+    if any(current <= previous for previous, current in zip(steps, steps[1:])):
+        raise ValueError("training.csv sampled_steps must be strictly increasing")
+    checkpoint_steps = payload.get("sampled_steps")
+    if checkpoint_steps is None or steps[-1] != int(checkpoint_steps):
+        raise RuntimeError(
+            f"training/checkpoint sampled_steps mismatch: training={steps[-1]} "
+            f"checkpoint={checkpoint_steps!r}"
+        )
+    methods = {
+        str(row.get("method_variant", "")).strip()
+        for row in training_rows if str(row.get("method_variant", "")).strip()
+    }
+    expected_method = str(contract["method_variant"])
+    if methods and (len(methods) != 1 or methods != {expected_method}):
+        raise RuntimeError(
+            f"training/checkpoint method_variant mismatch: training={sorted(methods)!r} "
+            f"checkpoint={expected_method!r}"
+        )
+    completed = _finite_number(training_rows[-1].get("completed_episodes"))
+    if completed is None or completed <= 0:
+        raise ValueError("training.csv final completed_episodes must be positive")
+
+
 def ensure_output_directory(path: Path) -> None:
     if path.exists() and any(path.iterdir()):
         raise FileExistsError(f"output directory exists and is not empty: {path}")
@@ -440,6 +487,7 @@ def main() -> None:
         action_seed=None if args.action_mode == "deterministic" else args.action_seed,
     )
     training_rows = read_training_csv(training_path)
+    validate_run_data_contract(training_rows, payload, contract)
     phase_rows, phase_summary = analyze_training_rows(training_rows, contract["method_variant"])
     resolved = None
     resolved_path = run_dir / "resolved_config.yaml"
