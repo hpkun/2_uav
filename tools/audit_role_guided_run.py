@@ -25,7 +25,7 @@ from env.mavuav import (
 )
 
 
-SUPPORTED_METHODS = frozenset(("rgaa", "cr_rgaa"))
+SUPPORTED_METHODS = frozenset(("rgaa", "cr_rgaa", "lp_cr_rgaa"))
 CAUSES = ("alive", "boundary", "blue_attack", "other")
 PHASES = (
     ("phase_0_750k", 0, 750_000),
@@ -45,6 +45,13 @@ CR_CONTINUOUS_FIELDS = (
     "cr_attention_mav_to_uav_mass", "cr_attention_uav_to_mav_mass",
     "cr_attention_uav_to_other_uav_mass", "cr_role_critic_total_loss",
     "mav_role_critic_loss", "uav_role_critic_loss",
+    "lp_team_positive_role_negative_rate", "lp_team_negative_role_positive_rate",
+    "lp_lambda_team_positive_role_negative_mean",
+    "lp_lambda_team_negative_role_positive_mean",
+    *(f"lp_team_positive_role_negative_rate_{aid}" for aid in RED_IDS),
+    *(f"lp_team_negative_role_positive_rate_{aid}" for aid in RED_IDS),
+    *(f"lp_lambda_team_positive_role_negative_mean_{aid}" for aid in RED_IDS),
+    *(f"lp_lambda_team_negative_role_positive_mean_{aid}" for aid in RED_IDS),
 )
 EVENT_PREFIXES = ("own_loss_count", "own_boundary_loss_count", "own_blue_attack_loss_count")
 EPISODE_FIELDS = (
@@ -284,7 +291,7 @@ def analyze_training_rows(
                                 "updates": len(selected), "episodes": episodes}
         for field in CR_CONTINUOUS_FIELDS:
             values = [value for row in selected if (value := _finite_number(row.get(field))) is not None]
-            stats = _descriptive(values) if method_variant == "cr_rgaa" else None
+            stats = _descriptive(values) if method_variant in ("cr_rgaa", "lp_cr_rgaa") else None
             continuous[field] = stats
             for statistic in ("mean", "std", "min", "max"):
                 flat[f"{field}_{statistic}"] = None if stats is None else stats[statistic]
@@ -341,7 +348,7 @@ def exploratory_correlations(
         "uav_to_mav_attention_vs_uav_boundary": ("cr_attention_uav_to_mav_mass", RED_IDS[1:]),
     }
     result: dict[str, float | None] = {name: None for name in names}
-    if method_variant != "cr_rgaa":
+    if method_variant not in ("cr_rgaa", "lp_cr_rgaa"):
         return result
     rows = [row for row in raw_rows if 750_000 < int(float(row["sampled_steps"])) <= 2_000_000]
     for name, (metric, agents) in names.items():

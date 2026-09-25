@@ -38,7 +38,7 @@ def payload(method="rgaa", **updates):
     return result
 
 
-@pytest.mark.parametrize("method", ["rgaa", "cr_rgaa"])
+@pytest.mark.parametrize("method", ["rgaa", "cr_rgaa", "lp_cr_rgaa"])
 def test_checkpoint_contract_accepts_both_role_guided_methods(method):
     contract = validate_checkpoint_contract(payload(method), short_v39())
     assert contract["method_variant"] == method
@@ -156,7 +156,7 @@ def _training_row(step, completed, *, metric=None, mav_boundary=0, uav_boundary=
     return row
 
 
-@pytest.mark.parametrize("method", ["rgaa", "cr_rgaa"])
+@pytest.mark.parametrize("method", ["rgaa", "cr_rgaa", "lp_cr_rgaa"])
 def test_run_data_contract_accepts_normal_role_guided_training_rows(method):
     rows = [
         {**_training_row(500_000, 20), "method_variant": method},

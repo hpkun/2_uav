@@ -102,6 +102,16 @@ CR_RGAA_FIELDS = RGAA_FIELDS + (
     *(f"cr_lambda_on_agreement_mean_{aid}" for aid in RED_IDS),
     *(f"cr_consistency_product_mean_{aid}" for aid in RED_IDS),
 )
+LP_CR_RGAA_FIELDS = CR_RGAA_FIELDS + (
+    "lp_team_positive_role_negative_rate",
+    "lp_team_negative_role_positive_rate",
+    "lp_lambda_team_positive_role_negative_mean",
+    "lp_lambda_team_negative_role_positive_mean",
+    *(f"lp_team_positive_role_negative_rate_{aid}" for aid in RED_IDS),
+    *(f"lp_team_negative_role_positive_rate_{aid}" for aid in RED_IDS),
+    *(f"lp_lambda_team_positive_role_negative_mean_{aid}" for aid in RED_IDS),
+    *(f"lp_lambda_team_negative_role_positive_mean_{aid}" for aid in RED_IDS),
+)
 LOSS_FIELDS = (*(f"actor_{i}_loss" for i in range(len(RED_IDS))), "critic_loss", "entropy")
 
 
@@ -125,6 +135,7 @@ def _algorithm_name(
             "rdc_happo": "rdc_happo",
             "rgaa": "rgaa_happo",
             "cr_rgaa": "cr_rgaa_happo",
+            "lp_cr_rgaa": "lp_cr_rgaa_happo",
         }
         try:
             return method_names[method_variant]
@@ -514,6 +525,7 @@ def _initial_resolved(
         **trainer.tam_metadata,
         **trainer.rgaa_metadata,
         **trainer.cr_rgaa_metadata,
+        **trainer.lp_cr_rgaa_metadata,
     }
 
 
@@ -620,12 +632,16 @@ def main(
                 f"Resume checkpoint: {args.resume.expanduser().resolve().name}",
                 f"Resume steps: {resumed_steps:,}", f"Target steps: {args.steps:,}",
             ])
-        if method_variant == "cr_rgaa":
+        if method_variant in ("cr_rgaa", "lp_cr_rgaa"):
             lambda_base = float(trainer.config["role_advantage_coef"])
             lambda_floor = lambda_base * float(trainer.config["cr_rgaa_lambda_floor_ratio"])
             start_lines.extend([
                 "Relational role critic: enabled",
-                "Conflict-aware gate: enabled",
+                (
+                    "Loss-preserving directional conflict gate: enabled"
+                    if method_variant == "lp_cr_rgaa" else
+                    "Conflict-aware gate: enabled"
+                ),
                 f"Lambda base/range: {lambda_base:g} / [{lambda_floor:g}, {lambda_base:g}]",
                 "Attention: 1 layer / "
                 f"{int(trainer.config['cr_rgaa_attention_heads'])} heads / "
@@ -653,6 +669,8 @@ def main(
             training_fields = TRAINING_FIELDS + RGAA_FIELDS
         elif method_variant == "cr_rgaa":
             training_fields = TRAINING_FIELDS + CR_RGAA_FIELDS
+        elif method_variant == "lp_cr_rgaa":
+            training_fields = TRAINING_FIELDS + LP_CR_RGAA_FIELDS
         else:
             training_fields = TRAINING_FIELDS
         configured_horizon = int(trainer.config["rollout_steps"])
@@ -758,6 +776,7 @@ def main(
             **trainer.tam_metadata,
             **trainer.rgaa_metadata,
             **trainer.cr_rgaa_metadata,
+            **trainer.lp_cr_rgaa_metadata,
         }
         with (run_dir / "summary.json").open("w", encoding="utf-8") as stream:
             json.dump(summary, stream, indent=2, ensure_ascii=False)

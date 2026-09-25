@@ -38,6 +38,10 @@ from .cr_rgaa import (
     RelationalRoleValueNetwork, attention_diagnostics, conflict_aware_fusion,
     cr_rgaa_auxiliary_seed,
 )
+from .lp_cr_rgaa import (
+    LP_CR_GATE_VERSION, LP_CR_RGAA_METHOD, LP_CR_RGAA_VERSION,
+    loss_preserving_directional_fusion,
+)
 
 
 DEFAULTS = {
@@ -125,7 +129,9 @@ class HAPPOTrainer:
             c["pcta_consistency_coef"] = 0.0
         if c["environment_profile"] not in ("learnability", "main"):
             raise ValueError("environment_profile must be 'learnability' or 'main'")
-        if c["method_variant"] not in ("baseline", "agp", RGAA_METHOD, CR_RGAA_METHOD, *CREDIT_METHODS):
+        if c["method_variant"] not in (
+            "baseline", "agp", RGAA_METHOD, CR_RGAA_METHOD, LP_CR_RGAA_METHOD, *CREDIT_METHODS,
+        ):
             raise ValueError("invalid method_variant")
         if c["actor_variant"] != "vanilla" and c["method_variant"] != "baseline":
             raise ValueError("non-baseline methods require actor_variant='vanilla'")
@@ -143,7 +149,9 @@ class HAPPOTrainer:
         self.credit_enabled = c["method_variant"] in CREDIT_METHODS
         self.rgaa_enabled = c["method_variant"] == RGAA_METHOD
         self.cr_rgaa_enabled = c["method_variant"] == CR_RGAA_METHOD
-        self.role_guided_enabled = self.rgaa_enabled or self.cr_rgaa_enabled
+        self.lp_cr_rgaa_enabled = c["method_variant"] == LP_CR_RGAA_METHOD
+        self.relational_rgaa_enabled = self.cr_rgaa_enabled or self.lp_cr_rgaa_enabled
+        self.role_guided_enabled = self.rgaa_enabled or self.relational_rgaa_enabled
         if float(c["agp_lambda"]) < 0.0:
             raise ValueError("agp_lambda cannot be negative")
         self.device = torch.device(c["device"])
@@ -155,7 +163,7 @@ class HAPPOTrainer:
         )
         self.cr_rgaa_rng = (
             np.random.default_rng(cr_rgaa_auxiliary_seed(int(c["seed"])))
-            if self.cr_rgaa_enabled else None
+            if self.relational_rgaa_enabled else None
         )
         self.environment_config = load_environment_config(env_config)
         shaping = self.environment_config.get("shaping", {})
@@ -198,7 +206,7 @@ class HAPPOTrainer:
             raise ValueError(
                 f"RGAA role_aux_reward_mode must be {ROLE_AUX_REWARD_MODE!r}"
             )
-        if self.cr_rgaa_enabled:
+        if self.relational_rgaa_enabled:
             if int(c["cr_rgaa_relational_dim"]) <= 0:
                 raise ValueError("cr_rgaa_relational_dim must be positive")
             heads = int(c["cr_rgaa_attention_heads"])
@@ -325,7 +333,7 @@ class HAPPOTrainer:
         else:
             self.mav_role_critic = self.uav_role_critic = None
             self.mav_role_critic_optimizer = self.uav_role_critic_optimizer = None
-        if self.cr_rgaa_enabled:
+        if self.relational_rgaa_enabled:
             with torch.random.fork_rng(devices=[]):
                 torch.random.default_generator.manual_seed(
                     cr_rgaa_auxiliary_seed(int(c["seed"])),
@@ -553,8 +561,28 @@ class HAPPOTrainer:
             },
         }
 
+    @property
+    def lp_cr_rgaa_metadata(self) -> dict[str, Any]:
+        if not self.lp_cr_rgaa_enabled:
+            return {}
+        assert self.relational_role_critic is not None
+        return {
+            "lp_cr_rgaa_version": LP_CR_RGAA_VERSION,
+            "role_aux_reward_mode": str(self.config["role_aux_reward_mode"]),
+            "role_advantage_coef": float(self.config["role_advantage_coef"]),
+            "credit_gate": {
+                "type": LP_CR_GATE_VERSION,
+                "beta": float(self.config["cr_rgaa_gate_beta"]),
+                "lambda_floor_ratio": float(self.config["cr_rgaa_lambda_floor_ratio"]),
+            },
+            "relational_role_critic": {
+                **self.relational_role_critic.architecture(),
+                "version": CR_RELATIONAL_CRITIC_VERSION,
+            },
+        }
+
     def _role_values(self, observations: np.ndarray) -> np.ndarray:
-        if self.cr_rgaa_enabled:
+        if self.relational_rgaa_enabled:
             if self.relational_role_critic is None:
                 raise RuntimeError("CR-RGAA relational role critic is unavailable")
             tensor = torch.as_tensor(observations, device=self.device)
@@ -1094,13 +1122,20 @@ class HAPPOTrainer:
                 self.last_rgaa_role_normalized_advantages = torch.zeros_like(self.last_rgaa_team_normalized_advantages)
                 self.last_rgaa_combined_advantages = torch.zeros_like(self.last_rgaa_team_normalized_advantages)
                 self.last_rgaa_ppo_normalized_advantages = torch.zeros_like(self.last_rgaa_team_normalized_advantages)
-            else:
+            elif self.cr_rgaa_enabled:
                 self.last_cr_rgaa_team_normalized_advantages = torch.zeros(snapshot_shape, device=self.device)
                 self.last_cr_rgaa_role_normalized_advantages = torch.zeros_like(self.last_cr_rgaa_team_normalized_advantages)
                 self.last_cr_rgaa_adaptive_lambdas = torch.zeros_like(self.last_cr_rgaa_team_normalized_advantages)
                 self.last_cr_rgaa_consistency = torch.zeros_like(self.last_cr_rgaa_team_normalized_advantages)
                 self.last_cr_rgaa_combined_advantages = torch.zeros_like(self.last_cr_rgaa_team_normalized_advantages)
                 self.last_cr_rgaa_ppo_advantages = torch.zeros_like(self.last_cr_rgaa_team_normalized_advantages)
+            else:
+                self.last_lp_cr_rgaa_team_normalized_advantages = torch.zeros(snapshot_shape, device=self.device)
+                self.last_lp_cr_rgaa_role_normalized_advantages = torch.zeros_like(self.last_lp_cr_rgaa_team_normalized_advantages)
+                self.last_lp_cr_rgaa_adaptive_lambdas = torch.zeros_like(self.last_lp_cr_rgaa_team_normalized_advantages)
+                self.last_lp_cr_rgaa_consistency = torch.zeros_like(self.last_lp_cr_rgaa_team_normalized_advantages)
+                self.last_lp_cr_rgaa_combined_advantages = torch.zeros_like(self.last_lp_cr_rgaa_team_normalized_advantages)
+                self.last_lp_cr_rgaa_ppo_advantages = torch.zeros_like(self.last_lp_cr_rgaa_team_normalized_advantages)
         factor = torch.ones_like(advantages)
         order = [int(v) for v in self.rng.permutation(num_agents)]
         actor_losses: list[list[float]] = [[] for _ in RED_IDS]; entropies: list[float] = []
@@ -1124,6 +1159,8 @@ class HAPPOTrainer:
             self.last_rgaa_factor_history = [factor.detach().cpu().numpy().copy()]
         if self.cr_rgaa_enabled:
             self.last_cr_rgaa_factor_history = [factor.detach().cpu().numpy().copy()]
+        if self.lp_cr_rgaa_enabled:
+            self.last_lp_cr_rgaa_factor_history = [factor.detach().cpu().numpy().copy()]
         clip = float(c["clip_coef"]); mini = int(c["minibatch_size"]); total = len(advantages)
         if self.credit_enabled:
             self.last_credit_normalized_advantages = torch.zeros(
@@ -1148,18 +1185,29 @@ class HAPPOTrainer:
                 role_normalized, role_degenerate = normalize_active_advantage(
                     role_advantages[:, agent], active,
                 )
-                if self.cr_rgaa_enabled:
-                    normalized, adaptive_lambda, consistency = conflict_aware_fusion(
+                if self.relational_rgaa_enabled:
+                    fusion = (
+                        loss_preserving_directional_fusion
+                        if self.lp_cr_rgaa_enabled else conflict_aware_fusion
+                    )
+                    normalized, adaptive_lambda, consistency = fusion(
                         team_normalized, role_normalized,
                         role_advantage_coef=float(c["role_advantage_coef"]),
                         beta=float(c["cr_rgaa_gate_beta"]),
                         lambda_floor_ratio=float(c["cr_rgaa_lambda_floor_ratio"]),
                     )
-                    self.last_cr_rgaa_team_normalized_advantages[:, agent] = team_normalized.detach()
-                    self.last_cr_rgaa_role_normalized_advantages[:, agent] = role_normalized.detach()
-                    self.last_cr_rgaa_adaptive_lambdas[:, agent] = adaptive_lambda.detach()
-                    self.last_cr_rgaa_consistency[:, agent] = consistency.detach()
-                    self.last_cr_rgaa_combined_advantages[:, agent] = normalized.detach()
+                    if self.cr_rgaa_enabled:
+                        self.last_cr_rgaa_team_normalized_advantages[:, agent] = team_normalized.detach()
+                        self.last_cr_rgaa_role_normalized_advantages[:, agent] = role_normalized.detach()
+                        self.last_cr_rgaa_adaptive_lambdas[:, agent] = adaptive_lambda.detach()
+                        self.last_cr_rgaa_consistency[:, agent] = consistency.detach()
+                        self.last_cr_rgaa_combined_advantages[:, agent] = normalized.detach()
+                    else:
+                        self.last_lp_cr_rgaa_team_normalized_advantages[:, agent] = team_normalized.detach()
+                        self.last_lp_cr_rgaa_role_normalized_advantages[:, agent] = role_normalized.detach()
+                        self.last_lp_cr_rgaa_adaptive_lambdas[:, agent] = adaptive_lambda.detach()
+                        self.last_lp_cr_rgaa_consistency[:, agent] = consistency.detach()
+                        self.last_lp_cr_rgaa_combined_advantages[:, agent] = normalized.detach()
                     active_lambda = adaptive_lambda[active]
                     active_consistency = consistency[active]
                     conflict = active_consistency < 0.0
@@ -1175,6 +1223,28 @@ class HAPPOTrainer:
                         rgaa_metrics[f"cr_lambda_on_conflict_mean_{suffix}"] = float(active_lambda[conflict].mean().item()) if conflict.any() else 0.0
                         rgaa_metrics[f"cr_lambda_on_agreement_mean_{suffix}"] = float(active_lambda[agreement].mean().item()) if agreement.any() else 0.0
                         rgaa_metrics[f"cr_consistency_product_mean_{suffix}"] = float(active_consistency.mean().item()) if active.any() else 0.0
+                    if self.lp_cr_rgaa_enabled:
+                        team_positive_role_negative = (
+                            (team_normalized[active] > 0.0) & (role_normalized[active] < 0.0)
+                        )
+                        team_negative_role_positive = (
+                            (team_normalized[active] < 0.0) & (role_normalized[active] > 0.0)
+                        )
+                        for suffix in (str(agent), label):
+                            rgaa_metrics[f"lp_team_positive_role_negative_rate_{suffix}"] = (
+                                float(team_positive_role_negative.float().mean().item()) if active.any() else 0.0
+                            )
+                            rgaa_metrics[f"lp_team_negative_role_positive_rate_{suffix}"] = (
+                                float(team_negative_role_positive.float().mean().item()) if active.any() else 0.0
+                            )
+                            rgaa_metrics[f"lp_lambda_team_positive_role_negative_mean_{suffix}"] = (
+                                float(active_lambda[team_positive_role_negative].mean().item())
+                                if team_positive_role_negative.any() else 0.0
+                            )
+                            rgaa_metrics[f"lp_lambda_team_negative_role_positive_mean_{suffix}"] = (
+                                float(active_lambda[team_negative_role_positive].mean().item())
+                                if team_negative_role_positive.any() else 0.0
+                            )
                 else:
                     normalized = team_normalized + float(c["role_advantage_coef"]) * role_normalized
                     self.last_rgaa_team_normalized_advantages[:, agent] = team_normalized.detach()
@@ -1216,6 +1286,8 @@ class HAPPOTrainer:
                 self.last_rgaa_ppo_normalized_advantages[:, agent] = normalized.detach()
             if self.cr_rgaa_enabled:
                 self.last_cr_rgaa_ppo_advantages[:, agent] = normalized.detach()
+            if self.lp_cr_rgaa_enabled:
+                self.last_lp_cr_rgaa_ppo_advantages[:, agent] = normalized.detach()
             for _ in range(int(c["ppo_epochs"])):
                 sample_order = self.rng.permutation(total)
                 for start in range(0, total, mini):
@@ -1255,6 +1327,8 @@ class HAPPOTrainer:
                 self.last_rgaa_factor_history.append(factor.detach().cpu().numpy().copy())
             if self.cr_rgaa_enabled:
                 self.last_cr_rgaa_factor_history.append(factor.detach().cpu().numpy().copy())
+            if self.lp_cr_rgaa_enabled:
+                self.last_lp_cr_rgaa_factor_history.append(factor.detach().cpu().numpy().copy())
             if c["actor_variant"] in PCTA_FAMILY:
                 self.last_pcta_factor_history.append(factor.detach().cpu().numpy().copy())
             if c["actor_variant"] == PCTA_V2_VARIANT:
@@ -1297,7 +1371,7 @@ class HAPPOTrainer:
             rgaa_metrics.update(self._train_role_critics(
                 observations, role_returns, active_masks,
             ))
-        elif self.cr_rgaa_enabled:
+        elif self.relational_rgaa_enabled:
             assert role_returns is not None
             rgaa_metrics.update(self._train_cr_relational_role_critic(
                 observations, role_returns, active_masks,
@@ -1326,14 +1400,37 @@ class HAPPOTrainer:
                 rgaa_metrics[f"own_blue_attack_loss_count_{RED_IDS[agent]}"] = float(
                     self.buffer.blue_attack_loss_events[:, :, agent].sum()
                 )
-            if self.cr_rgaa_enabled:
+            if self.relational_rgaa_enabled:
                 active_flat = active_masks > 0.5
-                lambdas = self.last_cr_rgaa_adaptive_lambdas[active_flat]
-                consistency = self.last_cr_rgaa_consistency[active_flat]
+                if self.lp_cr_rgaa_enabled:
+                    lambdas = self.last_lp_cr_rgaa_adaptive_lambdas[active_flat]
+                    consistency = self.last_lp_cr_rgaa_consistency[active_flat]
+                else:
+                    lambdas = self.last_cr_rgaa_adaptive_lambdas[active_flat]
+                    consistency = self.last_cr_rgaa_consistency[active_flat]
                 rgaa_metrics["cr_lambda_mean"] = float(lambdas.mean().item()) if lambdas.numel() else 0.0
                 rgaa_metrics["cr_conflict_rate"] = (
                     float((consistency < 0.0).float().mean().item()) if consistency.numel() else 0.0
                 )
+                if self.lp_cr_rgaa_enabled:
+                    team = self.last_lp_cr_rgaa_team_normalized_advantages[active_flat]
+                    role = self.last_lp_cr_rgaa_role_normalized_advantages[active_flat]
+                    team_positive_role_negative = (team > 0.0) & (role < 0.0)
+                    team_negative_role_positive = (team < 0.0) & (role > 0.0)
+                    rgaa_metrics["lp_team_positive_role_negative_rate"] = (
+                        float(team_positive_role_negative.float().mean().item()) if team.numel() else 0.0
+                    )
+                    rgaa_metrics["lp_team_negative_role_positive_rate"] = (
+                        float(team_negative_role_positive.float().mean().item()) if team.numel() else 0.0
+                    )
+                    rgaa_metrics["lp_lambda_team_positive_role_negative_mean"] = (
+                        float(lambdas[team_positive_role_negative].mean().item())
+                        if team_positive_role_negative.any() else 0.0
+                    )
+                    rgaa_metrics["lp_lambda_team_negative_role_positive_mean"] = (
+                        float(lambdas[team_negative_role_positive].mean().item())
+                        if team_negative_role_positive.any() else 0.0
+                    )
         metrics: dict[str, Any] = {f"actor_{i}_loss": float(np.mean(actor_losses[i])) if actor_losses[i] else 0.0 for i in range(num_agents)}
         metrics.update({"actor_loss": float(np.mean([v for rows in actor_losses for v in rows])), "critic_loss": float(np.mean(critic_losses)), "entropy": float(np.mean(entropies)), "agent_update_order": order})
         metrics.update(credit_metrics)
@@ -1537,11 +1634,15 @@ class HAPPOTrainer:
         payload.update(self.tam_metadata)
         payload.update(self.rgaa_metadata)
         payload.update(self.cr_rgaa_metadata)
+        payload.update(self.lp_cr_rgaa_metadata)
         if self.rgaa_enabled:
             payload["algorithm"] = "rgaa_happo"
             payload["base_algorithm"] = "happo"
         if self.cr_rgaa_enabled:
             payload["algorithm"] = "cr_rgaa_happo"
+            payload["base_algorithm"] = "happo"
+        if self.lp_cr_rgaa_enabled:
+            payload["algorithm"] = "lp_cr_rgaa_happo"
             payload["base_algorithm"] = "happo"
         if self.is_tam:
             payload["algorithm"] = "tam_happo"
@@ -1553,7 +1654,7 @@ class HAPPOTrainer:
             assert self.mav_role_critic is not None and self.uav_role_critic is not None
             payload["role_critic_mav"] = self.mav_role_critic.state_dict()
             payload["role_critic_uav"] = self.uav_role_critic.state_dict()
-        if self.cr_rgaa_enabled:
+        if self.relational_rgaa_enabled:
             assert self.relational_role_critic is not None
             payload["relational_role_critic_state"] = self.relational_role_critic.state_dict()
         torch.save(payload, path)
@@ -1601,11 +1702,15 @@ class HAPPOTrainer:
         state.update(self.tam_metadata)
         state.update(self.rgaa_metadata)
         state.update(self.cr_rgaa_metadata)
+        state.update(self.lp_cr_rgaa_metadata)
         if self.rgaa_enabled:
             state["algorithm"] = "rgaa_happo"
             state["base_algorithm"] = "happo"
         if self.cr_rgaa_enabled:
             state["algorithm"] = "cr_rgaa_happo"
+            state["base_algorithm"] = "happo"
+        if self.lp_cr_rgaa_enabled:
+            state["algorithm"] = "lp_cr_rgaa_happo"
             state["base_algorithm"] = "happo"
         if self.is_tam:
             state["algorithm"] = "tam_happo"
@@ -1623,7 +1728,7 @@ class HAPPOTrainer:
             state["role_critic_uav_optimizer_state"] = self.uav_role_critic_optimizer.state_dict()
             assert self.rgaa_rng is not None
             state["rgaa_numpy_rng"] = deepcopy(self.rgaa_rng.bit_generator.state)
-        if self.cr_rgaa_enabled:
+        if self.relational_rgaa_enabled:
             assert self.relational_role_critic is not None
             assert self.relational_role_critic_optimizer is not None
             assert self.cr_rgaa_rng is not None
@@ -1742,6 +1847,21 @@ class HAPPOTrainer:
             )
             if any(field not in data for field in required):
                 raise RuntimeError("CR-RGAA checkpoint is missing relational critic training state")
+        if self.lp_cr_rgaa_enabled:
+            expected_lp = self.lp_cr_rgaa_metadata
+            for field in (
+                "lp_cr_rgaa_version", "role_aux_reward_mode", "role_advantage_coef",
+                "credit_gate", "relational_role_critic",
+            ):
+                if data.get(field) != expected_lp[field]:
+                    raise RuntimeError(f"incompatible LP-CR-RGAA checkpoint contract: {field}")
+            required = (
+                "relational_role_critic_state",
+                "relational_role_critic_optimizer_state",
+                "cr_rgaa_numpy_rng",
+            )
+            if any(field not in data for field in required):
+                raise RuntimeError("LP-CR-RGAA checkpoint is missing relational critic training state")
         if self.agp_enabled:
             checkpoint_lambda = data.get("agp_lambda", saved_config.get("agp_lambda"))
             if checkpoint_lambda is None or float(checkpoint_lambda) != float(self.config["agp_lambda"]):
@@ -1756,7 +1876,7 @@ class HAPPOTrainer:
                 raise RuntimeError(
                     f"resume config mismatch: {field} checkpoint={checkpoint_value!r} current={current_value!r}"
                 )
-        if self.cr_rgaa_enabled:
+        if self.relational_rgaa_enabled:
             for field in CR_RGAA_RESUME_CONFIG_FIELDS:
                 if saved_config.get(field, DEFAULTS[field]) != self.config.get(field):
                     raise RuntimeError(
@@ -1789,7 +1909,7 @@ class HAPPOTrainer:
             assert self.mav_role_critic is not None and self.uav_role_critic is not None
             self.mav_role_critic.load_state_dict(data["role_critic_mav"])
             self.uav_role_critic.load_state_dict(data["role_critic_uav"])
-        if self.cr_rgaa_enabled:
+        if self.relational_rgaa_enabled:
             assert self.relational_role_critic is not None
             self.relational_role_critic.load_state_dict(data["relational_role_critic_state"])
         if "actor_optimizer_states" not in data or "rollout_state" not in data:
@@ -1804,7 +1924,7 @@ class HAPPOTrainer:
             assert self.mav_role_critic_optimizer is not None and self.uav_role_critic_optimizer is not None
             self.mav_role_critic_optimizer.load_state_dict(data["role_critic_mav_optimizer_state"])
             self.uav_role_critic_optimizer.load_state_dict(data["role_critic_uav_optimizer_state"])
-        if self.cr_rgaa_enabled:
+        if self.relational_rgaa_enabled:
             assert self.relational_role_critic_optimizer is not None
             self.relational_role_critic_optimizer.load_state_dict(
                 data["relational_role_critic_optimizer_state"],
@@ -1813,7 +1933,7 @@ class HAPPOTrainer:
         if self.rgaa_enabled:
             assert self.rgaa_rng is not None
             self.rgaa_rng.bit_generator.state = deepcopy(data["rgaa_numpy_rng"])
-        if self.cr_rgaa_enabled:
+        if self.relational_rgaa_enabled:
             assert self.cr_rgaa_rng is not None
             self.cr_rgaa_rng.bit_generator.state = deepcopy(data["cr_rgaa_numpy_rng"])
         torch.set_rng_state(data["torch_rng"].cpu())
@@ -1892,6 +2012,13 @@ class HAPPOTrainer:
             ):
                 if data.get(field) != self.cr_rgaa_metadata[field]:
                     raise RuntimeError(f"incompatible CR-RGAA checkpoint contract: {field}")
+        if self.lp_cr_rgaa_enabled:
+            for field in (
+                "lp_cr_rgaa_version", "role_aux_reward_mode", "role_advantage_coef",
+                "credit_gate", "relational_role_critic",
+            ):
+                if data.get(field) != self.lp_cr_rgaa_metadata[field]:
+                    raise RuntimeError(f"incompatible LP-CR-RGAA checkpoint contract: {field}")
         if data.get("environment_profile") != self.config["environment_profile"]:
             raise RuntimeError(
                 f"incompatible HAPPO checkpoint environment profile: {data.get('environment_profile')!r} "
@@ -1904,9 +2031,9 @@ class HAPPOTrainer:
             assert self.mav_role_critic is not None and self.uav_role_critic is not None
             self.mav_role_critic.load_state_dict(data["role_critic_mav"])
             self.uav_role_critic.load_state_dict(data["role_critic_uav"])
-        if self.cr_rgaa_enabled:
+        if self.relational_rgaa_enabled:
             if "relational_role_critic_state" not in data:
-                raise RuntimeError("CR-RGAA weights checkpoint is missing relational role critic")
+                raise RuntimeError("relational RGAA weights checkpoint is missing relational role critic")
             assert self.relational_role_critic is not None
             self.relational_role_critic.load_state_dict(data["relational_role_critic_state"])
 
