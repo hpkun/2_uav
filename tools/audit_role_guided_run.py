@@ -25,7 +25,7 @@ from env.mavuav import (
 )
 
 
-SUPPORTED_METHODS = frozenset(("rgaa", "cr_rgaa", "lp_cr_rgaa", "ls_rgaa"))
+SUPPORTED_METHODS = frozenset(("rgaa", "cr_rgaa", "lp_cr_rgaa", "ls_rgaa", "lsa_rgaa"))
 CAUSES = ("alive", "boundary", "blue_attack", "other")
 PHASES = (
     ("phase_0_750k", 0, 750_000),
@@ -70,6 +70,26 @@ LS_CONTINUOUS_FIELDS = (
         f"loss_return_negative_rate_{aid}", f"loss_return_on_own_loss_mean_{aid}",
         f"loss_return_on_boundary_mean_{aid}", f"loss_return_on_blue_attack_mean_{aid}",
         f"process_critic_loss_{aid}", f"loss_critic_loss_{aid}",
+    )),
+)
+LSA_CONTINUOUS_FIELDS = (
+    "loss_value_mean", "loss_value_mean_abs", "loss_advantage_mean",
+    "loss_advantage_mean_abs", "loss_advantage_std", "loss_advantage_min",
+    "loss_advantage_max", "loss_advantage_positive_rate",
+    "loss_advantage_negative_rate", "loss_advantage_range_violation_count",
+    "loss_advantage_on_own_loss_mean", "loss_advantage_on_boundary_mean",
+    "loss_advantage_on_blue_attack_mean", "survival_loss_advantage_mean",
+    *(field for aid in RED_IDS for field in (
+        f"loss_value_mean_{aid}", f"loss_value_mean_abs_{aid}",
+        f"loss_advantage_mean_{aid}", f"loss_advantage_mean_abs_{aid}",
+        f"loss_advantage_std_{aid}", f"loss_advantage_min_{aid}",
+        f"loss_advantage_max_{aid}", f"loss_advantage_positive_rate_{aid}",
+        f"loss_advantage_negative_rate_{aid}",
+        f"loss_advantage_on_own_loss_mean_{aid}",
+        f"loss_advantage_on_boundary_mean_{aid}",
+        f"loss_advantage_on_blue_attack_mean_{aid}",
+        f"survival_loss_advantage_mean_{aid}",
+        f"loss_advantage_range_violation_count_{aid}",
     )),
 )
 EVENT_PREFIXES = ("own_loss_count", "own_boundary_loss_count", "own_blue_attack_loss_count")
@@ -308,12 +328,14 @@ def analyze_training_rows(
         continuous: dict[str, Any] = {}
         flat: dict[str, Any] = {"phase": phase_name, "lower_exclusive": lower, "upper_inclusive": upper,
                                 "updates": len(selected), "episodes": episodes}
-        mechanism_fields = CR_CONTINUOUS_FIELDS + LS_CONTINUOUS_FIELDS
+        mechanism_fields = CR_CONTINUOUS_FIELDS + LS_CONTINUOUS_FIELDS + LSA_CONTINUOUS_FIELDS
         for field in mechanism_fields:
             values = [value for row in selected if (value := _finite_number(row.get(field))) is not None]
             supported = (
                 method_variant in ("cr_rgaa", "lp_cr_rgaa") and field in CR_CONTINUOUS_FIELDS
-            ) or (method_variant == "ls_rgaa" and field in LS_CONTINUOUS_FIELDS)
+            ) or (
+                method_variant in ("ls_rgaa", "lsa_rgaa") and field in LS_CONTINUOUS_FIELDS
+            ) or (method_variant == "lsa_rgaa" and field in LSA_CONTINUOUS_FIELDS)
             stats = _descriptive(values) if supported else None
             continuous[field] = stats
             for statistic in ("mean", "std", "min", "max"):
@@ -495,7 +517,7 @@ def _compact_print(summary: Mapping[str, Any], output: Path) -> None:
     print(f"Death causes: MAV boundary={agents['MAV']['boundary']} blue={agents['MAV']['blue_attack']} | "
           f"UAV boundary={formal['uav_boundary_total']} blue={formal['uav_blue_attack_total']} "
           f"other={formal['uav_other_total']} | boundary share={formal['uav_boundary_share_of_uav_deaths']:.1%}")
-    if metadata["method_variant"] == "ls_rgaa":
+    if metadata["method_variant"] in ("ls_rgaa", "lsa_rgaa"):
         print(f"Late LS: process_adv={mean('process_adv_raw_mean_abs')} "
               f"loss_return={mean('loss_return_mean')} loss_event={mean('loss_event_rate')} "
               f"process/loss critic={mean('process_critic_loss')}/{mean('loss_critic_loss')}")

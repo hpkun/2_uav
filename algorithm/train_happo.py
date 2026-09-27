@@ -136,6 +136,26 @@ LS_RGAA_FIELDS = (
         f"own_blue_attack_loss_count_{aid}", f"loss_return_positive_violation_count_{aid}",
     )),
 )
+LSA_RGAA_FIELDS = LS_RGAA_FIELDS + (
+    "loss_value_mean", "loss_value_mean_abs", "loss_advantage_mean",
+    "loss_advantage_mean_abs", "loss_advantage_std", "loss_advantage_min",
+    "loss_advantage_max", "loss_advantage_positive_rate",
+    "loss_advantage_negative_rate", "loss_advantage_range_violation_count",
+    "loss_advantage_on_own_loss_mean", "loss_advantage_on_boundary_mean",
+    "loss_advantage_on_blue_attack_mean", "survival_loss_advantage_mean",
+    *(field for aid in RED_IDS for field in (
+        f"loss_value_mean_{aid}", f"loss_value_mean_abs_{aid}",
+        f"loss_advantage_mean_{aid}", f"loss_advantage_mean_abs_{aid}",
+        f"loss_advantage_std_{aid}", f"loss_advantage_min_{aid}",
+        f"loss_advantage_max_{aid}", f"loss_advantage_positive_rate_{aid}",
+        f"loss_advantage_negative_rate_{aid}",
+        f"loss_advantage_on_own_loss_mean_{aid}",
+        f"loss_advantage_on_boundary_mean_{aid}",
+        f"loss_advantage_on_blue_attack_mean_{aid}",
+        f"survival_loss_advantage_mean_{aid}",
+        f"loss_advantage_range_violation_count_{aid}",
+    )),
+)
 LOSS_FIELDS = (*(f"actor_{i}_loss" for i in range(len(RED_IDS))), "critic_loss", "entropy")
 
 
@@ -161,6 +181,7 @@ def _algorithm_name(
             "cr_rgaa": "cr_rgaa_happo",
             "lp_cr_rgaa": "lp_cr_rgaa_happo",
             "ls_rgaa": "ls_rgaa_happo",
+            "lsa_rgaa": "lsa_rgaa_happo",
         }
         try:
             return method_names[method_variant]
@@ -552,6 +573,7 @@ def _initial_resolved(
         **trainer.cr_rgaa_metadata,
         **trainer.lp_cr_rgaa_metadata,
         **trainer.ls_rgaa_metadata,
+        **trainer.lsa_rgaa_metadata,
     }
 
 
@@ -699,6 +721,8 @@ def main(
             training_fields = TRAINING_FIELDS + LP_CR_RGAA_FIELDS
         elif method_variant == "ls_rgaa":
             training_fields = TRAINING_FIELDS + LS_RGAA_FIELDS
+        elif method_variant == "lsa_rgaa":
+            training_fields = TRAINING_FIELDS + LSA_RGAA_FIELDS
         else:
             training_fields = TRAINING_FIELDS
         configured_horizon = int(trainer.config["rollout_steps"])
@@ -806,6 +830,7 @@ def main(
             **trainer.cr_rgaa_metadata,
             **trainer.lp_cr_rgaa_metadata,
             **trainer.ls_rgaa_metadata,
+            **trainer.lsa_rgaa_metadata,
         }
         with (run_dir / "summary.json").open("w", encoding="utf-8") as stream:
             json.dump(summary, stream, indent=2, ensure_ascii=False)

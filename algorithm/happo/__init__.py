@@ -12,6 +12,7 @@ from .rgaa import RoleAdvantageRolloutBuffer, RoleValueNetwork
 from .cr_rgaa import RelationalRoleValueNetwork, conflict_aware_fusion
 from .lp_cr_rgaa import loss_preserving_directional_fusion
 from .ls_rgaa import LossSeparatedRoleRolloutBuffer, LossValueNetwork
+from .lsa_rgaa import compute_loss_advantage
 from algorithm.modules.pcta import PCTAActor, PCTAIndependentActors, pursuit_consistency
 from algorithm.modules.pcta_v2 import PCTAv2Actor, PCTAv2IndependentActors, target_behavior_diagnostics
 
@@ -24,6 +25,7 @@ __all__ = [
     "RelationalRoleValueNetwork", "conflict_aware_fusion",
     "loss_preserving_directional_fusion",
     "LossSeparatedRoleRolloutBuffer", "LossValueNetwork",
+    "compute_loss_advantage",
     "PCTAActor", "PCTAIndependentActors", "pursuit_consistency",
     "PCTAv2Actor", "PCTAv2IndependentActors", "target_behavior_diagnostics",
     "TAMGaussianActor", "TAMIndependentActors", "TAMAttentionCritic", "TAMRolloutBuffer",

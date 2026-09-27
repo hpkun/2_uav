@@ -86,7 +86,7 @@ def main(expected_critic_variant: str = "mlp") -> None:
     method_variant = payload.get("method_variant", trainer_config.get("method_variant", "baseline"))
     if method_variant not in (
         "baseline", "agp", "cf_happo", "rdc_happo", "rgaa", "cr_rgaa", "lp_cr_rgaa",
-        "ls_rgaa",
+        "ls_rgaa", "lsa_rgaa",
     ):
         raise RuntimeError(f"unsupported HAPPO method_variant: {method_variant!r}")
     critic_variant = payload.get("critic_variant", trainer_config.get("critic_variant", "mlp"))
@@ -115,6 +115,7 @@ def main(expected_critic_variant: str = "mlp") -> None:
         "rc_happo" if critic_variant == "relational" else
         "lp_cr_rgaa_happo" if method_variant == "lp_cr_rgaa" else
         "ls_rgaa_happo" if method_variant == "ls_rgaa" else
+        "lsa_rgaa_happo" if method_variant == "lsa_rgaa" else
         "cr_rgaa_happo" if method_variant == "cr_rgaa" else
         "rgaa_happo" if method_variant == "rgaa" else
         method_variant if method_variant in ("cf_happo", "rdc_happo") else
