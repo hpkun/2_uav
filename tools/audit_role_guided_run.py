@@ -25,7 +25,7 @@ from env.mavuav import (
 )
 
 
-SUPPORTED_METHODS = frozenset(("rgaa", "cr_rgaa", "lp_cr_rgaa"))
+SUPPORTED_METHODS = frozenset(("rgaa", "cr_rgaa", "lp_cr_rgaa", "ls_rgaa"))
 CAUSES = ("alive", "boundary", "blue_attack", "other")
 PHASES = (
     ("phase_0_750k", 0, 750_000),
@@ -52,6 +52,25 @@ CR_CONTINUOUS_FIELDS = (
     *(f"lp_team_negative_role_positive_rate_{aid}" for aid in RED_IDS),
     *(f"lp_lambda_team_positive_role_negative_mean_{aid}" for aid in RED_IDS),
     *(f"lp_lambda_team_negative_role_positive_mean_{aid}" for aid in RED_IDS),
+)
+LS_CONTINUOUS_FIELDS = (
+    "mean_process_reward", "process_adv_raw_mean", "process_adv_raw_mean_abs",
+    "process_adv_raw_std", "process_adv_normalized_mean_abs",
+    "process_adv_normalized_std", "loss_reward_mean", "loss_event_rate",
+    "loss_return_mean", "loss_return_mean_abs", "loss_return_min", "loss_return_max",
+    "loss_return_negative_rate", "loss_return_positive_violation_count",
+    "process_critic_loss", "loss_critic_loss",
+    *(field for aid in RED_IDS for field in (
+        f"mean_process_reward_{aid}", f"process_adv_raw_mean_{aid}",
+        f"process_adv_raw_mean_abs_{aid}", f"process_adv_raw_std_{aid}",
+        f"process_adv_normalized_mean_abs_{aid}", f"process_adv_normalized_std_{aid}",
+        f"loss_reward_mean_{aid}", f"loss_event_rate_{aid}",
+        f"loss_return_mean_{aid}", f"loss_return_mean_abs_{aid}",
+        f"loss_return_min_{aid}", f"loss_return_max_{aid}",
+        f"loss_return_negative_rate_{aid}", f"loss_return_on_own_loss_mean_{aid}",
+        f"loss_return_on_boundary_mean_{aid}", f"loss_return_on_blue_attack_mean_{aid}",
+        f"process_critic_loss_{aid}", f"loss_critic_loss_{aid}",
+    )),
 )
 EVENT_PREFIXES = ("own_loss_count", "own_boundary_loss_count", "own_blue_attack_loss_count")
 EPISODE_FIELDS = (
@@ -289,15 +308,31 @@ def analyze_training_rows(
         continuous: dict[str, Any] = {}
         flat: dict[str, Any] = {"phase": phase_name, "lower_exclusive": lower, "upper_inclusive": upper,
                                 "updates": len(selected), "episodes": episodes}
-        for field in CR_CONTINUOUS_FIELDS:
+        mechanism_fields = CR_CONTINUOUS_FIELDS + LS_CONTINUOUS_FIELDS
+        for field in mechanism_fields:
             values = [value for row in selected if (value := _finite_number(row.get(field))) is not None]
-            stats = _descriptive(values) if method_variant in ("cr_rgaa", "lp_cr_rgaa") else None
+            supported = (
+                method_variant in ("cr_rgaa", "lp_cr_rgaa") and field in CR_CONTINUOUS_FIELDS
+            ) or (method_variant == "ls_rgaa" and field in LS_CONTINUOUS_FIELDS)
+            stats = _descriptive(values) if supported else None
             continuous[field] = stats
             for statistic in ("mean", "std", "min", "max"):
                 flat[f"{field}_{statistic}"] = None if stats is None else stats[statistic]
 
         events: dict[str, Any] = {}
         for aid in RED_IDS:
+            if not selected:
+                item = {
+                    "own_loss_events": None, "boundary_events": None,
+                    "blue_attack_events": None, "other_or_mismatch_events": None,
+                    "own_loss_events_per_1000_episodes": None,
+                    "boundary_events_per_1000_episodes": None,
+                    "blue_attack_events_per_1000_episodes": None,
+                }
+                events[aid] = item
+                for key, value in item.items():
+                    flat[f"{aid}_{key}"] = value
+                continue
             own = sum(_event_value(row, "own_loss_count", aid) for row in selected)
             boundary = sum(_event_value(row, "own_boundary_loss_count", aid) for row in selected)
             blue = sum(_event_value(row, "own_blue_attack_loss_count", aid) for row in selected)
@@ -312,8 +347,9 @@ def analyze_training_rows(
             for key, value in item.items():
                 flat[f"{aid}_{key}"] = value
         uav_events = {
-            key: sum(events[aid][key] for aid in RED_IDS[1:])
-            for key in events["UAV1"]
+            key: (
+                None if not selected else sum(events[aid][key] for aid in RED_IDS[1:])
+            ) for key in events["UAV1"]
         }
         events["UAV_aggregate"] = uav_events
         for key, value in uav_events.items():
@@ -449,6 +485,8 @@ def _compact_print(summary: Mapping[str, Any], output: Path) -> None:
     def mean(field: str) -> str:
         value = metrics.get(field)
         return "n/a" if value is None else f"{value['mean']:.4f}"
+    def number(value: Any) -> str:
+        return "n/a" if value is None else f"{float(value):.2f}"
     print("ROLE-GUIDED RUN AUDIT")
     print(f"seed={metadata['seed']} method={metadata['method_variant']} steps={metadata['sampled_steps']}")
     print(f"Formal: W={formal['win_rate']:.1%} Return={formal['mean_return']:.2f} "
@@ -457,19 +495,24 @@ def _compact_print(summary: Mapping[str, Any], output: Path) -> None:
     print(f"Death causes: MAV boundary={agents['MAV']['boundary']} blue={agents['MAV']['blue_attack']} | "
           f"UAV boundary={formal['uav_boundary_total']} blue={formal['uav_blue_attack_total']} "
           f"other={formal['uav_other_total']} | boundary share={formal['uav_boundary_share_of_uav_deaths']:.1%}")
-    print(f"Late CR: lambda={mean('cr_lambda_mean')} conflict={mean('cr_conflict_rate')} "
-          f"residual total/M/U={mean('cr_relational_residual_abs_mean')}/"
-          f"{mean('cr_relational_residual_abs_mean_MAV')}/"
-          f"{mean('cr_relational_residual_abs_mean_UAV')}")
-    print("         att H/self/M->U/U->M/U->U="
-          f"{mean('cr_attention_entropy')}/{mean('cr_attention_self_mass')}/"
-          f"{mean('cr_attention_mav_to_uav_mass')}/"
-          f"{mean('cr_attention_uav_to_mav_mass')}/"
-          f"{mean('cr_attention_uav_to_other_uav_mass')}")
+    if metadata["method_variant"] == "ls_rgaa":
+        print(f"Late LS: process_adv={mean('process_adv_raw_mean_abs')} "
+              f"loss_return={mean('loss_return_mean')} loss_event={mean('loss_event_rate')} "
+              f"process/loss critic={mean('process_critic_loss')}/{mean('loss_critic_loss')}")
+    else:
+        print(f"Late CR: lambda={mean('cr_lambda_mean')} conflict={mean('cr_conflict_rate')} "
+              f"residual total/M/U={mean('cr_relational_residual_abs_mean')}/"
+              f"{mean('cr_relational_residual_abs_mean_MAV')}/"
+              f"{mean('cr_relational_residual_abs_mean_UAV')}")
+        print("         att H/self/M->U/U->M/U->U="
+              f"{mean('cr_attention_entropy')}/{mean('cr_attention_self_mass')}/"
+              f"{mean('cr_attention_mav_to_uav_mass')}/"
+              f"{mean('cr_attention_uav_to_mav_mass')}/"
+              f"{mean('cr_attention_uav_to_other_uav_mass')}")
     print("Training death rate late: "
-          f"MAV boundary/1000ep={events['MAV']['boundary_events_per_1000_episodes']:.2f} | "
-          f"UAV boundary/1000ep={events['UAV_aggregate']['boundary_events_per_1000_episodes']:.2f} | "
-          f"UAV blue/1000ep={events['UAV_aggregate']['blue_attack_events_per_1000_episodes']:.2f}")
+          f"MAV boundary/1000ep={number(events['MAV']['boundary_events_per_1000_episodes'])} | "
+          f"UAV boundary/1000ep={number(events['UAV_aggregate']['boundary_events_per_1000_episodes'])} | "
+          f"UAV blue/1000ep={number(events['UAV_aggregate']['blue_attack_events_per_1000_episodes'])}")
     print(f"Files: {output}")
 
 

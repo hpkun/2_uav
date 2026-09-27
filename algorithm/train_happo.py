@@ -112,6 +112,30 @@ LP_CR_RGAA_FIELDS = CR_RGAA_FIELDS + (
     *(f"lp_lambda_team_positive_role_negative_mean_{aid}" for aid in RED_IDS),
     *(f"lp_lambda_team_negative_role_positive_mean_{aid}" for aid in RED_IDS),
 )
+LS_RGAA_FIELDS = (
+    "role_advantage_coef", "mean_process_reward", "loss_reward_mean", "loss_event_rate",
+    "process_adv_raw_mean", "process_adv_raw_mean_abs", "process_adv_raw_std",
+    "process_adv_normalized_mean_abs", "process_adv_normalized_std",
+    "loss_return_mean", "loss_return_mean_abs", "loss_return_min", "loss_return_max",
+    "loss_return_negative_rate", "loss_return_positive_violation_count",
+    "process_critic_loss", "loss_critic_loss",
+    "process_mav_critic_loss", "process_uav_critic_loss",
+    "loss_mav_critic_loss", "loss_uav_critic_loss",
+    *(field for aid in RED_IDS for field in (
+        f"mean_role_reward_{aid}", f"mean_process_reward_{aid}",
+        f"process_adv_raw_mean_{aid}", f"process_adv_raw_mean_abs_{aid}",
+        f"process_adv_raw_std_{aid}", f"process_adv_normalized_mean_abs_{aid}",
+        f"process_adv_normalized_std_{aid}", f"loss_reward_mean_{aid}",
+        f"loss_event_rate_{aid}", f"loss_return_mean_{aid}",
+        f"loss_return_mean_abs_{aid}", f"loss_return_min_{aid}",
+        f"loss_return_max_{aid}", f"loss_return_negative_rate_{aid}",
+        f"loss_return_on_own_loss_mean_{aid}", f"loss_return_on_boundary_mean_{aid}",
+        f"loss_return_on_blue_attack_mean_{aid}", f"process_critic_loss_{aid}",
+        f"loss_critic_loss_{aid}", f"combined_adv_mean_abs_{aid}",
+        f"own_loss_count_{aid}", f"own_boundary_loss_count_{aid}",
+        f"own_blue_attack_loss_count_{aid}", f"loss_return_positive_violation_count_{aid}",
+    )),
+)
 LOSS_FIELDS = (*(f"actor_{i}_loss" for i in range(len(RED_IDS))), "critic_loss", "entropy")
 
 
@@ -136,6 +160,7 @@ def _algorithm_name(
             "rgaa": "rgaa_happo",
             "cr_rgaa": "cr_rgaa_happo",
             "lp_cr_rgaa": "lp_cr_rgaa_happo",
+            "ls_rgaa": "ls_rgaa_happo",
         }
         try:
             return method_names[method_variant]
@@ -526,6 +551,7 @@ def _initial_resolved(
         **trainer.rgaa_metadata,
         **trainer.cr_rgaa_metadata,
         **trainer.lp_cr_rgaa_metadata,
+        **trainer.ls_rgaa_metadata,
     }
 
 
@@ -671,6 +697,8 @@ def main(
             training_fields = TRAINING_FIELDS + CR_RGAA_FIELDS
         elif method_variant == "lp_cr_rgaa":
             training_fields = TRAINING_FIELDS + LP_CR_RGAA_FIELDS
+        elif method_variant == "ls_rgaa":
+            training_fields = TRAINING_FIELDS + LS_RGAA_FIELDS
         else:
             training_fields = TRAINING_FIELDS
         configured_horizon = int(trainer.config["rollout_steps"])
@@ -777,6 +805,7 @@ def main(
             **trainer.rgaa_metadata,
             **trainer.cr_rgaa_metadata,
             **trainer.lp_cr_rgaa_metadata,
+            **trainer.ls_rgaa_metadata,
         }
         with (run_dir / "summary.json").open("w", encoding="utf-8") as stream:
             json.dump(summary, stream, indent=2, ensure_ascii=False)

@@ -11,6 +11,7 @@ from .counterfactual_credit import ActionMarginalCreditCritic
 from .rgaa import RoleAdvantageRolloutBuffer, RoleValueNetwork
 from .cr_rgaa import RelationalRoleValueNetwork, conflict_aware_fusion
 from .lp_cr_rgaa import loss_preserving_directional_fusion
+from .ls_rgaa import LossSeparatedRoleRolloutBuffer, LossValueNetwork
 from algorithm.modules.pcta import PCTAActor, PCTAIndependentActors, pursuit_consistency
 from algorithm.modules.pcta_v2 import PCTAv2Actor, PCTAv2IndependentActors, target_behavior_diagnostics
 
@@ -22,6 +23,7 @@ __all__ = [
     "RoleAdvantageRolloutBuffer", "RoleValueNetwork",
     "RelationalRoleValueNetwork", "conflict_aware_fusion",
     "loss_preserving_directional_fusion",
+    "LossSeparatedRoleRolloutBuffer", "LossValueNetwork",
     "PCTAActor", "PCTAIndependentActors", "pursuit_consistency",
     "PCTAv2Actor", "PCTAv2IndependentActors", "target_behavior_diagnostics",
     "TAMGaussianActor", "TAMIndependentActors", "TAMAttentionCritic", "TAMRolloutBuffer",
