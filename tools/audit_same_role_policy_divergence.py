@@ -43,6 +43,8 @@ class LoadedRun:
     checkpoint: Path
     actors: IndependentActors
     env_config: dict[str, Any]
+    environment_version: str
+    observation_dim: int
     method: str
     seed: int
     sampled_steps: int
@@ -113,6 +115,13 @@ def load_run(label: str, run_dir: Path, device: str) -> LoadedRun:
         raise FileNotFoundError(f"missing checkpoint_final.pt for {label}: {checkpoint}")
     digest = file_sha256(checkpoint)
     payload = torch.load(checkpoint, map_location=device, weights_only=False)
+    if "observation_dim" not in payload:
+        raise RuntimeError(f"checkpoint for {label} is missing observation_dim")
+    observation_dim = int(payload["observation_dim"])
+    if observation_dim != OBS_DIM:
+        raise RuntimeError(
+            f"checkpoint observation_dim mismatch for {label}: {observation_dim} != {OBS_DIM}"
+        )
     config = payload.get("trainer_config", payload.get("config", {}))
     method = str(payload.get("method_variant", config.get("method_variant", "")))
     if method not in SUPPORTED_METHODS:
@@ -123,6 +132,10 @@ def load_run(label: str, run_dir: Path, device: str) -> LoadedRun:
         raise RuntimeError(f"checkpoint for {label} is missing environment_config")
     if "actors" not in payload:
         raise RuntimeError(f"checkpoint for {label} is missing actors")
+    for actor_index in range(len(RED_IDS)):
+        key = f"actors.{actor_index}.log_std"
+        if key not in payload["actors"] or tuple(payload["actors"][key].shape) != (3,):
+            raise RuntimeError(f"checkpoint for {label} violates the 3D Gaussian action contract")
     hidden_dim = int(config["hidden_dim"])
     actors = IndependentActors(
         hidden_dim=hidden_dim,
@@ -131,12 +144,42 @@ def load_run(label: str, run_dir: Path, device: str) -> LoadedRun:
     actors.load_state_dict(payload["actors"])
     actors.eval()
     env_config = load_environment_config(payload["environment_config"])
+    environment_version = payload.get("environment_version")
+    if not isinstance(environment_version, str) or not environment_version:
+        raise RuntimeError(f"checkpoint for {label} is missing environment_version")
+    if env_config.get("environment_version") != environment_version:
+        raise RuntimeError(
+            f"checkpoint and resolved environment_version disagree for {label}"
+        )
+    with torch.no_grad():
+        probe = torch.zeros((1, OBS_DIM), device=device)
+        for actor in actors.actors:
+            if tuple(actor.log_std.shape) != (3,) or tuple(actor.network(probe).shape) != (1, 3):
+                raise RuntimeError(f"checkpoint for {label} violates the 3D Gaussian action contract")
     return LoadedRun(
         label=label, run_dir=run_dir, checkpoint=checkpoint, actors=actors,
-        env_config=env_config, method=method, seed=int(config.get("seed", payload.get("seed", -1))),
+        env_config=env_config, environment_version=environment_version,
+        observation_dim=observation_dim, method=method,
+        seed=int(config.get("seed", payload.get("seed", -1))),
         sampled_steps=int(payload.get("sampled_steps", 0)), checkpoint_digest=digest,
         initial_actor_state=clone_actor_state(actors),
     )
+
+
+def validate_cross_run_environment_contract(loaded_runs: Sequence[LoadedRun]) -> None:
+    if not loaded_runs:
+        raise RuntimeError("same-role divergence audit requires at least one run")
+    expected_version = loaded_runs[0].environment_version
+    expected_config = loaded_runs[0].env_config
+    for run in loaded_runs:
+        if run.observation_dim != OBS_DIM:
+            raise RuntimeError(
+                f"same-role divergence audit requires observation_dim={OBS_DIM}"
+            )
+        if run.environment_version != expected_version or run.env_config != expected_config:
+            raise RuntimeError(
+                "same-role divergence audit requires identical resolved environment configs"
+            )
 
 
 def _categorize_death(cause: str) -> str:
@@ -203,12 +246,18 @@ def collect_probes(
 
 def balanced_subsample(
     probes: Sequence[Mapping[str, Any]], max_per_agent: int, probe_seed: int, run_label: str,
+    *, target: int | None = None,
 ) -> list[dict[str, Any]]:
     """Deterministically retain an equal number of observations for each UAV."""
     groups = {aid: [dict(row) for row in probes if row["source_agent"] == aid] for aid in UAV_IDS}
     if any(not group for group in groups.values()):
         raise RuntimeError(f"run {run_label} produced no probes for at least one UAV")
-    target = min(int(max_per_agent), *(len(group) for group in groups.values()))
+    local_limit = min(int(max_per_agent), *(len(group) for group in groups.values()))
+    target = local_limit if target is None else int(target)
+    if target <= 0 or target > local_limit:
+        raise ValueError(
+            f"invalid balanced probe target for {run_label}: {target} > {local_limit}"
+        )
     selected: list[dict[str, Any]] = []
     for aid in UAV_IDS:
         group = groups[aid]
@@ -227,9 +276,18 @@ def build_shared_probe_pool(
     max_per_agent: int,
     probe_seed: int,
 ) -> list[dict[str, Any]]:
+    group_counts = [
+        sum(row["source_agent"] == aid for row in probes_by_run[label])
+        for label in sorted(probes_by_run) for aid in UAV_IDS
+    ]
+    if not group_counts or min(group_counts) <= 0:
+        raise RuntimeError("every run × UAV group must contain at least one probe")
+    global_target = min(int(max_per_agent), min(group_counts))
     pool: list[dict[str, Any]] = []
     for label in sorted(probes_by_run):
-        pool.extend(balanced_subsample(probes_by_run[label], max_per_agent, probe_seed, label))
+        pool.extend(balanced_subsample(
+            probes_by_run[label], max_per_agent, probe_seed, label, target=global_target,
+        ))
     for index, row in enumerate(pool):
         row["probe_id"] = index
     return pool
@@ -515,6 +573,7 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
     loaded_runs: list[LoadedRun] = []
     try:
         loaded_runs = [load_run(label, path.resolve(), device) for label, path in args.run]
+        validate_cross_run_environment_contract(loaded_runs)
         raw_probes = {
             run.label: collect_probes(
                 run, args.probe_episodes, args.profile, env_seed=args.env_seed,
@@ -525,6 +584,27 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
         pool = build_shared_probe_pool(
             raw_probes, args.max_probes_per_run_agent, args.probe_seed,
         )
+        contribution_by_run_agent = {
+            run.label: {
+                aid: sum(
+                    row["source_run"] == run.label and row["source_agent"] == aid
+                    for row in pool
+                )
+                for aid in UAV_IDS
+            }
+            for run in loaded_runs
+        }
+        contribution_by_run = {
+            label: sum(counts.values()) for label, counts in contribution_by_run_agent.items()
+        }
+        all_group_counts = [
+            count for counts in contribution_by_run_agent.values() for count in counts.values()
+        ]
+        if len(set(all_group_counts)) != 1 or len(set(contribution_by_run.values())) != 1:
+            raise AssertionError("shared probe pool run × UAV contributions are not globally balanced")
+        global_per_run_agent = all_group_counts[0]
+        if len(pool) != len(loaded_runs) * len(UAV_IDS) * global_per_run_agent:
+            raise AssertionError("shared probe pool size violates the global balancing contract")
         all_pairs: list[dict[str, Any]] = []
         all_outliers: list[dict[str, Any]] = []
         for run in loaded_runs:
@@ -574,6 +654,8 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
             "action_seed_start": args.action_seed,
             "action_seed_end": args.action_seed + args.probe_episodes - 1,
             "probe_seed": args.probe_seed, "shared_probe_count": len(pool),
+            "shared_probe_global_per_run_agent": global_per_run_agent,
+            "shared_probe_count_per_run": contribution_by_run,
             "healthy_reference": reference, "runs": run_metadata,
             "interpretation_limit": (
                 "Descriptive association only: policy-function outlier behavior may co-occur "

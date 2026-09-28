@@ -14,7 +14,7 @@ from tools.audit_same_role_policy_divergence import (
     LoadedRun, balanced_subsample, build_shared_probe_pool, collect_probes,
     compute_actor_outliers, diagonal_gaussian_symmetric_kl,
     evaluate_on_probe_pool, excess_diagnostics, file_sha256, healthy_reference,
-    load_run, parse_args, run_audit,
+    load_run, parse_args, run_audit, validate_cross_run_environment_contract,
 )
 
 
@@ -24,16 +24,19 @@ def short_v39():
     return config
 
 
-def make_checkpoint(tmp_path: Path, label: str = "run", *, seed: int = 7) -> Path:
+def make_checkpoint(
+    tmp_path: Path, label: str = "run", *, seed: int = 7,
+    env_config: dict | None = None, observation_dim: int = OBS_DIM,
+) -> Path:
     torch.manual_seed(seed)
     actors = IndependentActors(hidden_dim=16)
     run_dir = tmp_path / label
     run_dir.mkdir()
     checkpoint = run_dir / "checkpoint_final.pt"
     torch.save({
-        "actors": actors.state_dict(), "environment_config": short_v39(),
+        "actors": actors.state_dict(), "environment_config": env_config or short_v39(),
         "environment_version": "heterogeneous_mavuav_4v4_v3_9",
-        "observation_dim": OBS_DIM, "actor_variant": "vanilla",
+        "observation_dim": observation_dim, "actor_variant": "vanilla",
         "method_variant": "rgaa", "sampled_steps": 2_000_000,
         "trainer_config": {
             "hidden_dim": 16, "seed": seed, "actor_variant": "vanilla",
@@ -125,6 +128,56 @@ def test_shared_pool_is_identical_for_all_checkpoint_evaluations(tmp_path):
     assert ids_a == ids_b == list(range(len(pool)))
 
 
+def test_shared_pool_balances_every_run_agent_group_globally():
+    counts = {
+        "A": {"UAV1": 10, "UAV2": 9, "UAV3": 8},
+        "B": {"UAV1": 6, "UAV2": 7, "UAV3": 9},
+    }
+    raw = {
+        label: [
+            probe(run_index * 1000 + agent_index * 100 + index, label, aid)
+            for agent_index, aid in enumerate(("UAV1", "UAV2", "UAV3"))
+            for index in range(counts[label][aid])
+        ]
+        for run_index, label in enumerate(("A", "B"))
+    }
+    pool = build_shared_probe_pool(raw, 10, 53001)
+    assert len(pool) == 2 * 3 * 6
+    assert {
+        (label, aid): sum(row["source_run"] == label and row["source_agent"] == aid for row in pool)
+        for label in ("A", "B") for aid in ("UAV1", "UAV2", "UAV3")
+    } == {(label, aid): 6 for label in ("A", "B") for aid in ("UAV1", "UAV2", "UAV3")}
+
+
+def test_cross_run_environment_contract_accepts_identical_configs(tmp_path):
+    run_a = load_run("A", make_checkpoint(tmp_path, "A", seed=1), "cpu")
+    run_b = load_run("B", make_checkpoint(tmp_path, "B", seed=2), "cpu")
+    validate_cross_run_environment_contract([run_a, run_b])
+
+
+def test_cross_run_environment_contract_rejects_resolved_config_difference(tmp_path):
+    config_a = short_v39()
+    config_b = deepcopy(config_a)
+    config_b["simulation"]["max_decision_steps"] = 3
+    run_a = load_run("A", make_checkpoint(tmp_path, "A", seed=1, env_config=config_a), "cpu")
+    run_b = load_run("B", make_checkpoint(tmp_path, "B", seed=2, env_config=config_b), "cpu")
+    with pytest.raises(RuntimeError, match="identical resolved environment configs"):
+        validate_cross_run_environment_contract([run_a, run_b])
+
+
+def test_checkpoint_observation_dim_mismatch_and_missing_field_are_rejected(tmp_path):
+    mismatch = make_checkpoint(tmp_path, "mismatch", observation_dim=OBS_DIM - 1)
+    with pytest.raises(RuntimeError, match="observation_dim mismatch"):
+        load_run("mismatch", mismatch, "cpu")
+    missing = make_checkpoint(tmp_path, "missing")
+    checkpoint = missing / "checkpoint_final.pt"
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    payload.pop("observation_dim")
+    torch.save(payload, checkpoint)
+    with pytest.raises(RuntimeError, match="missing observation_dim"):
+        load_run("missing", missing, "cpu")
+
+
 def test_collect_probes_annotates_final_death_cause(monkeypatch, tmp_path):
     loaded = load_run("A", make_checkpoint(tmp_path, "A"), "cpu")
 
@@ -199,6 +252,8 @@ def test_cpu_tiny_audit_is_read_only_restores_rng_and_accepts_missing_death_audi
     assert torch.equal(torch.get_rng_state(), before_rng)
     assert file_sha256(checkpoint) == before_hash
     assert summary["runs"]["A"]["death_audit"]["UAV1"]["boundary_rate"] is None
+    assert summary["shared_probe_global_per_run_agent"] == 2
+    assert summary["shared_probe_count_per_run"] == {"A": 6}
     for name in (
         "probe_manifest.csv", "shared_pairwise_samples.csv", "pairwise_summary.csv",
         "actor_outlier_summary.csv", "conditioned_summary.csv", "healthy_reference.json",
