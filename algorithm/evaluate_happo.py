@@ -64,6 +64,20 @@ def validate_checkpoint_contract(payload: dict[str, Any], env_config: dict[str, 
             checkpoint_gamma, float(env_shaping["gamma"]), rtol=0.0, atol=1e-12,
         ):
             raise RuntimeError("incompatible HAPPO checkpoint shaping gamma")
+    trainer_config = payload.get("trainer_config", payload.get("config", {}))
+    method_variant = payload.get(
+        "method_variant", trainer_config.get("method_variant", "baseline"),
+    )
+    if method_variant in (DBM_RGAA_METHOD, RGAA_WIDE_METHOD):
+        if "environment_config" not in payload:
+            raise RuntimeError(
+                f"{method_variant} checkpoint is missing resolved environment_config"
+            )
+        checkpoint_environment = load_environment_config(payload["environment_config"])
+        if checkpoint_environment != env_config:
+            raise RuntimeError(
+                "evaluation resolved environment config differs from checkpoint"
+            )
 
 
 def main(expected_critic_variant: str = "mlp") -> None:
@@ -154,10 +168,11 @@ def main(expected_critic_variant: str = "mlp") -> None:
         "happo_agp" if method_variant == "agp" else "happo"
     )
     deterministic = args.action_mode == "deterministic"
+    effective_action_seed = None if deterministic else int(args.action_seed)
     records = evaluate_actors(
         actors, env_config, args.episodes, args.profile, seed=1000, device=device,
         deterministic=deterministic,
-        action_seed=None if deterministic else args.action_seed,
+        action_seed=effective_action_seed,
     )
     rows.append({
             "checkpoint": checkpoint.name, "sampled_steps": int(payload.get("sampled_steps", 0)),
@@ -165,8 +180,14 @@ def main(expected_critic_variant: str = "mlp") -> None:
             "method_variant": method_variant,
             "critic_variant": critic_variant,
             "blue_target_strategy": "nearest_red_aircraft", "training_profile": training_profile,
-            "evaluation_profile": args.profile, "episodes": args.episodes,
-            "action_mode": args.action_mode, "action_seed": args.action_seed,
+            "evaluation_profile": args.profile,
+            "evaluation_environment_seed_start": 1000,
+            "episodes": args.episodes, "evaluation_episodes": args.episodes,
+            "training_seed": int(trainer_config.get("seed", 0)),
+            "action_mode": args.action_mode,
+            "configured_action_seed": int(args.action_seed),
+            "effective_action_seed": effective_action_seed,
+            "action_seed": effective_action_seed,
             "environment_version": env_config["environment_version"],
             "reward_mode": reward_mode,
             "reward_shaping_mode": reward_mode if reward_mode not in ROLE_REWARD_MODES else None,
@@ -187,7 +208,13 @@ def main(expected_critic_variant: str = "mlp") -> None:
         json.dump({
             "algorithm": algorithm, "checkpoint": str(checkpoint), "training_profile": training_profile,
             "evaluation_profile": args.profile, "method_variant": method_variant,
-            "action_mode": args.action_mode, "action_seed": args.action_seed,
+            "evaluation_environment_seed_start": 1000,
+            "evaluation_episodes": args.episodes,
+            "training_seed": int(trainer_config.get("seed", 0)),
+            "action_mode": args.action_mode,
+            "configured_action_seed": int(args.action_seed),
+            "effective_action_seed": effective_action_seed,
+            "action_seed": effective_action_seed,
             "environment_version": env_config["environment_version"],
             "reward_mode": reward_mode,
             "reward_shaping_mode": reward_mode if reward_mode not in ROLE_REWARD_MODES else None,

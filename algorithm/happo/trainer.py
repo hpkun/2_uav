@@ -900,7 +900,7 @@ class HAPPOTrainer:
                 "dbm_rgaa_version", "role_module_enabled", "dbm_role_count",
                 "dbm_residual_scale", "dbm_init_scale",
                 "dbm_initialization_semantics", "dbm_actor_semantics", "dbm_module_seeds",
-                "dbm_diagnostics_version",
+                "dbm_diagnostics_version", "dbm_diagnostics_source",
             ):
                 if data.get(field) != expected[field]:
                     raise RuntimeError(f"incompatible DBM-RGAA checkpoint contract: {field}")
@@ -2226,7 +2226,7 @@ class HAPPOTrainer:
 
     def save(self, path: str | Path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        payload = {"environment_version": self.environment_config["environment_version"], "environment_profile": self.config["environment_profile"], "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM, "actor_variant": self.config["actor_variant"], "critic_variant": self.config["critic_variant"], "method_variant": self.config["method_variant"], "reward_mode": self.reward_mode, "reward_shaping_mode": self.reward_shaping_mode if self.reward_mode not in ROLE_REWARD_MODES else None, "shaping_gamma": self.shaping_gamma if self.reward_mode not in ROLE_REWARD_MODES else None, "training_gamma": float(self.config["gamma"]), "actor_architecture": self.actor_architecture, "actor_parameter_counts": self.actor_parameter_counts, "critic_architecture": self.critic_architecture, "critic_parameter_count": self.critic_parameter_count, "actors": self.actors.state_dict(), "critic": self.critic.state_dict(), "config": self.config}
+        payload = {"environment_version": self.environment_config["environment_version"], "environment_profile": self.config["environment_profile"], "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM, "actor_variant": self.config["actor_variant"], "critic_variant": self.config["critic_variant"], "method_variant": self.config["method_variant"], "reward_mode": self.reward_mode, "reward_shaping_mode": self.reward_shaping_mode if self.reward_mode not in ROLE_REWARD_MODES else None, "shaping_gamma": self.shaping_gamma if self.reward_mode not in ROLE_REWARD_MODES else None, "training_gamma": float(self.config["gamma"]), "actor_architecture": self.actor_architecture, "actor_parameter_counts": self.actor_parameter_counts, "critic_architecture": self.critic_architecture, "critic_parameter_count": self.critic_parameter_count, "environment_config": deepcopy(self.environment_config), "actors": self.actors.state_dict(), "critic": self.critic.state_dict(), "config": self.config}
         payload.update(self.pcta_metadata)
         payload.update(self.credit_metadata)
         payload.update(self.tam_metadata)

@@ -26,6 +26,7 @@ DBM_INIT_SCALE = DBM_EXPERT_INIT_SCALE
 DBM_INITIALIZATION_SEMANTICS = "zero_router_antisymmetric_experts_v1"
 DBM_ACTOR_SEMANTICS = "vanilla_mean_plus_private_two_mode_bounded_residual_v1"
 DBM_DIAGNOSTICS_VERSION = 1
+DBM_DIAGNOSTICS_SOURCE = "post_update_policy_on_collected_rollout_v1"
 RGAA_WIDE_UAV_HIDDEN_DIM = 131
 
 
@@ -204,6 +205,7 @@ def dbm_metadata(config: Mapping[str, Any]) -> dict[str, Any]:
             if enabled else {}
         ),
         "dbm_diagnostics_version": DBM_DIAGNOSTICS_VERSION,
+        "dbm_diagnostics_source": DBM_DIAGNOSTICS_SOURCE,
     }
 
 

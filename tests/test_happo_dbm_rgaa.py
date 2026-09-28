@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
+import csv
+import json
 import subprocess
 import sys
 
@@ -16,6 +18,8 @@ from algorithm.happo.dbm_rgaa import (
 )
 from algorithm.happo.rgaa import RoleAdvantageRolloutBuffer
 from algorithm.happo.trainer import HAPPOTrainer
+import algorithm.train_happo as train_entrypoint
+from algorithm.evaluate_happo import validate_checkpoint_contract
 from algorithm.train_happo import _algorithm_name
 from env.mavuav import RED_IDS, load_environment_config
 
@@ -399,6 +403,9 @@ def test_dbm_metadata_parameter_counts_and_algorithm_identity():
     try:
         assert _algorithm_name("vanilla", DBM_RGAA_METHOD, "mlp") == "dbm_rgaa_happo"
         assert trainer.dbm_metadata["dbm_initialization_semantics"] == DBM_INITIALIZATION_SEMANTICS
+        assert trainer.dbm_metadata["dbm_diagnostics_source"] == (
+            "post_update_policy_on_collected_rollout_v1"
+        )
         state = trainer.checkpoint_state()
         assert state["algorithm"] == "dbm_rgaa_happo"
         assert state["actor_parameter_counts"]["total"] == 122416
@@ -583,6 +590,101 @@ def test_standalone_evaluator_reconstructs_actor_from_checkpoint_metadata(tmp_pa
     )
     assert result.returncode == 0, result.stderr
     assert (tmp_path / f"evaluation_{method}_stochastic_summary.json").exists()
+
+
+@pytest.mark.parametrize("method", [DBM_RGAA_METHOD, RGAA_WIDE_METHOD])
+def test_dbm_and_wide_require_identical_resolved_evaluation_environment(method):
+    trainer = HAPPOTrainer(short_v39(), trainer_config(method=method))
+    try:
+        payload = trainer.checkpoint_state()
+        validate_checkpoint_contract(payload, deepcopy(trainer.environment_config))
+        changed = deepcopy(trainer.environment_config)
+        changed["simulation"]["max_decision_steps"] += 1
+        with pytest.raises(
+            RuntimeError,
+            match="evaluation resolved environment config differs from checkpoint",
+        ):
+            validate_checkpoint_contract(payload, changed)
+        missing = deepcopy(payload)
+        missing.pop("environment_config")
+        with pytest.raises(RuntimeError, match="missing resolved environment_config"):
+            validate_checkpoint_contract(missing, deepcopy(trainer.environment_config))
+    finally:
+        trainer.close()
+
+
+def test_environment_rejection_precedes_rollout_and_output_creation(tmp_path):
+    trainer = HAPPOTrainer(short_v39(), trainer_config())
+    checkpoint = tmp_path / "checkpoint_final.pt"
+    try:
+        trainer.save_checkpoint(checkpoint)
+        changed = deepcopy(trainer.environment_config)
+    finally:
+        trainer.close()
+    changed["simulation"]["max_decision_steps"] += 1
+    changed_path = tmp_path / "changed_env.yaml"
+    changed_path.write_text(yaml.safe_dump(changed, sort_keys=False), encoding="utf-8")
+    result = subprocess.run(
+        [
+            sys.executable, "algorithm/evaluate_happo.py", str(checkpoint),
+            "--profile", "learnability", "--episodes", "1", "--device", "cpu",
+            "--env-config", str(changed_path), "--action-mode", "stochastic",
+        ],
+        cwd=ROOT, text=True, capture_output=True,
+    )
+    assert result.returncode != 0
+    assert "evaluation resolved environment config differs from checkpoint" in result.stderr
+    assert not (tmp_path / "evaluation_final_stochastic.csv").exists()
+    assert not (tmp_path / "evaluation_final_stochastic_summary.json").exists()
+
+
+def test_tiny_training_outputs_complete_stochastic_evaluation_protocol(tmp_path, monkeypatch):
+    env = short_v39()
+    env["simulation"]["max_decision_steps"] = 1
+    env_path = tmp_path / "env.yaml"
+    env_path.write_text(yaml.safe_dump(env, sort_keys=False), encoding="utf-8")
+    monkeypatch.setattr(train_entrypoint, "OUTPUT_ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", [
+        "train_dbm_rgaa.py", "--steps", "1", "--profile", "learnability",
+        "--seed", "3", "--device", "cpu", "--num-envs", "1",
+        "--config", str(ROOT / "configs/happo_dbm_rgaa_v39.yaml"),
+        "--env-config", str(env_path), "--output-name", "tiny_dbm_protocol",
+        "--checkpoint-interval", "0", "--eval-interval", "0",
+        "--log-interval", "0", "--final-eval-episodes", "1",
+        "--eval-action-mode", "stochastic", "--eval-action-seed", "2000",
+    ])
+    train_entrypoint.main(
+        actor_variant="vanilla", method_variant=DBM_RGAA_METHOD, critic_variant="mlp",
+    )
+    run_dir = tmp_path / "tiny_dbm_protocol"
+    resolved = yaml.safe_load((run_dir / "resolved_config.yaml").read_text(encoding="utf-8"))
+    summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+    with (run_dir / "evaluations.csv").open(encoding="utf-8", newline="") as stream:
+        row = list(csv.DictReader(stream))[0]
+    assert resolved["evaluation_action_mode"] == "stochastic"
+    assert resolved["evaluation_configured_action_seed"] == 2000
+    assert resolved["evaluation_effective_action_seed"] == 2000
+    assert resolved["evaluation_environment_seed_start"] == 1000
+    assert resolved["dbm_diagnostics_source"] == "post_update_policy_on_collected_rollout_v1"
+    assert summary["evaluation_action_mode"] == "stochastic"
+    assert summary["final_evaluations"][0]["action_mode"] == "stochastic"
+    assert summary["final_evaluations"][0]["effective_action_seed"] == 2000
+    assert summary["dbm_diagnostics_source"] == "post_update_policy_on_collected_rollout_v1"
+    assert row["training_seed"] == "3"
+    assert row["evaluation_environment_seed_start"] == "1000"
+    assert row["evaluation_episodes"] == "1"
+    assert row["action_mode"] == "stochastic"
+    assert row["configured_action_seed"] == row["effective_action_seed"] == "2000"
+    run_log = (run_dir / "run.log").read_text(encoding="utf-8")
+    assert "Evaluation action mode: stochastic" in run_log
+    assert "DBM diagnostics source: post_update_policy_on_collected_rollout_v1" in run_log
+
+
+def test_resume_rejects_legacy_evaluation_csv_schema(tmp_path):
+    path = tmp_path / "evaluations.csv"
+    path.write_text("sampled_steps,red_win_rate\n1,0.0\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="existing evaluation CSV schema"):
+        train_entrypoint._validate_existing_evaluation_schema(path)
 
 
 def test_dbm_and_wide_configs_are_single_variable_extensions_of_rgaa():

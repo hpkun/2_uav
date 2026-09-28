@@ -9,6 +9,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import argparse
+from contextlib import contextmanager
 import csv
 from datetime import datetime
 import json
@@ -284,6 +285,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-interval", type=int, default=100_000)
     parser.add_argument("--eval-episodes", type=int, default=50)
     parser.add_argument("--final-eval-episodes", type=int, default=100)
+    parser.add_argument(
+        "--eval-action-mode", choices=("deterministic", "stochastic"),
+        default="deterministic",
+    )
+    parser.add_argument("--eval-action-seed", type=int, default=2000)
     parser.add_argument("--resume", type=Path)
     return parser.parse_args()
 
@@ -337,11 +343,23 @@ def _new_run_dir(args: argparse.Namespace) -> Path:
     return run_dir
 
 
-def _append_csv(path: Path, row: Mapping[str, Any], fields: tuple[str, ...] | None = None) -> None:
+def _append_csv(
+    path: Path,
+    row: Mapping[str, Any],
+    fields: tuple[str, ...] | None = None,
+    *,
+    strict_schema: bool = False,
+) -> None:
     exists = path.exists() and path.stat().st_size > 0
     if exists:
         with path.open(encoding="utf-8", newline="") as stream:
             fieldnames = next(csv.reader(stream))
+        expected = list(fields or row.keys())
+        if strict_schema and fieldnames != expected:
+            raise RuntimeError(
+                "existing evaluation CSV schema is incompatible with the current "
+                "evaluation protocol; refusing to append"
+            )
     else:
         fieldnames = list(fields or row.keys())
     with path.open("a", encoding="utf-8", newline="") as stream:
@@ -388,19 +406,42 @@ def _episode_metrics(records: list[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
+@contextmanager
+def _isolated_evaluation_rng():
+    """Restore training RNG bytes exactly even when evaluation raises."""
+    torch_state = torch.get_rng_state().clone()
+    cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    numpy_state = np.random.get_state()
+    try:
+        yield
+    finally:
+        torch.set_rng_state(torch_state)
+        if cuda_states is not None:
+            torch.cuda.set_rng_state_all([state.detach().cpu() for state in cuda_states])
+        np.random.set_state(numpy_state)
+
+
 def _evaluation_row(
     trainer: HAPPOTrainer,
     episodes: int,
     profile: str,
     seed: int,
     device: str,
+    action_mode: str = "deterministic",
+    action_seed: int = 2000,
 ) -> dict[str, Any]:
+    if action_mode not in ("deterministic", "stochastic"):
+        raise ValueError("action_mode must be 'deterministic' or 'stochastic'")
     evaluator = evaluate_recurrent_actors if trainer.is_recurrent else evaluate_actors
     evaluation_kwargs = {"inactive_mask": True} if trainer.is_tam else {}
-    records = evaluator(
-        trainer.actors, trainer.environment_config, episodes, profile, seed=1000, device=device,
-        **evaluation_kwargs,
-    )
+    deterministic = action_mode == "deterministic"
+    effective_action_seed = None if deterministic else int(action_seed)
+    with _isolated_evaluation_rng():
+        records = evaluator(
+            trainer.actors, trainer.environment_config, episodes, profile,
+            seed=1000, device=device, deterministic=deterministic,
+            action_seed=effective_action_seed, **evaluation_kwargs,
+        )
     return {
         "sampled_steps": trainer.env_steps,
         "algorithm": _algorithm_name(
@@ -413,9 +454,16 @@ def _evaluation_row(
         "reward_shaping_mode": trainer.reward_shaping_mode if trainer.reward_mode not in ROLE_REWARD_MODES else None,
         "shaping_gamma": trainer.shaping_gamma if trainer.reward_mode not in ROLE_REWARD_MODES else None,
         "training_gamma": float(trainer.config["gamma"]),
-        "seed": seed,
+        "seed": seed, "training_seed": seed,
         "blue_target_strategy": "nearest_red_aircraft", "training_profile": trainer.config["environment_profile"],
-        "evaluation_profile": profile, "episodes": episodes, **summarize_records(records),
+        "evaluation_profile": profile,
+        "evaluation_environment_seed_start": 1000,
+        "episodes": episodes, "evaluation_episodes": episodes,
+        "action_mode": action_mode,
+        "configured_action_seed": int(action_seed),
+        "effective_action_seed": effective_action_seed,
+        "action_seed": effective_action_seed,
+        **summarize_records(records),
     }
 
 
@@ -425,6 +473,25 @@ def _last_completed_episodes(path: Path) -> int:
     with path.open(encoding="utf-8", newline="") as stream:
         rows = list(csv.DictReader(stream))
     return int(float(rows[-1]["completed_episodes"])) if rows else 0
+
+
+def _validate_existing_evaluation_schema(path: Path) -> None:
+    """Fail before resumed training if an old evaluation CSV cannot accept protocol metadata."""
+    if not path.exists() or path.stat().st_size == 0:
+        return
+    with path.open(encoding="utf-8", newline="") as stream:
+        fields = set(next(csv.reader(stream)))
+    required = {
+        "sampled_steps", "training_seed", "evaluation_profile",
+        "evaluation_environment_seed_start", "evaluation_episodes", "action_mode",
+        "configured_action_seed", "effective_action_seed", "action_seed", "method_variant",
+    }
+    missing = sorted(required - fields)
+    if missing:
+        raise RuntimeError(
+            "existing evaluation CSV schema is incompatible with the current evaluation "
+            f"protocol; missing fields: {missing}"
+        )
 
 
 def _duration(seconds: float | None) -> str:
@@ -585,6 +652,12 @@ def _initial_resolved(
         "checkpoint_interval": args.checkpoint_interval, "evaluation_interval": args.eval_interval,
         "log_interval": args.log_interval, "evaluation_episodes": args.eval_episodes,
         "final_evaluation_episodes": args.final_eval_episodes, "resume_history": [],
+        "evaluation_action_mode": args.eval_action_mode,
+        "evaluation_configured_action_seed": int(args.eval_action_seed),
+        "evaluation_effective_action_seed": (
+            int(args.eval_action_seed) if args.eval_action_mode == "stochastic" else None
+        ),
+        "evaluation_environment_seed_start": 1000,
         **trainer.pcta_metadata,
         **trainer.credit_metadata,
         **trainer.tam_metadata,
@@ -615,6 +688,16 @@ def _write_resolved_config(
                 resolved = yaml.safe_load(stream) or {}
         else:
             resolved = _initial_resolved(args, env_config, trainer, device, fallback)
+        resolved.update({
+            "evaluation_action_mode": args.eval_action_mode,
+            "evaluation_configured_action_seed": int(args.eval_action_seed),
+            "evaluation_effective_action_seed": (
+                int(args.eval_action_seed) if args.eval_action_mode == "stochastic" else None
+            ),
+            "evaluation_environment_seed_start": 1000,
+            "evaluation_episodes": args.eval_episodes,
+            "final_evaluation_episodes": args.final_eval_episodes,
+        })
         history = resolved.setdefault("resume_history", [])
         history.append({
             "timestamp": datetime.now().isoformat(timespec="seconds"),
@@ -626,6 +709,11 @@ def _write_resolved_config(
             "checkpoint_interval": int(args.checkpoint_interval),
             "evaluation_interval": int(args.eval_interval),
             "log_interval": int(args.log_interval),
+            "evaluation_action_mode": args.eval_action_mode,
+            "evaluation_configured_action_seed": int(args.eval_action_seed),
+            "evaluation_effective_action_seed": (
+                int(args.eval_action_seed) if args.eval_action_mode == "stochastic" else None
+            ),
         })
     with path.open("w", encoding="utf-8") as stream:
         yaml.safe_dump(resolved, stream, sort_keys=False, allow_unicode=True)
@@ -670,6 +758,7 @@ def main(
         resumed_steps: int | None = None
         if args.resume:
             resumed_steps = trainer.load_checkpoint(args.resume.expanduser().resolve())
+            _validate_existing_evaluation_schema(run_dir / "evaluations.csv")
         if trainer.env_steps >= args.steps:
             raise ValueError(f"target steps {args.steps} must exceed current checkpoint steps {trainer.env_steps}")
         _write_resolved_config(
@@ -694,6 +783,12 @@ def main(
             f"Rollout: {trainer.config['rollout_steps']}", f"Target steps: {args.steps:,}",
             f"Checkpoint interval: {_interval_text(args.checkpoint_interval)}",
             f"Evaluation interval: {_interval_text(args.eval_interval)}",
+            f"Evaluation action mode: {args.eval_action_mode}",
+            f"Evaluation environment seed start: 1000",
+            "Evaluation action seed: " + (
+                str(args.eval_action_seed) if args.eval_action_mode == "stochastic"
+                else f"unused (configured {args.eval_action_seed})"
+            ),
             f"Log interval: {_interval_text(args.log_interval)}",
         ]
         if resumed_steps is not None:
@@ -716,6 +811,11 @@ def main(
                 f"{int(trainer.config['cr_rgaa_attention_heads'])} heads / "
                 f"dim {int(trainer.config['cr_rgaa_relational_dim'])}",
             ])
+        if method_variant == DBM_RGAA_METHOD:
+            start_lines.append(
+                "DBM diagnostics source: "
+                f"{trainer.dbm_metadata['dbm_diagnostics_source']}"
+            )
         if fallback:
             start_lines.append(f"Device fallback: {fallback}")
         start_lines.append(separator)
@@ -801,9 +901,13 @@ def main(
             if crossed_evaluations and trainer.env_steps < args.steps:
                 eval_row = _evaluation_row(
                     trainer, args.eval_episodes, args.profile, args.seed, device,
+                    args.eval_action_mode, args.eval_action_seed,
                 )
                 evaluation_fields = evaluation_fields or tuple(eval_row.keys())
-                _append_csv(run_dir / "evaluations.csv", eval_row, evaluation_fields)
+                _append_csv(
+                    run_dir / "evaluations.csv", eval_row, evaluation_fields,
+                    strict_schema=True,
+                )
                 log(_evaluation_lines("EVAL", eval_row))
 
         trainer.buffer = trainer.make_buffer(configured_horizon)
@@ -816,9 +920,13 @@ def main(
         final_evaluation_started = time.perf_counter()
         eval_row = _evaluation_row(
             trainer, args.final_eval_episodes, args.profile, args.seed, device,
+            args.eval_action_mode, args.eval_action_seed,
         )
         evaluation_fields = evaluation_fields or tuple(eval_row.keys())
-        _append_csv(run_dir / "evaluations.csv", eval_row, evaluation_fields)
+        _append_csv(
+            run_dir / "evaluations.csv", eval_row, evaluation_fields,
+            strict_schema=True,
+        )
         final_rows = [eval_row]
         log(_evaluation_lines("FINAL EVAL", eval_row))
         final_evaluation_elapsed = time.perf_counter() - final_evaluation_started
@@ -843,6 +951,12 @@ def main(
             "status": "complete", "sampled_steps": trainer.env_steps,
             "training_profile": args.profile, "seed": args.seed, "device": device,
             "num_envs": args.num_envs, "completed_episodes": completed,
+            "evaluation_action_mode": args.eval_action_mode,
+            "evaluation_configured_action_seed": int(args.eval_action_seed),
+            "evaluation_effective_action_seed": (
+                int(args.eval_action_seed) if args.eval_action_mode == "stochastic" else None
+            ),
+            "evaluation_environment_seed_start": 1000,
             "training_elapsed_seconds": training_elapsed,
             "final_evaluation_elapsed_seconds": final_evaluation_elapsed,
             "final_evaluations": final_rows, "checkpoint_final": "checkpoint_final.pt",
