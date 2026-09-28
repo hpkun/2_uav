@@ -14,8 +14,11 @@ class GaussianActor(nn.Module):
         self.log_std = nn.Parameter(torch.full((action_dim,), float(log_std_init)))
         self.epsilon = 1e-6
 
+    def _mean(self, observations: torch.Tensor) -> torch.Tensor:
+        return self.network(observations)
+
     def _distribution(self, observations: torch.Tensor) -> Normal:
-        return Normal(self.network(observations), self.log_std.clamp(-5.0, 2.0).exp())
+        return Normal(self._mean(observations), self.log_std.clamp(-5.0, 2.0).exp())
 
     def sample(self, observations: torch.Tensor, deterministic: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
         distribution = self._distribution(observations)

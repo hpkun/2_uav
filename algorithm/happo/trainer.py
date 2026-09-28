@@ -50,6 +50,12 @@ from .lsa_rgaa import (
     LSA_CREDIT_SEMANTICS, LSA_RGAA_METHOD, LSA_RGAA_VERSION,
     compute_loss_advantage,
 )
+from .dbm_rgaa import (
+    DBM_DIAGNOSTICS_VERSION, DBM_EXPERT_INIT_SCALE, DBM_INITIALIZATION_SEMANTICS,
+    DBM_RESIDUAL_SCALE, DBM_RGAA_METHOD, DBM_ROLE_COUNT, RGAA_WIDE_METHOD,
+    RGAA_WIDE_UAV_HIDDEN_DIM, build_method_actors, dbm_metadata,
+    dbm_rollout_diagnostics, wide_metadata,
+)
 
 
 DEFAULTS = {
@@ -62,6 +68,12 @@ DEFAULTS = {
     "agp_lambda": 0.5,
     "role_advantage_coef": 0.5,
     "role_aux_reward_mode": ROLE_AUX_REWARD_MODE,
+    "role_module_enabled": True,
+    "dbm_role_count": DBM_ROLE_COUNT,
+    "dbm_residual_scale": DBM_RESIDUAL_SCALE,
+    "dbm_init_scale": DBM_EXPERT_INIT_SCALE,
+    "dbm_initialization_semantics": DBM_INITIALIZATION_SEMANTICS,
+    "uav_actor_hidden_dim": RGAA_WIDE_UAV_HIDDEN_DIM,
     "ls_auxiliary_semantics": LS_AUXILIARY_SEMANTICS,
     "lsa_credit_semantics": LSA_CREDIT_SEMANTICS,
     "cr_rgaa_relational_dim": 64, "cr_rgaa_attention_heads": 4,
@@ -102,6 +114,11 @@ CR_RGAA_RESUME_CONFIG_FIELDS = (
     "role_advantage_coef", "role_aux_reward_mode", "cr_rgaa_relational_dim",
     "cr_rgaa_attention_heads", "cr_rgaa_relational_value_coef", "cr_rgaa_gate_beta",
     "cr_rgaa_lambda_floor_ratio",
+)
+
+DBM_RESUME_CONFIG_FIELDS = (
+    "role_module_enabled", "dbm_role_count", "dbm_residual_scale",
+    "dbm_init_scale", "dbm_initialization_semantics",
 )
 
 
@@ -145,7 +162,8 @@ class HAPPOTrainer:
         if c["environment_profile"] not in ("learnability", "main"):
             raise ValueError("environment_profile must be 'learnability' or 'main'")
         if c["method_variant"] not in (
-            "baseline", "agp", RGAA_METHOD, CR_RGAA_METHOD, LP_CR_RGAA_METHOD,
+            "baseline", "agp", RGAA_METHOD, DBM_RGAA_METHOD, RGAA_WIDE_METHOD,
+            CR_RGAA_METHOD, LP_CR_RGAA_METHOD,
             LS_RGAA_METHOD, LSA_RGAA_METHOD, *CREDIT_METHODS,
         ):
             raise ValueError("invalid method_variant")
@@ -163,7 +181,12 @@ class HAPPOTrainer:
             raise ValueError("TAM critic currently requires tam_value_loss_type='huber'")
         self.agp_enabled = c["method_variant"] == "agp"
         self.credit_enabled = c["method_variant"] in CREDIT_METHODS
-        self.rgaa_enabled = c["method_variant"] == RGAA_METHOD
+        self.dbm_enabled = c["method_variant"] == DBM_RGAA_METHOD
+        self.dbm_rgaa_enabled = self.dbm_enabled
+        self.rgaa_wide_enabled = c["method_variant"] == RGAA_WIDE_METHOD
+        self.rgaa_enabled = c["method_variant"] in (
+            RGAA_METHOD, DBM_RGAA_METHOD, RGAA_WIDE_METHOD,
+        )
         self.cr_rgaa_enabled = c["method_variant"] == CR_RGAA_METHOD
         self.lp_cr_rgaa_enabled = c["method_variant"] == LP_CR_RGAA_METHOD
         self.ls_rgaa_enabled = c["method_variant"] == LS_RGAA_METHOD
@@ -231,6 +254,17 @@ class HAPPOTrainer:
             raise ValueError(
                 f"RGAA role_aux_reward_mode must be {ROLE_AUX_REWARD_MODE!r}"
             )
+        if self.dbm_rgaa_enabled:
+            if int(c["dbm_role_count"]) != DBM_ROLE_COUNT:
+                raise ValueError(f"DBM-RGAA-v1 requires dbm_role_count={DBM_ROLE_COUNT}")
+            if float(c["dbm_residual_scale"]) < 0.0:
+                raise ValueError("dbm_residual_scale cannot be negative")
+            if float(c["dbm_init_scale"]) <= 0.0:
+                raise ValueError("dbm_init_scale must be positive")
+            if c["dbm_initialization_semantics"] != DBM_INITIALIZATION_SEMANTICS:
+                raise ValueError("unsupported DBM initialization semantics")
+        if self.rgaa_wide_enabled and int(c["uav_actor_hidden_dim"]) <= 0:
+            raise ValueError("uav_actor_hidden_dim must be positive")
         if self.loss_separated_enabled and c["ls_auxiliary_semantics"] != LS_AUXILIARY_SEMANTICS:
             raise ValueError(
                 f"LS/LSA-RGAA ls_auxiliary_semantics must be {LS_AUXILIARY_SEMANTICS!r}"
@@ -259,7 +293,21 @@ class HAPPOTrainer:
         self.vector_env = MAVUAVVectorEnv(
             int(c["num_envs"]), self.environment_config, seed=int(c["seed"]), profile=c["environment_profile"],
         )
-        if c["actor_variant"] == "vanilla":
+        if c["actor_variant"] == "vanilla" and c["method_variant"] in (
+            DBM_RGAA_METHOD, RGAA_WIDE_METHOD,
+        ):
+            self.actors = build_method_actors(
+                method_variant=str(c["method_variant"]),
+                training_seed=int(c["seed"]),
+                hidden_dim=int(c["hidden_dim"]),
+                log_std_init=float(c["actor_log_std_init"]),
+                role_module_enabled=bool(c["role_module_enabled"]),
+                dbm_role_count=int(c["dbm_role_count"]),
+                dbm_residual_scale=float(c["dbm_residual_scale"]),
+                dbm_expert_init_scale=float(c["dbm_init_scale"]),
+                uav_actor_hidden_dim=int(c["uav_actor_hidden_dim"]),
+            ).to(self.device)
+        elif c["actor_variant"] == "vanilla":
             self.actors = IndependentActors(
                 hidden_dim=int(c["hidden_dim"]),
                 log_std_init=float(c["actor_log_std_init"]),
@@ -441,6 +489,51 @@ class HAPPOTrainer:
 
     @property
     def actor_architecture(self) -> dict[str, Any]:
+        if self.dbm_rgaa_enabled:
+            mav_architecture = {
+                "type": "gaussian_mlp", "observation_dim": OBS_DIM,
+                "hidden_layers": [int(self.config["hidden_dim"])] * 2, "action_dim": 3,
+            }
+            uav_architecture = (
+                {
+                    "type": "dbm_gaussian_mlp", "observation_dim": OBS_DIM,
+                    "base_hidden_layers": [int(self.config["hidden_dim"])] * 2,
+                    "base_action_head": [int(self.config["hidden_dim"]), 3],
+                    "router": [int(self.config["hidden_dim"]), int(self.config["dbm_role_count"])],
+                    "experts": [[int(self.config["hidden_dim"]), 3]] * int(self.config["dbm_role_count"]),
+                    "residual_scale": float(self.config["dbm_residual_scale"]),
+                    "initialization_scale": float(self.config["dbm_init_scale"]),
+                    "initialization_semantics": self.config["dbm_initialization_semantics"],
+                    "private_per_uav": True,
+                }
+                if bool(self.config["role_module_enabled"])
+                else mav_architecture
+            )
+            return {
+                "observation_dim": OBS_DIM, "action_dim": 3,
+                "mav_actor": mav_architecture, "uav_actor": uav_architecture,
+                "per_agent": {"MAV": mav_architecture, **{
+                    aid: uav_architecture for aid in RED_IDS[1:]
+                }},
+                "role_module_enabled": bool(self.config["role_module_enabled"]),
+            }
+        if self.rgaa_wide_enabled:
+            mav_architecture = {
+                "type": "gaussian_mlp", "observation_dim": OBS_DIM,
+                "hidden_layers": [int(self.config["hidden_dim"])] * 2, "action_dim": 3,
+            }
+            uav_architecture = {
+                "type": "gaussian_mlp", "observation_dim": OBS_DIM,
+                "hidden_layers": [int(self.config["uav_actor_hidden_dim"])] * 2,
+                "action_dim": 3, "private_per_uav": True,
+            }
+            return {
+                "observation_dim": OBS_DIM, "action_dim": 3,
+                "mav_actor": mav_architecture, "uav_actor": uav_architecture,
+                "per_agent": {"MAV": mav_architecture, **{
+                    aid: uav_architecture for aid in RED_IDS[1:]
+                }},
+            }
         if self.config["actor_variant"] == PCTA_V2_VARIANT:
             return {
                 "observation_dim": OBS_DIM, "raw_observation_dim": OBS_DIM,
@@ -607,6 +700,14 @@ class HAPPOTrainer:
         }
 
     @property
+    def dbm_metadata(self) -> dict[str, Any]:
+        return dbm_metadata(self.config)
+
+    @property
+    def rgaa_wide_metadata(self) -> dict[str, Any]:
+        return wide_metadata(self.config)
+
+    @property
     def cr_rgaa_metadata(self) -> dict[str, Any]:
         if not self.cr_rgaa_enabled:
             return {}
@@ -763,7 +864,10 @@ class HAPPOTrainer:
         if checkpoint_variant == "pcta" and checkpoint_architecture is not None:
             checkpoint_architecture = dict(checkpoint_architecture)
             checkpoint_architecture.setdefault("attention_mode", "learned")
-        if checkpoint_variant in ("hrta", "structured_uniform", "recurrent", "tam", *PCTA_FAMILY) and checkpoint_architecture != self.actor_architecture:
+        strict_method_architecture = self.config["method_variant"] in (
+            DBM_RGAA_METHOD, RGAA_WIDE_METHOD,
+        )
+        if (checkpoint_variant in ("hrta", "structured_uniform", "recurrent", "tam", *PCTA_FAMILY) or strict_method_architecture) and checkpoint_architecture != self.actor_architecture:
             raise RuntimeError(
                 f"incompatible actor architecture: checkpoint={checkpoint_architecture!r} "
                 f"current={self.actor_architecture!r}"
@@ -788,6 +892,26 @@ class HAPPOTrainer:
                 f"incompatible critic architecture: checkpoint={checkpoint_architecture!r} "
                 f"current={self.critic_architecture!r}"
             )
+
+    def _validate_rgaa_actor_method_contract(self, data: Mapping[str, Any]) -> None:
+        if self.dbm_rgaa_enabled:
+            expected = self.dbm_metadata
+            for field in (
+                "dbm_rgaa_version", "role_module_enabled", "dbm_role_count",
+                "dbm_residual_scale", "dbm_init_scale",
+                "dbm_initialization_semantics", "dbm_actor_semantics", "dbm_module_seeds",
+                "dbm_diagnostics_version",
+            ):
+                if data.get(field) != expected[field]:
+                    raise RuntimeError(f"incompatible DBM-RGAA checkpoint contract: {field}")
+        if self.rgaa_wide_enabled:
+            expected = self.rgaa_wide_metadata
+            for field in (
+                "rgaa_wide_version", "mav_actor_hidden_dim", "uav_actor_hidden_dim",
+                "uav_actor_initialization_seeds",
+            ):
+                if data.get(field) != expected[field]:
+                    raise RuntimeError(f"incompatible RGAA-Wide checkpoint contract: {field}")
 
     def collect_rollout(self) -> list[dict[str, Any]]:
         if self.is_recurrent:
@@ -1896,6 +2020,15 @@ class HAPPOTrainer:
                         float(lambdas[team_negative_role_positive].mean().item())
                         if team_negative_role_positive.any() else 0.0
                     )
+        if self.dbm_rgaa_enabled and bool(c["role_module_enabled"]):
+            with torch.no_grad():
+                rgaa_metrics.update(dbm_rollout_diagnostics(
+                    self.actors,
+                    torch.as_tensor(self.buffer.observations, device=self.device),
+                    torch.as_tensor(self.buffer.active_masks, device=self.device),
+                    torch.as_tensor(self.buffer.terminated, device=self.device),
+                    torch.as_tensor(self.buffer.truncated, device=self.device),
+                ))
         metrics: dict[str, Any] = {f"actor_{i}_loss": float(np.mean(actor_losses[i])) if actor_losses[i] else 0.0 for i in range(num_agents)}
         metrics.update({"actor_loss": float(np.mean([v for rows in actor_losses for v in rows])), "critic_loss": float(np.mean(critic_losses)), "entropy": float(np.mean(entropies)), "agent_update_order": order})
         metrics.update(credit_metrics)
@@ -2093,17 +2226,22 @@ class HAPPOTrainer:
 
     def save(self, path: str | Path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        payload = {"environment_version": self.environment_config["environment_version"], "environment_profile": self.config["environment_profile"], "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM, "actor_variant": self.config["actor_variant"], "critic_variant": self.config["critic_variant"], "method_variant": self.config["method_variant"], "reward_mode": self.reward_mode, "reward_shaping_mode": self.reward_shaping_mode if self.reward_mode not in ROLE_REWARD_MODES else None, "shaping_gamma": self.shaping_gamma if self.reward_mode not in ROLE_REWARD_MODES else None, "training_gamma": float(self.config["gamma"]), "actor_architecture": self.actor_architecture, "critic_architecture": self.critic_architecture, "critic_parameter_count": self.critic_parameter_count, "actors": self.actors.state_dict(), "critic": self.critic.state_dict(), "config": self.config}
+        payload = {"environment_version": self.environment_config["environment_version"], "environment_profile": self.config["environment_profile"], "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM, "actor_variant": self.config["actor_variant"], "critic_variant": self.config["critic_variant"], "method_variant": self.config["method_variant"], "reward_mode": self.reward_mode, "reward_shaping_mode": self.reward_shaping_mode if self.reward_mode not in ROLE_REWARD_MODES else None, "shaping_gamma": self.shaping_gamma if self.reward_mode not in ROLE_REWARD_MODES else None, "training_gamma": float(self.config["gamma"]), "actor_architecture": self.actor_architecture, "actor_parameter_counts": self.actor_parameter_counts, "critic_architecture": self.critic_architecture, "critic_parameter_count": self.critic_parameter_count, "actors": self.actors.state_dict(), "critic": self.critic.state_dict(), "config": self.config}
         payload.update(self.pcta_metadata)
         payload.update(self.credit_metadata)
         payload.update(self.tam_metadata)
         payload.update(self.rgaa_metadata)
+        payload.update(self.dbm_metadata)
+        payload.update(self.rgaa_wide_metadata)
         payload.update(self.cr_rgaa_metadata)
         payload.update(self.lp_cr_rgaa_metadata)
         payload.update(self.ls_rgaa_metadata)
         payload.update(self.lsa_rgaa_metadata)
         if self.rgaa_enabled:
-            payload["algorithm"] = "rgaa_happo"
+            payload["algorithm"] = (
+                "dbm_rgaa_happo" if self.dbm_rgaa_enabled else
+                "rgaa_wide_happo" if self.rgaa_wide_enabled else "rgaa_happo"
+            )
             payload["base_algorithm"] = "happo"
         if self.cr_rgaa_enabled:
             payload["algorithm"] = "cr_rgaa_happo"
@@ -2157,6 +2295,7 @@ class HAPPOTrainer:
             "training_gamma": float(self.config["gamma"]),
             "agp_lambda": float(self.config["agp_lambda"]),
             "actor_architecture": self.actor_architecture,
+            "actor_parameter_counts": self.actor_parameter_counts,
             "critic_architecture": self.critic_architecture,
             "critic_parameter_count": self.critic_parameter_count,
             "environment_config": deepcopy(self.environment_config),
@@ -2181,12 +2320,17 @@ class HAPPOTrainer:
         state.update(self.credit_metadata)
         state.update(self.tam_metadata)
         state.update(self.rgaa_metadata)
+        state.update(self.dbm_metadata)
+        state.update(self.rgaa_wide_metadata)
         state.update(self.cr_rgaa_metadata)
         state.update(self.lp_cr_rgaa_metadata)
         state.update(self.ls_rgaa_metadata)
         state.update(self.lsa_rgaa_metadata)
         if self.rgaa_enabled:
-            state["algorithm"] = "rgaa_happo"
+            state["algorithm"] = (
+                "dbm_rgaa_happo" if self.dbm_rgaa_enabled else
+                "rgaa_wide_happo" if self.rgaa_wide_enabled else "rgaa_happo"
+            )
             state["base_algorithm"] = "happo"
         if self.cr_rgaa_enabled:
             state["algorithm"] = "cr_rgaa_happo"
@@ -2333,6 +2477,7 @@ class HAPPOTrainer:
             )
             if any(field not in data for field in required):
                 raise RuntimeError("RGAA checkpoint is missing role critic training state")
+            self._validate_rgaa_actor_method_contract(data)
         if self.cr_rgaa_enabled:
             expected_cr = self.cr_rgaa_metadata
             for field in (
@@ -2411,6 +2556,18 @@ class HAPPOTrainer:
                 raise RuntimeError(
                     f"resume config mismatch: {field} checkpoint={checkpoint_value!r} current={current_value!r}"
                 )
+        if self.dbm_rgaa_enabled:
+            for field in DBM_RESUME_CONFIG_FIELDS:
+                if saved_config.get(field, DEFAULTS[field]) != self.config.get(field):
+                    raise RuntimeError(
+                        f"resume config mismatch: {field} "
+                        f"checkpoint={saved_config.get(field, DEFAULTS[field])!r} "
+                        f"current={self.config.get(field)!r}"
+                    )
+        if self.rgaa_wide_enabled and saved_config.get(
+            "uav_actor_hidden_dim", DEFAULTS["uav_actor_hidden_dim"],
+        ) != self.config["uav_actor_hidden_dim"]:
+            raise RuntimeError("resume config mismatch: uav_actor_hidden_dim")
         if self.relational_rgaa_enabled:
             for field in CR_RGAA_RESUME_CONFIG_FIELDS:
                 if saved_config.get(field, DEFAULTS[field]) != self.config.get(field):
@@ -2553,6 +2710,7 @@ class HAPPOTrainer:
             ):
                 if data.get(field) != self.rgaa_metadata[field]:
                     raise RuntimeError(f"incompatible RGAA checkpoint contract: {field}")
+            self._validate_rgaa_actor_method_contract(data)
         if self.cr_rgaa_enabled:
             for field in (
                 "cr_rgaa_version", "role_aux_reward_mode", "role_advantage_coef",

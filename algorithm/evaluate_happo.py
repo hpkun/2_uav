@@ -18,6 +18,9 @@ import torch
 
 from algorithm.happo.evaluation import evaluate_actors, summarize_records
 from algorithm.happo.networks import IndependentActors
+from algorithm.happo.dbm_rgaa import (
+    DBM_RGAA_METHOD, RGAA_WIDE_METHOD, build_method_actors, dbm_metadata, wide_metadata,
+)
 from algorithm.happo.relational_critic import RelationalCentralizedCritic
 from env.mavuav import GLOBAL_STATE_DIM, OBS_DIM, ROLE_REWARD_MODES, load_environment_config
 
@@ -86,7 +89,7 @@ def main(expected_critic_variant: str = "mlp") -> None:
     method_variant = payload.get("method_variant", trainer_config.get("method_variant", "baseline"))
     if method_variant not in (
         "baseline", "agp", "cf_happo", "rdc_happo", "rgaa", "cr_rgaa", "lp_cr_rgaa",
-        "ls_rgaa", "lsa_rgaa",
+        "ls_rgaa", "lsa_rgaa", DBM_RGAA_METHOD, RGAA_WIDE_METHOD,
     ):
         raise RuntimeError(f"unsupported HAPPO method_variant: {method_variant!r}")
     critic_variant = payload.get("critic_variant", trainer_config.get("critic_variant", "mlp"))
@@ -101,7 +104,34 @@ def main(expected_critic_variant: str = "mlp") -> None:
             raise RuntimeError("RC-HAPPO evaluator requires method_variant='baseline'")
         if critic_architecture != RelationalCentralizedCritic.architecture():
             raise RuntimeError("incompatible relational critic architecture metadata")
-    actors = IndependentActors(hidden_dim=int(trainer_config["hidden_dim"])).to(device)
+    if method_variant in (DBM_RGAA_METHOD, RGAA_WIDE_METHOD):
+        contract_config = dict(trainer_config)
+        contract_config["method_variant"] = method_variant
+        expected_method_metadata = (
+            dbm_metadata(contract_config)
+            if method_variant == DBM_RGAA_METHOD else wide_metadata(contract_config)
+        )
+        for field, expected_value in expected_method_metadata.items():
+            if payload.get(field) != expected_value:
+                raise RuntimeError(
+                    f"incompatible {method_variant} checkpoint contract: {field}"
+                )
+        actors = build_method_actors(
+            method_variant=method_variant,
+            training_seed=int(trainer_config["seed"]),
+            hidden_dim=int(trainer_config["hidden_dim"]),
+            log_std_init=float(trainer_config.get("actor_log_std_init", -0.5)),
+            role_module_enabled=bool(trainer_config.get("role_module_enabled", True)),
+            dbm_role_count=int(trainer_config.get("dbm_role_count", 2)),
+            dbm_residual_scale=float(trainer_config.get("dbm_residual_scale", 0.25)),
+            dbm_expert_init_scale=float(trainer_config.get("dbm_init_scale", 0.01)),
+            uav_actor_hidden_dim=int(trainer_config.get("uav_actor_hidden_dim", 131)),
+        ).to(device)
+    else:
+        actors = IndependentActors(
+            hidden_dim=int(trainer_config["hidden_dim"]),
+            log_std_init=float(trainer_config.get("actor_log_std_init", -0.5)),
+        ).to(device)
     actors.load_state_dict(payload["actors"])
     actors.eval()
     version = env_config["environment_version"]
@@ -118,6 +148,8 @@ def main(expected_critic_variant: str = "mlp") -> None:
         "lsa_rgaa_happo" if method_variant == "lsa_rgaa" else
         "cr_rgaa_happo" if method_variant == "cr_rgaa" else
         "rgaa_happo" if method_variant == "rgaa" else
+        "dbm_rgaa_happo" if method_variant == DBM_RGAA_METHOD else
+        "rgaa_wide_happo" if method_variant == RGAA_WIDE_METHOD else
         method_variant if method_variant in ("cf_happo", "rdc_happo") else
         "happo_agp" if method_variant == "agp" else "happo"
     )

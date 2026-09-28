@@ -21,6 +21,7 @@ import yaml
 
 from algorithm.happo import HAPPOTrainer
 from algorithm.happo.trainer import LEGACY_PCTA_FAMILY, PCTA_V2_VARIANT
+from algorithm.happo.dbm_rgaa import DBM_RGAA_METHOD, RGAA_WIDE_METHOD
 from algorithm.happo.evaluation import evaluate_actors, evaluate_recurrent_actors, summarize_records
 from env.mavuav import RED_IDS, ROLE_REWARD_MODES, load_environment_config
 
@@ -87,6 +88,22 @@ RGAA_FIELDS = (
     *(f"own_loss_count_{aid}" for aid in RED_IDS),
     *(f"own_boundary_loss_count_{aid}" for aid in RED_IDS),
     *(f"own_blue_attack_loss_count_{aid}" for aid in RED_IDS),
+)
+DBM_RGAA_FIELDS = RGAA_FIELDS + tuple(
+    field
+    for aid in RED_IDS[1:]
+    for field in (
+        f"dbm_soft_occupancy_mode1_{aid}", f"dbm_soft_occupancy_mode2_{aid}",
+        f"dbm_hard_occupancy_mode1_{aid}", f"dbm_hard_occupancy_mode2_{aid}",
+        f"dbm_router_variance_mode1_{aid}", f"dbm_router_variance_mode2_{aid}",
+        f"dbm_router_entropy_{aid}", f"dbm_router_probability_variance_{aid}",
+        f"dbm_mode_switch_rate_{aid}", f"dbm_valid_switch_pairs_{aid}",
+        f"dbm_router_l1_movement_{aid}", f"dbm_expert_divergence_{aid}",
+        f"dbm_scaled_residual_magnitude_{aid}", f"dbm_residual_base_ratio_{aid}",
+        f"dbm_deterministic_action_saturation_{aid}",
+        f"dbm_max_soft_occupancy_{aid}", f"dbm_max_hard_occupancy_{aid}",
+        f"dbm_active_sample_count_{aid}",
+    )
 )
 CR_RGAA_FIELDS = RGAA_FIELDS + (
     "cr_role_critic_total_loss", "cr_relational_residual_abs_mean",
@@ -178,6 +195,8 @@ def _algorithm_name(
             "cf_happo": "cf_happo",
             "rdc_happo": "rdc_happo",
             "rgaa": "rgaa_happo",
+            DBM_RGAA_METHOD: "dbm_rgaa_happo",
+            RGAA_WIDE_METHOD: "rgaa_wide_happo",
             "cr_rgaa": "cr_rgaa_happo",
             "lp_cr_rgaa": "lp_cr_rgaa_happo",
             "ls_rgaa": "ls_rgaa_happo",
@@ -570,6 +589,8 @@ def _initial_resolved(
         **trainer.credit_metadata,
         **trainer.tam_metadata,
         **trainer.rgaa_metadata,
+        **trainer.dbm_metadata,
+        **trainer.rgaa_wide_metadata,
         **trainer.cr_rgaa_metadata,
         **trainer.lp_cr_rgaa_metadata,
         **trainer.ls_rgaa_metadata,
@@ -713,7 +734,9 @@ def main(
             training_fields = TRAINING_FIELDS + CREDIT_FIELDS + RDC_FIELDS
         elif method_variant == "cf_happo":
             training_fields = TRAINING_FIELDS + CF_FIELDS
-        elif method_variant == "rgaa":
+        elif method_variant == DBM_RGAA_METHOD:
+            training_fields = TRAINING_FIELDS + DBM_RGAA_FIELDS
+        elif method_variant in ("rgaa", RGAA_WIDE_METHOD):
             training_fields = TRAINING_FIELDS + RGAA_FIELDS
         elif method_variant == "cr_rgaa":
             training_fields = TRAINING_FIELDS + CR_RGAA_FIELDS
@@ -827,6 +850,8 @@ def main(
             **trainer.credit_metadata,
             **trainer.tam_metadata,
             **trainer.rgaa_metadata,
+            **trainer.dbm_metadata,
+            **trainer.rgaa_wide_metadata,
             **trainer.cr_rgaa_metadata,
             **trainer.lp_cr_rgaa_metadata,
             **trainer.ls_rgaa_metadata,
