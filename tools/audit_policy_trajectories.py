@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -23,6 +24,10 @@ from tools.report_combat_episode import report_directory
 DETERMINISTIC_SEEDS = tuple(range(424242, 424247))
 STOCHASTIC_ENV_SEEDS = tuple(range(1000, 1010))
 STOCHASTIC_ACTION_SEEDS = tuple(range(2000, 2010))
+REQUIRED_METHODS = ("rgaa", "rgaa_wide", "dbm_rgaa")
+REQUIRED_TRAINING_SEEDS = (7, 9, 11)
+REQUIRED_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_9"
+REQUIRED_SAMPLED_STEPS = 2_000_000
 
 
 def _mapping(value: str) -> tuple[str, Path]:
@@ -110,31 +115,84 @@ def _write_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
         writer.writeheader(); writer.writerows(rows)
 
 
+def checkpoint_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def validate_run_matrix(records: Sequence[Mapping[str, Any]]) -> None:
+    """Validate the fixed experiment matrix using checkpoint-derived metadata."""
+    expected = {(method, seed) for method in REQUIRED_METHODS for seed in REQUIRED_TRAINING_SEEDS}
+    observed: list[tuple[str, int]] = []
+    reference_environment = None
+    for record in records:
+        method = str(record["method_variant"])
+        seed = int(record["training_seed"])
+        pair = (method, seed)
+        if pair not in expected:
+            raise RuntimeError(f"unexpected method/training-seed pair in trajectory audit: {pair}")
+        if pair in observed:
+            raise RuntimeError(f"duplicate method/training-seed pair in trajectory audit: {pair}")
+        observed.append(pair)
+        if int(record["sampled_steps"]) != REQUIRED_SAMPLED_STEPS:
+            raise RuntimeError(f"{pair} is not an exact-2M checkpoint: {record['sampled_steps']}")
+        if record.get("training_profile") != "learnability" or record.get("evaluation_profile") != "learnability":
+            raise RuntimeError(f"{pair} must use learnability for training and evaluation profiles")
+        if record.get("environment_version") != REQUIRED_ENVIRONMENT_VERSION:
+            raise RuntimeError(f"{pair} must use environment {REQUIRED_ENVIRONMENT_VERSION}")
+        environment = record.get("environment_config")
+        if reference_environment is None:
+            reference_environment = environment
+        elif environment != reference_environment:
+            raise RuntimeError("trajectory audit requires identical resolved environment configs")
+    missing = expected - set(observed)
+    if missing or len(observed) != len(expected):
+        raise RuntimeError(f"incomplete 3 methods x 3 seeds trajectory-audit matrix; missing={sorted(missing)}")
+
+
 def run_protocol(args: argparse.Namespace) -> dict[str, Any]:
     output = args.output.resolve()
     if output.exists() and any(output.iterdir()):
         raise FileExistsError(f"output directory is not empty: {output}")
     output.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
-    resolved_config = None
     run_metadata = {}
+    prepared_runs = []
+    matrix_records = []
+    integrity_rows = []
     for label, raw_run in args.run:
         run_dir = raw_run.resolve(); checkpoint = run_dir / "checkpoint_final.pt"
+        sha_before = checkpoint_sha256(checkpoint)
         adapter = load_replay_actors(checkpoint, args.device)
         env_config = load_environment_config(adapter.payload.get("environment_config"))
-        if resolved_config is None:
-            resolved_config = env_config
-        elif env_config != resolved_config:
-            raise RuntimeError("trajectory audit requires identical resolved environment configs")
         method = adapter.method_variant
         training_seed = int(adapter.payload.get("trainer_config", adapter.payload.get("config", {}))["seed"])
         sampled_steps = int(adapter.payload.get("sampled_steps", 0))
-        if sampled_steps != 2_000_000:
-            raise RuntimeError(f"{label} is not an exact-2M checkpoint: {sampled_steps}")
+        training_profile = adapter.payload.get("environment_profile")
+        environment_version = adapter.payload.get("environment_version")
+        matrix_records.append({
+            "method_variant": method, "training_seed": training_seed,
+            "sampled_steps": sampled_steps, "training_profile": training_profile,
+            "evaluation_profile": args.profile, "environment_version": environment_version,
+            "environment_config": env_config,
+        })
+        prepared_runs.append((label, checkpoint, adapter, env_config, method, training_seed, sampled_steps))
+        integrity_rows.append({
+            "run": label, "method": method, "training_seed": training_seed,
+            "checkpoint_path": str(checkpoint), "sha256_before": sha_before,
+        })
         run_metadata[label] = {
             "checkpoint": str(checkpoint), "method_variant": method,
             "training_seed": training_seed, "sampled_steps": sampled_steps,
+            "training_profile": training_profile, "evaluation_profile": args.profile,
+            "environment_version": environment_version, "sha256_before": sha_before,
         }
+    validate_run_matrix(matrix_records)
+
+    for label, checkpoint, adapter, env_config, method, training_seed, sampled_steps in prepared_runs:
         episode_specs = [
             ("deterministic", seed, None) for seed in DETERMINISTIC_SEEDS
         ] + [
@@ -174,6 +232,15 @@ def run_protocol(args: argparse.Namespace) -> dict[str, Any]:
                 "uav_attack_share": coordination["uav_attack_share"],
             })
             print(f"{label} {name}: {metadata['outcome']} length={metadata['episode_length']}", flush=True)
+    for record in integrity_rows:
+        sha_after = checkpoint_sha256(Path(record["checkpoint_path"]))
+        record["sha256_after"] = sha_after
+        record["unchanged"] = sha_after == record["sha256_before"]
+        if not record["unchanged"]:
+            raise RuntimeError(f"checkpoint changed during trajectory audit: {record['checkpoint_path']}")
+    (output / "checkpoint_integrity.json").write_text(
+        json.dumps(integrity_rows, indent=2, ensure_ascii=False), encoding="utf-8",
+    )
     aggregates = aggregate(rows)
     representatives = select_representatives(rows)
     _write_csv(output / "episode_index.csv", rows)
@@ -190,7 +257,8 @@ def run_protocol(args: argparse.Namespace) -> dict[str, Any]:
             "deterministic_episode_count": 45, "stochastic_episode_count": 90,
             "representative_selection_rule": "deterministic red-win nearest method win-episode median length",
         },
-        "runs": run_metadata, "aggregate": aggregates, "representatives": representatives,
+        "runs": run_metadata, "checkpoint_integrity": integrity_rows,
+        "aggregate": aggregates, "representatives": representatives,
     }
     (output / "audit_summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     return summary
