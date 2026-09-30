@@ -47,6 +47,9 @@ def _number(row: Mapping[str, Any], key: str, cast: type = float) -> Any:
 def load_checkpoint_contracts(audit_dir: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Read checkpoint metadata and hashes only; actors and environments are never constructed."""
     summary = json.loads((audit_dir / "audit_summary.json").read_text(encoding="utf-8"))
+    evaluation_profile = summary.get("protocol", {}).get("profile")
+    if not evaluation_profile:
+        raise RuntimeError("existing audit summary is missing protocol.profile")
     contracts, integrity = [], []
     for label, old in summary["runs"].items():
         checkpoint = Path(old["checkpoint"])
@@ -59,7 +62,7 @@ def load_checkpoint_contracts(audit_dir: Path) -> tuple[list[dict[str, Any]], li
             "training_seed": int(config["seed"]),
             "sampled_steps": int(payload.get("sampled_steps", 0)),
             "training_profile": payload.get("environment_profile"),
-            "evaluation_profile": "learnability",
+            "evaluation_profile": evaluation_profile,
             "environment_version": payload.get("environment_version"),
             "environment_config": payload.get("environment_config"),
         })
@@ -220,29 +223,37 @@ def _router_summary(episode_dir: Path, metadata: Mapping[str, Any]) -> dict[str,
     first = min((int(e["trace_frame"]) for e in red_attacks), default=None)
     final = max((int(e["trace_frame"]) for e in red_attacks), default=None)
     with np.load(episode_dir / "episode_trace.npz") as trace:
-        probs = trace["dbm_router_probabilities"][:, :, 1]
+        probabilities = trace["dbm_router_probabilities"]
+        p1 = probabilities[:, :, 0]
+        p2 = probabilities[:, :, 1]
         hard = trace["dbm_hard_mode_proxy"]
         divergence = trace["dbm_expert_divergence"]
         residual = trace["dbm_residual_magnitude"]
     result: dict[str, Any] = {"agents": {}, "attacks": []}
     for index, aid in enumerate(UAV_IDS):
-        valid = np.isfinite(probs[:, index])
-        values = probs[:, index][valid]
+        valid = np.isfinite(p1[:, index]) & np.isfinite(p2[:, index])
+        values_p1 = p1[:, index][valid]
+        values_p2 = p2[:, index][valid]
         hard_values = hard[:, index][valid]
+        expected_hard = np.argmax(probabilities[:, index][valid], axis=-1) + 1
+        if not np.array_equal(hard_values, expected_hard):
+            raise RuntimeError(f"DBM hard mode proxy is inconsistent with router probabilities for {aid}")
         phases = {
-            "before_first_red_attack": np.arange(len(probs)) < (first - 1 if first is not None else len(probs)),
-            "first_through_final_red_attack": ((np.arange(len(probs)) >= first - 1) & (np.arange(len(probs)) <= final - 1)) if first is not None else np.zeros(len(probs), bool),
-            "after_final_red_attack": (np.arange(len(probs)) > final - 1) if final is not None else np.zeros(len(probs), bool),
+            "before_first_red_attack": np.arange(len(probabilities)) < (first - 1 if first is not None else len(probabilities)),
+            "first_through_final_red_attack": ((np.arange(len(probabilities)) >= first - 1) & (np.arange(len(probabilities)) <= final - 1)) if first is not None else np.zeros(len(probabilities), bool),
+            "after_final_red_attack": (np.arange(len(probabilities)) > final - 1) if final is not None else np.zeros(len(probabilities), bool),
         }
         result["agents"][aid] = {
-            "mean_p1": float(np.mean(values)), "variance_p1": float(np.var(values)),
+            "mean_p1": float(np.mean(values_p1)), "mean_p2": float(np.mean(values_p2)),
+            "variance_p1": float(np.var(values_p1)), "variance_p2": float(np.var(values_p2)),
             "hard_proxy_switch_rate": float(np.mean(hard_values[1:] != hard_values[:-1])) if len(hard_values) > 1 else 0.0,
             "mean_expert_divergence": float(np.nanmean(divergence[:, index])),
             "mean_residual_magnitude": float(np.nanmean(residual[:, index])),
             "phases": {
                 name: {
-                    "sample_count": int(np.sum(mask & np.isfinite(probs[:, index]))),
-                    "mean_p1": (float(np.nanmean(probs[mask, index])) if np.any(mask & np.isfinite(probs[:, index])) else None),
+                    "sample_count": int(np.sum(mask & valid)),
+                    "mean_p1": (float(np.nanmean(p1[mask, index])) if np.any(mask & valid) else None),
+                    "mean_p2": (float(np.nanmean(p2[mask, index])) if np.any(mask & valid) else None),
                 } for name, mask in phases.items()
             },
         }
@@ -254,7 +265,8 @@ def _router_summary(episode_dir: Path, metadata: Mapping[str, Any]) -> dict[str,
         step = frame - 1
         result["attacks"].append({
             "time_s": float(event["time_s"]), "attacker": attacker, "target": event["target"],
-            "router_p1": float(probs[step, index]), "hard_proxy": int(hard[step, index]),
+            "router_p1": float(p1[step, index]), "router_p2": float(p2[step, index]),
+            "hard_proxy": int(hard[step, index]),
             "expert_divergence": float(divergence[step, index]),
             "residual_magnitude": float(residual[step, index]),
         })
@@ -311,6 +323,27 @@ def _paired_text(paired: Mapping[str, Any], comparison: Mapping[str, Any]) -> st
         lines.append("10-s distances:")
         for snapshot in data["ten_second_distances"]:
             lines.append(f"  t={snapshot['time_s']:.0f} MAV={snapshot['mav_to_blue_centroid_m']:.3f} mean_UAV={snapshot['mean_uav_to_blue_centroid_m']:.3f}")
+        if method == "dbm_rgaa":
+            router = data["router"]
+            lines.append("DBM router (mode order: index 0=p1/mode1, index 1=p2/mode2):")
+            for aid, stats in router["agents"].items():
+                lines.append(
+                    f"  {aid}: mean_p1={stats['mean_p1']:.6f} mean_p2={stats['mean_p2']:.6f} "
+                    f"var_p1={stats['variance_p1']:.6f} var_p2={stats['variance_p2']:.6f} "
+                    f"switch={stats['hard_proxy_switch_rate']:.6f}"
+                )
+                for phase, values in stats["phases"].items():
+                    p1_text = "N/A" if values["mean_p1"] is None else f"{values['mean_p1']:.6f}"
+                    p2_text = "N/A" if values["mean_p2"] is None else f"{values['mean_p2']:.6f}"
+                    lines.append(f"    {phase}: n={values['sample_count']} mean_p1={p1_text} mean_p2={p2_text}")
+            lines.append("  attack-time router diagnostics:")
+            for attack in router["attacks"]:
+                lines.append(
+                    f"    t={attack['time_s']:.0f} {attack['attacker']}->{attack['target']} "
+                    f"p1={attack['router_p1']:.6f} p2={attack['router_p2']:.6f} "
+                    f"hard={attack['hard_proxy']} divergence={attack['expert_divergence']:.6f} "
+                    f"residual={attack['residual_magnitude']:.6f}"
+                )
         lines.append("")
     return "\n".join(lines)
 
@@ -318,6 +351,14 @@ def _paired_text(paired: Mapping[str, Any], comparison: Mapping[str, Any]) -> st
 def postprocess(audit_dir: Path) -> dict[str, Any]:
     audit_dir = audit_dir.resolve()
     rows = _read_csv(audit_dir / "episode_index.csv")
+    source_summary = json.loads((audit_dir / "audit_summary.json").read_text(encoding="utf-8"))
+    source_profile = source_summary.get("protocol", {}).get("profile")
+    if not source_profile:
+        raise RuntimeError("existing audit summary is missing protocol.profile")
+    for row in rows:
+        metadata = json.loads((Path(row["episode_dir"]) / "metadata.json").read_text(encoding="utf-8"))
+        if metadata.get("evaluation_profile") != source_profile:
+            raise RuntimeError("episode evaluation profile does not match existing audit protocol.profile")
     contracts, integrity = load_checkpoint_contracts(audit_dir)
     paired = select_paired_representative(rows)
     comparison = build_paired_comparison(paired)

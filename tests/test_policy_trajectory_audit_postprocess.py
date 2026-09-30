@@ -5,7 +5,9 @@ import hashlib
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
+import torch
 
 from tools.audit_policy_trajectories import checkpoint_sha256, validate_run_matrix
 from tools import postprocess_policy_trajectory_audit as post
@@ -43,6 +45,23 @@ def test_checkpoint_sha_is_stable(tmp_path):
     path = tmp_path / "checkpoint.pt"; path.write_bytes(b"read-only checkpoint bytes")
     before = checkpoint_sha256(path); after = checkpoint_sha256(path)
     assert before == after == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_checkpoint_contract_uses_profile_from_existing_audit_summary(tmp_path, monkeypatch):
+    checkpoint = tmp_path / "checkpoint.pt"
+    torch.save({"method_variant": "rgaa", "trainer_config": {"seed": 7},
+                "sampled_steps": 2_000_000, "environment_profile": "learnability",
+                "environment_version": "heterogeneous_mavuav_4v4_v3_9",
+                "environment_config": {"contract": 1}}, checkpoint)
+    (tmp_path / "audit_summary.json").write_text(json.dumps({
+        "protocol": {"profile": "profile_from_summary"},
+        "runs": {"r": {"checkpoint": str(checkpoint)}},
+    }), encoding="utf-8")
+    captured = []
+    monkeypatch.setattr(post, "validate_run_matrix", lambda records: captured.extend(records))
+    contracts, _ = post.load_checkpoint_contracts(tmp_path)
+    assert contracts[0]["evaluation_profile"] == "profile_from_summary"
+    assert captured[0]["evaluation_profile"] == "profile_from_summary"
 
 
 def paired_rows():
@@ -132,12 +151,39 @@ def test_multi_target_death_share_uses_all_red_attack_deaths_denominator(tmp_pat
     assert all(row["blue_death_share"] == pytest.approx(2 / 3) for row in summary)
 
 
+def test_dbm_router_probability_indices_and_hard_proxy_contract(tmp_path):
+    episode = tmp_path / "dbm"; episode.mkdir()
+    probabilities = np.empty((2, 3, 2), dtype=np.float64)
+    probabilities[0, :, :] = [0.8, 0.2]
+    probabilities[1, :, :] = [0.2, 0.8]
+    np.savez_compressed(
+        episode / "episode_trace.npz",
+        dbm_router_probabilities=probabilities,
+        dbm_hard_mode_proxy=np.asarray([[1, 1, 1], [2, 2, 2]], dtype=np.int8),
+        dbm_expert_divergence=np.ones((2, 3)),
+        dbm_residual_magnitude=np.full((2, 3), 0.25),
+    )
+    meta = metadata([attack(1, "UAV1", "Blue1"), attack(2, "UAV1", "Blue2")])
+    result = post._router_summary(episode, meta)
+    assert result["attacks"][0]["router_p1"] == pytest.approx(0.8)
+    assert result["attacks"][0]["router_p2"] == pytest.approx(0.2)
+    assert result["attacks"][0]["hard_proxy"] == 1
+    assert result["attacks"][1]["router_p1"] == pytest.approx(0.2)
+    assert result["attacks"][1]["router_p2"] == pytest.approx(0.8)
+    assert result["attacks"][1]["hard_proxy"] == 2
+    assert result["agents"]["UAV1"]["mean_p1"] == pytest.approx(0.5)
+    assert result["agents"]["UAV1"]["mean_p2"] == pytest.approx(0.5)
+    phase = result["agents"]["UAV1"]["phases"]["first_through_final_red_attack"]
+    assert phase["mean_p1"] == pytest.approx(0.5) and phase["mean_p2"] == pytest.approx(0.5)
+
+
 def test_postprocess_does_not_construct_environment_or_modify_trace(tmp_path, monkeypatch):
     audit = tmp_path / "audit"; audit.mkdir()
     rows = []
     for method in post.METHODS:
         episode = audit / method; episode.mkdir()
-        (episode / "metadata.json").write_text(json.dumps({"events": []}), encoding="utf-8")
+        (episode / "metadata.json").write_text(
+            json.dumps({"events": [], "evaluation_profile": "learnability"}), encoding="utf-8")
         (episode / "episode_trace.npz").write_bytes(b"immutable trace")
         rows.append({"run": method, "method_variant": method, "training_seed": 7,
                      "action_mode": "deterministic", "environment_seed": 424242,
@@ -146,6 +192,8 @@ def test_postprocess_does_not_construct_environment_or_modify_trace(tmp_path, mo
                      "mav_survived": 1, "uav_survivors": 3})
     with (audit / "episode_index.csv").open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=list(rows[0])); writer.writeheader(); writer.writerows(rows)
+    (audit / "audit_summary.json").write_text(
+        json.dumps({"protocol": {"profile": "learnability"}}), encoding="utf-8")
     checkpoint = audit / "checkpoint.pt"; checkpoint.write_bytes(b"x")
     before = {method: hashlib.sha256((audit / method / "episode_trace.npz").read_bytes()).hexdigest() for method in post.METHODS}
     monkeypatch.setattr(post, "load_checkpoint_contracts", lambda _: (matrix_records(), [{
@@ -156,4 +204,3 @@ def test_postprocess_does_not_construct_environment_or_modify_trace(tmp_path, mo
     post.postprocess(audit)
     after = {method: hashlib.sha256((audit / method / "episode_trace.npz").read_bytes()).hexdigest() for method in post.METHODS}
     assert before == after
-
