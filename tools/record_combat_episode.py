@@ -1,4 +1,4 @@
-"""Record one real deterministic decision-boundary combat episode."""
+"""Record one real decision-boundary combat episode without policy mutation."""
 from __future__ import annotations
 
 import argparse
@@ -41,6 +41,8 @@ def _event_rows(info: dict[str, Any], trace_frame: int, time_s: float) -> list[d
 def record_episode(
     adapter: ReplayPolicyAdapter, checkpoint: Path, output_dir: Path, *, profile: str,
     seed: int, env_config: dict[str, Any], overwrite: bool = False,
+    action_mode: str = "deterministic", action_seed: int | None = None,
+    collect_dbm_diagnostics: bool = False,
 ) -> dict[str, Any]:
     output_dir = output_dir.expanduser().resolve()
     if output_dir.exists() and any(output_dir.iterdir()) and not overwrite:
@@ -48,16 +50,21 @@ def record_episode(
     output_dir.mkdir(parents=True, exist_ok=True)
     env = HeterogeneousMAVUAVAirCombatEnv(env_config, seed=seed, profile=profile)
     observations, reset_info = env.reset(seed=seed)
-    adapter.reset_episode()
+    adapter.reset_episode(action_mode=action_mode, action_seed=action_seed)
     states, alive = _snapshot(env)
     frames, alive_frames = [states], [alive]
     actions: list[np.ndarray] = []
     metrics = {name: [] for name in ("team_reward", "team_situation", "event_reward", "terminal_reward",
                                       "minimum_friendly_red_distance", "red_safe_distance_violation")}
     events: list[dict[str, Any]] = []
+    dbm_diagnostics: list[list[dict[str, Any]]] = []
     done = False; final_info: dict[str, Any] = {}
     while not done:
-        action = adapter.actions(observations)
+        action = adapter.actions(
+            observations, active_masks=env.active_masks,
+            collect_diagnostics=collect_dbm_diagnostics,
+        )
+        dbm_diagnostics.append(list(adapter.last_diagnostics))
         observations, rewards, terminated, truncated, final_info = env.step(action)
         actions.append(action); states, alive = _snapshot(env)
         frames.append(states); alive_frames.append(alive)
@@ -82,6 +89,26 @@ def record_episode(
         "minimum_friendly_red_distance": np.asarray(metrics["minimum_friendly_red_distance"], dtype=np.float64),
         "red_safe_distance_violation": np.asarray(metrics["red_safe_distance_violation"], dtype=bool),
     }
+    if collect_dbm_diagnostics:
+        router = np.full((len(actions), 3, 2), np.nan, dtype=np.float64)
+        hard = np.full((len(actions), 3), -1, dtype=np.int8)
+        divergence = np.full((len(actions), 3), np.nan, dtype=np.float64)
+        residual = np.full((len(actions), 3), np.nan, dtype=np.float64)
+        for step, records in enumerate(dbm_diagnostics):
+            for record in records:
+                index = RED_IDS.index(record["agent_id"]) - 1
+                if index < 0:
+                    continue
+                router[step, index] = record["router_probabilities"]
+                hard[step, index] = record["hard_mode_proxy"]
+                divergence[step, index] = record["expert_divergence"]
+                residual[step, index] = record["residual_magnitude"]
+        arrays.update({
+            "dbm_router_probabilities": router,
+            "dbm_hard_mode_proxy": hard,
+            "dbm_expert_divergence": divergence,
+            "dbm_residual_magnitude": residual,
+        })
     np.savez_compressed(output_dir / "episode_trace.npz", **arrays)
     specs = {kind: {key: value for key, value in spec.items()}
              for kind, spec in env.config["aircraft_specs"].items()}
@@ -95,7 +122,11 @@ def record_episode(
         "environment_version": adapter.payload["environment_version"],
         "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM,
         "training_profile": adapter.payload.get("environment_profile"), "evaluation_profile": profile,
+        "training_seed": int(adapter.payload.get("trainer_config", adapter.payload.get("config", {})).get("seed", -1)),
         "blue_target_strategy": reset_info["blue_target_strategy"], "episode_seed": seed,
+        "action_mode": action_mode,
+        "action_seed": int(action_seed) if action_mode == "stochastic" and action_seed is not None else None,
+        "dbm_execution_diagnostics": bool(collect_dbm_diagnostics),
         "episode_role": "qualitative_visualization_only", "used_for_quantitative_metrics": False,
         "decision_dt": env.decision_dt, "physics_dt": env.physics_dt,
         "max_decision_steps": env.max_decision_steps, "raw_trace_dt": env.decision_dt,
@@ -118,6 +149,9 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--profile", choices=("learnability", "main"), default="main")
     parser.add_argument("--seed", type=int, default=424242)
+    parser.add_argument("--action-mode", choices=("deterministic", "stochastic"), default="deterministic")
+    parser.add_argument("--action-seed", type=int, default=2000)
+    parser.add_argument("--dbm-diagnostics", action="store_true")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--env-config", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -127,7 +161,10 @@ def main() -> None:
     adapter = load_replay_actors(checkpoint, args.device)
     config = load_environment_config(args.env_config.expanduser().resolve() if args.env_config else adapter.payload.get("environment_config"))
     result = record_episode(adapter, checkpoint, args.output_dir, profile=args.profile,
-                            seed=args.seed, env_config=config, overwrite=args.overwrite)
+                            seed=args.seed, env_config=config, overwrite=args.overwrite,
+                            action_mode=args.action_mode,
+                            action_seed=args.action_seed if args.action_mode == "stochastic" else None,
+                            collect_dbm_diagnostics=args.dbm_diagnostics)
     print(json.dumps(result, indent=2, ensure_ascii=False), flush=True)
 
 

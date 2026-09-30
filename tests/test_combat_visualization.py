@@ -10,7 +10,9 @@ import pytest
 import torch
 
 from algorithm.happo.networks import IndependentActors
-from algorithm.happo.evaluation import evaluate_recurrent_actors
+from algorithm.happo.evaluation import evaluate_actors, evaluate_recurrent_actors
+from algorithm.happo.trainer import HAPPOTrainer
+from algorithm.happo.dbm_rgaa import DBMGaussianActor
 from algorithm.happo.recurrent import RecurrentIndependentActors
 from algorithm.modules.hrta import HRTAIndependentActors
 from algorithm.modules.structured_uniform import StructuredUniformIndependentActors
@@ -22,6 +24,8 @@ from tools.record_combat_episode import _event_rows, record_episode
 from tools.render_combat_episode import render_episode
 from tools.render_combat_episode_interactive import APP_JS, render_interactive
 from tools.replay_policy import infer_method_display_name, load_replay_actors
+from tools.report_combat_episode import analyze_episode, report_directory
+from tools.audit_policy_trajectories import aggregate, select_representatives
 
 
 def synthetic_trace(frames: int = 3):
@@ -219,6 +223,24 @@ def test_method_names():
     assert infer_method_display_name("structured_uniform")=="HAPPO-Structured-Uniform"
     assert infer_method_display_name("recurrent")=="R-HAPPO"
     assert infer_method_display_name("pcta")=="PCTA-HAPPO"
+    assert infer_method_display_name("vanilla","rgaa")=="RGAA-HAPPO"
+    assert infer_method_display_name("vanilla","rgaa_wide")=="RGAA-Wide"
+    assert infer_method_display_name("vanilla","dbm_rgaa")=="DBM-RGAA"
+
+
+@pytest.mark.parametrize("method", ["rgaa", "rgaa_wide", "dbm_rgaa"])
+def test_role_guided_replay_loader_uses_exact_actor_family(tmp_path, method):
+    config=load_environment_config(Path(__file__).resolve().parents[1]/"configs"/"env_v39.yaml");config["simulation"]["max_decision_steps"]=1
+    options={"method_variant":method,"environment_profile":"learnability","device":"cpu",
+             "num_envs":1,"rollout_steps":1,"hidden_dim":8,"seed":17}
+    if method=="rgaa_wide":options["uav_actor_hidden_dim"]=11
+    trainer=HAPPOTrainer(config,options);path=tmp_path/f"{method}.pt"
+    try:trainer.save_checkpoint(path)
+    finally:trainer.close()
+    adapter=load_replay_actors(path)
+    assert adapter.method_variant==method
+    assert isinstance(adapter.actors.actors[1],DBMGaussianActor)==(method=="dbm_rgaa")
+    assert set(adapter.actors.state_dict())==set(torch.load(path,map_location="cpu",weights_only=False)["actors"])
 
 
 def test_deterministic_short_recording(tmp_path):
@@ -235,6 +257,90 @@ def test_deterministic_short_recording(tmp_path):
         assert a["kinematics"].shape[0]==m1["episode_length"]+1
     assert m1["events"]==m2["events"] and m1["outcome"]==m2["outcome"]
     assert m1["episode_role"]=="qualitative_visualization_only" and not m1["used_for_quantitative_metrics"]
+
+
+def test_stochastic_recording_matches_feedforward_evaluator_action_order_and_summary(tmp_path):
+    torch.manual_seed(73);actors=IndependentActors(hidden_dim=16)
+    config=load_environment_config(None);config["simulation"]["max_decision_steps"]=2
+    payload={"environment_version":ENVIRONMENT_VERSION,"observation_dim":OBS_DIM,
+             "global_state_dim":GLOBAL_STATE_DIM,"actor_variant":"vanilla","method_variant":"baseline",
+             "trainer_config":{"hidden_dim":16,"seed":3},"environment_profile":"learnability",
+             "actors":actors.state_dict()}
+    checkpoint=tmp_path/"model.pt";torch.save(payload,checkpoint)
+    adapter=load_replay_actors(checkpoint)
+    metadata=record_episode(adapter,checkpoint,tmp_path/"record",profile="learnability",seed=1000,
+                            env_config=config,action_mode="stochastic",action_seed=2000)
+    captured=[];originals=[]
+    for actor in adapter.actors.actors:
+        original=actor.sample;originals.append(original)
+        def wrapper(observation, deterministic=False, _original=original):
+            action,log_prob=_original(observation,deterministic=deterministic)
+            captured.append(action.detach().cpu().numpy().copy())
+            return action,log_prob
+        actor.sample=wrapper
+    formal=evaluate_actors(adapter.actors,config,1,"learnability",seed=1000,device="cpu",
+                           deterministic=False,action_seed=2000)[0]
+    with np.load(tmp_path/"record"/"episode_trace.npz") as trace:
+        expected=trace["red_actions"].reshape(-1,3)
+    actual=np.concatenate(captured,axis=0)
+    np.testing.assert_array_equal(actual,expected)
+    assert all(metadata[key]==value for key,value in formal.items())
+    assert metadata["action_mode"]=="stochastic" and metadata["action_seed"]==2000
+
+
+def test_dbm_execution_diagnostics_are_rng_free_and_trace_reportable(tmp_path):
+    config=load_environment_config(Path(__file__).resolve().parents[1]/"configs"/"env_v39.yaml");config["simulation"]["max_decision_steps"]=2
+    trainer=HAPPOTrainer(config,{"method_variant":"dbm_rgaa","environment_profile":"learnability",
+                                 "device":"cpu","num_envs":1,"rollout_steps":1,"hidden_dim":8,"seed":5})
+    checkpoint=tmp_path/"dbm.pt"
+    try:trainer.save_checkpoint(checkpoint)
+    finally:trainer.close()
+    adapter=load_replay_actors(checkpoint)
+    first=record_episode(adapter,checkpoint,tmp_path/"on",profile="learnability",seed=1000,
+                         env_config=config,action_mode="stochastic",action_seed=2000,
+                         collect_dbm_diagnostics=True)
+    second=record_episode(adapter,checkpoint,tmp_path/"off",profile="learnability",seed=1000,
+                          env_config=config,action_mode="stochastic",action_seed=2000,
+                          collect_dbm_diagnostics=False)
+    with np.load(tmp_path/"on"/"episode_trace.npz") as on,np.load(tmp_path/"off"/"episode_trace.npz") as off:
+        for key in ("red_actions","kinematics","alive","team_reward"):
+            np.testing.assert_array_equal(on[key],off[key])
+        assert on["dbm_router_probabilities"].shape==(2,3,2)
+        np.testing.assert_allclose(np.nansum(on["dbm_router_probabilities"],axis=-1),1.0)
+    assert first["outcome"]==second["outcome"] and first["episode_return"]==second["episode_return"]
+    report=report_directory(tmp_path/"on")
+    assert report["dbm"] is not None and set(report["dbm"]["agents"])==set(RED_IDS[1:])
+
+
+def test_combat_report_uses_observed_events_and_spatial_trajectory_only(tmp_path):
+    directory=tmp_path/"episode";write_trace(directory)
+    report=report_directory(directory)
+    assert report["overview"]["outcome"]=="red"
+    assert report["agents"]["MAV"]["attack_event_count"]==1
+    assert report["agents"]["UAV1"]["attack_event_count"]==1
+    assert report["coordination"]["near_simultaneous_same_target_event_count"]==2
+    assert report["coordination"]["uav_boundary_death_count"]==0
+    assert (directory/"combat_report.json").is_file()
+    assert "Key event timeline" in (directory/"combat_report.txt").read_text(encoding="utf-8")
+
+
+def test_aggregate_and_representative_selection_are_predeclared_and_deterministic():
+    base={"method_variant":"rgaa","action_mode":"deterministic","mav_survived":1,
+          "uav_survivors":3,"red_attack_kills":4,"blue_attack_kills":0,
+          "mav_nearest_blue_distance_m":3000,"uav_nearest_blue_distance_m":1000,
+          "mav_attack_events":1,"uav_attack_events":4,"uav_boundary_death_count":0,
+          "uav_altitude_lower_death_count":0,"separation_warning_count":0,
+          "mav_behind_uav_fraction":.8,"uav_attack_share":.8,"training_seed":7,
+          "run":"r","environment_seed":424242,"action_seed":None,"episode_dir":"x",
+          "sampled_steps":2_000_000,"episode_return":1.0}
+    rows=[{**base,"outcome":"red","episode_length":20},
+          {**base,"outcome":"red","episode_length":40,"environment_seed":424243},
+          {**base,"outcome":"draw","episode_length":75,"environment_seed":424244}]
+    summary=aggregate(rows)[0]
+    assert summary["red_win_rate"]==pytest.approx(2/3)
+    representative=select_representatives(rows)["rgaa"]
+    assert representative["episode_length"]==20  # median 30, deterministic tie-break by env seed
+    assert "median" in representative["rule"]
 
 
 def test_recurrent_recording_matches_evaluator_and_repeats(tmp_path):
