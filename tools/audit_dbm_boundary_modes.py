@@ -373,6 +373,15 @@ def episode_rows(
         run, mapping, episode=episode, env_seed=env_seed, action_seed=action_seed,
         profile=profile, device=device,
     )
+    return episode_output_rows(run, mapping, episode, env_seed, action_seed, summary, death)
+
+
+def episode_output_rows(
+    run: LoadedAuditRun, mapping: Mapping[str, str], episode: int,
+    env_seed: int, action_seed: int, summary: Mapping[str, Any],
+    death: Mapping[str, Mapping[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Serialize exact rollout summary/death accounting without another rollout."""
     mapping_fields = {f"{aid}_source_slot": mapping[aid] for aid in UAV_IDS}
     base = {
         "run": run.label, "method": run.method, "training_seed": run.training_seed,
@@ -398,6 +407,54 @@ def episode_rows(
             "team_outcome": summary["outcome"],
         })
     return team, agents
+
+
+def summarize_identity_deaths(
+    team_rows: Sequence[Mapping[str, Any]], agent_rows: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Aggregate exact identity-rollout UAV death causes and boundary axes."""
+    actor_output: list[dict[str, Any]] = []
+    for run, aid in sorted({(str(row["run"]), str(row["actor_id"])) for row in agent_rows}):
+        selected = [row for row in agent_rows if row["run"] == run and row["actor_id"] == aid]
+        episodes = len(selected)
+        death_steps = [float(row["death_step"]) for row in selected if row.get("death_step") not in (None, "")]
+        record: dict[str, Any] = {
+            "run": run, "actor_id": aid, "episodes": episodes,
+        }
+        for cause in CAUSES:
+            count = sum(int(row[cause]) for row in selected)
+            record[f"{cause}_count"] = count
+            record[f"{cause}_rate"] = count / episodes if episodes else 0.0
+        for axis in BOUNDARY_AXES:
+            record[f"{axis}_count"] = sum(int(row[axis]) for row in selected)
+        record["mean_death_step"] = float(np.mean(death_steps)) if death_steps else None
+        record["median_death_step"] = float(np.median(death_steps)) if death_steps else None
+        actor_output.append(record)
+
+    run_output: list[dict[str, Any]] = []
+    for run in sorted({str(row["run"]) for row in team_rows}):
+        teams = [row for row in team_rows if row["run"] == run]
+        agents = [row for row in agent_rows if row["run"] == run]
+        episodes = len(teams); exposures = episodes * len(UAV_IDS)
+        alive = sum(int(row["alive"]) for row in agents)
+        boundary = sum(int(row["boundary"]) for row in agents)
+        blue_attack = sum(int(row["blue_attack"]) for row in agents)
+        other = sum(int(row["other"]) for row in agents)
+        if alive + boundary + blue_attack + other != exposures:
+            raise AssertionError(f"identity UAV death accounting is not conserved for {run}")
+        altitude_lower = sum(int(row["altitude_lower"]) for row in agents)
+        losses = exposures - alive
+        run_output.append({
+            "run": run, "episodes": episodes, "total_uav_exposures": exposures,
+            "uav_alive_count": alive, "uav_boundary_count": boundary,
+            "uav_blue_attack_count": blue_attack, "uav_other_death_count": other,
+            "altitude_lower_count": altitude_lower,
+            "boundary_share_of_uav_losses": boundary / losses if losses else 0.0,
+            "altitude_lower_share_of_uav_losses": altitude_lower / losses if losses else 0.0,
+            "altitude_lower_share_of_boundary_losses": altitude_lower / boundary if boundary else 0.0,
+            "mean_uav_survivors": float(np.mean([float(row["uav_survivors"]) for row in teams])) if teams else 0.0,
+        })
+    return actor_output, run_output
 
 
 def _formal_rows(team_rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -547,16 +604,21 @@ def pre_boundary_summaries(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, 
 def verify_identity_against_evaluator(
     run: LoadedAuditRun, episodes: int, profile: str, env_seed: int,
     action_seed: int, device: str, diagnostics_writer: csv.DictWriter | None = None,
-) -> tuple[dict[str, float], list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[
+    dict[str, float], list[dict[str, Any]], list[dict[str, Any]],
+    list[dict[str, Any]], list[dict[str, Any]],
+]:
     identity = dict(zip(UAV_IDS, SOURCE_SLOTS))
     audited_records: list[dict[str, Any]] = []
     all_router_rows: list[dict[str, Any]] = []
+    identity_team_rows: list[dict[str, Any]] = []
+    identity_agent_rows: list[dict[str, Any]] = []
     for episode in range(episodes):
         kwargs = dict(
             episode=episode, env_seed=env_seed + episode, action_seed=action_seed + episode,
             profile=profile, device=device,
         )
-        summary, _, router_rows, actions_on = rollout_episode(
+        summary, death, router_rows, actions_on = rollout_episode(
             run, identity, diagnostics=run.method == DBM_RGAA_METHOD,
             capture_actions=True, **kwargs,
         )
@@ -567,6 +629,11 @@ def verify_identity_against_evaluator(
             if actions_on != actions_off or summary != summary_off:
                 raise AssertionError("DBM diagnostics changed actions or episode result")
         audited_records.append(summary)
+        team_row, agent_rows = episode_output_rows(
+            run, identity, episode, int(kwargs["env_seed"]), int(kwargs["action_seed"]),
+            summary, death,
+        )
+        identity_team_rows.append(team_row); identity_agent_rows.extend(agent_rows)
         all_router_rows.extend(router_rows)
         if diagnostics_writer is not None:
             diagnostics_writer.writerows(router_rows)
@@ -582,7 +649,7 @@ def verify_identity_against_evaluator(
     for field in fields:
         if not np.isclose(audited_stats[field], formal_stats[field], rtol=0.0, atol=0.0):
             raise AssertionError(f"identity/evaluator mismatch for {run.label}: {field}")
-    return audited_stats, audited_records, all_router_rows
+    return audited_stats, audited_records, all_router_rows, identity_team_rows, identity_agent_rows
 
 
 def _csv_fields(rows: Sequence[Mapping[str, Any]]) -> list[str]:
@@ -665,17 +732,28 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
         write_csv(output / "slot_boundary_marginals.csv", slot_marginals)
 
         identity_stats: dict[str, Any] = {}; router_rows: list[dict[str, Any]] = []
+        identity_team_rows: list[dict[str, Any]] = []
+        identity_agent_rows: list[dict[str, Any]] = []
         router_path = output / "execution_router_steps.csv"
         with router_path.open("w", newline="", encoding="utf-8") as stream:
             writer = csv.DictWriter(stream, fieldnames=_router_fieldnames())
             writer.writeheader()
             for run in runs:
-                stats, _, rows = verify_identity_against_evaluator(
+                stats, _, rows, team_identity, agent_identity = verify_identity_against_evaluator(
                     run, int(args.identity_episodes), args.profile, int(args.env_seed),
                     int(args.action_seed), device, writer,
                 )
                 identity_stats[run.label] = stats
                 router_rows.extend(rows)
+                identity_team_rows.extend(team_identity)
+                identity_agent_rows.extend(agent_identity)
+        identity_death_summary, identity_run_death_summary = summarize_identity_deaths(
+            identity_team_rows, identity_agent_rows,
+        )
+        write_csv(output / "identity_episode_team.csv", identity_team_rows)
+        write_csv(output / "identity_episode_agent.csv", identity_agent_rows)
+        write_csv(output / "identity_death_summary.csv", identity_death_summary)
+        write_csv(output / "identity_run_death_summary.csv", identity_run_death_summary)
         execution_summary = execution_summaries(router_rows)
         pre_boundary = pre_boundary_summaries(router_rows)
         write_csv(output / "execution_router_summary.csv", execution_summary)
@@ -707,6 +785,8 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
         }
         summary = {
             **metadata, "identity_evaluator_consistency": identity_stats,
+            "identity_death_summary": identity_death_summary,
+            "identity_run_death_summary": identity_run_death_summary,
             "diagnostics_action_and_result_invariant": True,
             "checkpoint_and_actor_immutability": True,
         }

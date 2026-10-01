@@ -16,7 +16,8 @@ from env.mavuav import OBS_DIM, RED_IDS, load_environment_config
 from tools.audit_dbm_boundary_modes import (
     BOUNDARY_AXES, LoadedAuditRun, _details_row, assert_read_only,
     boundary_axes, categorize_death, ensure_empty_output, execution_summaries, file_sha256,
-    load_audit_run, pre_boundary_summaries, rollout_episode, run_audit,
+    episode_output_rows, load_audit_run, pre_boundary_summaries, rollout_episode, run_audit,
+    summarize_identity_deaths,
     validate_run_contracts, verify_identity_against_evaluator,
 )
 from tools.audit_uav_slot_permutation import SOURCE_SLOTS, UAV_IDS, slot_permutations
@@ -170,12 +171,43 @@ def test_rollout_diagnostics_switch_preserves_actions_and_summary(tmp_path):
 
 def test_identity_matches_formal_evaluator(tmp_path):
     loaded = load_audit_run("dbm", make_run(tmp_path, "dbm_rgaa"), "cpu")
-    stats, records, rows = verify_identity_against_evaluator(
+    stats, records, rows, team_rows, agent_rows = verify_identity_against_evaluator(
         loaded, 2, "learnability", 1000, 2000, "cpu",
     )
     assert stats["completed_episodes"] == len(records) == 2
     assert len(rows) == 6
+    assert len(team_rows) == 2 and len(agent_rows) == 6
+    assert all({row["actor_id"] for row in agent_rows if row["episode"] == episode} == set(UAV_IDS)
+               for episode in range(2))
     assert all(np.isfinite(value) for value in stats.values())
+
+
+def test_identity_agent_rows_preserve_exact_death_cause_axes_and_summaries():
+    run = SimpleNamespace(label="dbm_s5", method="dbm_rgaa", training_seed=5, sampled_steps=2_000_000)
+    summary = {
+        "episode_return": 12.0, "red_attack_kills": 3, "blue_attack_kills": 1,
+        "episode_length": 42, "mav_survived": True, "red_uav_survivors": 1,
+        "outcome": "red",
+    }
+    death = {
+        "UAV1": {"cause": "alive", "step": None, "axes": []},
+        "UAV2": {"cause": "boundary", "step": 23, "axes": ["altitude_lower", "x_upper"]},
+        "UAV3": {"cause": "blue_attack", "step": 31, "axes": []},
+    }
+    team, agents = episode_output_rows(run, IDENTITY, 0, 1000, 2000, summary, death)
+    assert len(agents) == 3 and {row["actor_id"] for row in agents} == set(UAV_IDS)
+    by_id = {row["actor_id"]: row for row in agents}
+    assert by_id["UAV1"]["final_death_cause"] == "alive" and by_id["UAV1"]["alive"] == 1
+    assert by_id["UAV2"]["boundary_crossing_axes"] == "altitude_lower|x_upper"
+    assert by_id["UAV2"]["altitude_lower"] == 1 and by_id["UAV2"]["x_upper"] == 1
+    assert by_id["UAV3"]["blue_attack"] == 1 and by_id["UAV3"]["boundary"] == 0
+    actor_summary, run_summary = summarize_identity_deaths([team], agents)
+    assert len(actor_summary) == 3
+    aggregate = run_summary[0]
+    assert aggregate["uav_alive_count"] + aggregate["uav_boundary_count"] + aggregate["uav_blue_attack_count"] + aggregate["uav_other_death_count"] == 3
+    assert aggregate["altitude_lower_count"] == 1
+    assert aggregate["boundary_share_of_uav_losses"] == pytest.approx(0.5)
+    assert aggregate["altitude_lower_share_of_uav_losses"] == pytest.approx(0.5)
 
 
 def test_switch_pairs_never_cross_episodes_and_dead_rows_are_absent():
@@ -249,6 +281,8 @@ def test_tiny_end_to_end_writes_contract_and_is_read_only(tmp_path):
         "actor_slot_boundary_matrix.csv", "actor_boundary_marginals.csv",
         "slot_boundary_marginals.csv", "execution_router_steps.csv",
         "execution_router_summary.csv", "pre_boundary_window_summary.csv",
+        "identity_episode_team.csv", "identity_episode_agent.csv",
+        "identity_death_summary.csv", "identity_run_death_summary.csv",
         "audit_summary.json", "README.txt",
     }
     assert {item.name for item in output.iterdir()} == expected
