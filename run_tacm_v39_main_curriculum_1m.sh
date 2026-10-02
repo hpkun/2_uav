@@ -24,6 +24,7 @@ for seed in 5 7 9; do
     --checkpoint-interval 250000 \
     --eval-interval 0 \
     --log-interval 100000 \
+    --final-eval-episodes 1 \
     2>&1 | tee "${log_file}"
   status=${PIPESTATUS[0]}
   set -e

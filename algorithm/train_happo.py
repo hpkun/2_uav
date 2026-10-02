@@ -475,6 +475,8 @@ def _evaluation_row(
         "blue_target_strategy": "nearest_red_aircraft", "training_profile": trainer.config["environment_profile"],
         "evaluation_profile": profile,
         "evaluation_environment_seed_start": 1000,
+        **({"final_evaluation_role": trainer.config["final_evaluation_role"]}
+           if trainer.config.get("final_evaluation_role") else {}),
         "episodes": episodes, "evaluation_episodes": episodes,
         "action_mode": action_mode,
         "configured_action_seed": int(action_seed),
@@ -669,6 +671,8 @@ def _initial_resolved(
         "checkpoint_interval": args.checkpoint_interval, "evaluation_interval": args.eval_interval,
         "log_interval": args.log_interval, "evaluation_episodes": args.eval_episodes,
         "final_evaluation_episodes": args.final_eval_episodes, "resume_history": [],
+        **({"final_evaluation_role": trainer.config["final_evaluation_role"]}
+           if trainer.config.get("final_evaluation_role") else {}),
         "evaluation_action_mode": args.eval_action_mode,
         "evaluation_configured_action_seed": int(args.eval_action_seed),
         "evaluation_effective_action_seed": (
@@ -713,6 +717,8 @@ def _write_resolved_config(
                 int(args.eval_action_seed) if args.eval_action_mode == "stochastic" else None
             ),
             "evaluation_environment_seed_start": 1000,
+            **({"final_evaluation_role": trainer.config["final_evaluation_role"]}
+               if trainer.config.get("final_evaluation_role") else {}),
             "evaluation_episodes": args.eval_episodes,
             "final_evaluation_episodes": args.final_eval_episodes,
         })
@@ -984,6 +990,8 @@ def main(
             "training_elapsed_seconds": training_elapsed,
             "final_evaluation_elapsed_seconds": final_evaluation_elapsed,
             "final_evaluations": final_rows, "checkpoint_final": "checkpoint_final.pt",
+            **({"final_evaluation_role": trainer.config["final_evaluation_role"]}
+               if trainer.config.get("final_evaluation_role") else {}),
             **trainer.pcta_metadata,
             **trainer.credit_metadata,
             **trainer.tam_metadata,

@@ -237,6 +237,31 @@ def test_curriculum_endpoints(step, alpha, team, slot, altitude, speed, heading)
         trainer.close()
 
 
+@pytest.mark.parametrize("start_step,alpha,team,slot,altitude,speed,heading", [
+    (0, 0.0, 0.0, 200.0, 100.0, 10.0, 3.0),
+    (200000, 0.5, 750.0, 250.0, 250.0, 15.0, 6.5),
+    (400000, 1.0, 1500.0, 300.0, 400.0, 20.0, 10.0),
+    (500000, 1.0, 1500.0, 300.0, 400.0, 20.0, 10.0),
+])
+def test_training_metrics_report_rollout_start_curriculum_contract(
+    start_step, alpha, team, slot, altitude, speed, heading,
+):
+    trainer = HAPPOTrainer(short_v39(), tacm_config())
+    try:
+        trainer.env_steps = start_step
+        _, metrics = trainer.train_update()
+        assert trainer.env_steps > start_step
+        assert metrics["curriculum_alpha"] == alpha
+        assert metrics["curriculum_team_xy_jitter"] == team
+        assert metrics["curriculum_slot_xy_jitter"] == slot
+        assert metrics["curriculum_altitude_jitter"] == altitude
+        assert metrics["curriculum_speed_jitter"] == speed
+        assert metrics["curriculum_heading_jitter_deg"] == heading
+        assert trainer.vector_env.randomization_override == trainer.applied_curriculum_state["override"]
+    finally:
+        trainer.close()
+
+
 def test_context_schedule_metadata_and_checkpoint_exact_resume(tmp_path):
     assert tacm_context_coefficient(0, .05, .01, 500000) == .05
     assert tacm_context_coefficient(500000, .05, .01, 500000) == .01
@@ -249,9 +274,15 @@ def test_context_schedule_metadata_and_checkpoint_exact_resume(tmp_path):
         payload = torch.load(path, map_location="cpu", weights_only=False)
         assert payload["algorithm"] == "tacm_rgaa_happo"
         assert payload["tacm_rgaa_version"] == 1
-        assert payload["rollout_state"]["randomization_curriculum_state"] == {
-            "sampled_steps": trainer.env_steps,
-            "applied_override": trainer.vector_env.randomization_override,
+        saved_curriculum = payload["rollout_state"]["randomization_curriculum_state"]
+        assert saved_curriculum["sampled_steps"] == trainer.env_steps
+        assert saved_curriculum["applied_alpha"] == trainer.applied_curriculum_state["alpha"]
+        assert saved_curriculum["applied_override"] == trainer.vector_env.randomization_override
+        assert saved_curriculum["applied_values"] == {
+            key: trainer.applied_curriculum_state[key] for key in (
+                "team_xy_jitter", "slot_xy_jitter", "altitude_jitter",
+                "speed_jitter", "heading_jitter_deg",
+            )
         }
         saved_steps = trainer.env_steps
     finally:
@@ -260,6 +291,7 @@ def test_context_schedule_metadata_and_checkpoint_exact_resume(tmp_path):
     try:
         assert restored.load_checkpoint(path) == saved_steps
         assert restored.vector_env.randomization_override == payload["rollout_state"]["randomization_curriculum_state"]["applied_override"]
+        assert restored.applied_curriculum_state == trainer.applied_curriculum_state
     finally:
         restored.close()
     mismatch = HAPPOTrainer(short_v39(), tacm_config(tacm_tau_teacher=0.5))
@@ -338,6 +370,14 @@ def test_curriculum_disabled_preserves_canonical_reset_contract():
         reference = HeterogeneousMAVUAVAirCombatEnv(short_v39(), seed=17, profile="main")
         reference.reset(seed=17)
         assert np.array_equal(trainer.global_states[0], reference.global_state())
+        _, metrics = trainer.train_update()
+        assert metrics["curriculum_alpha"] == 1.0
+        assert metrics["curriculum_team_xy_jitter"] == 1500.0
+        assert metrics["curriculum_slot_xy_jitter"] == 300.0
+        assert metrics["curriculum_altitude_jitter"] == 400.0
+        assert metrics["curriculum_speed_jitter"] == 20.0
+        assert metrics["curriculum_heading_jitter_deg"] == 10.0
+        assert trainer.vector_env.randomization_override is None
     finally:
         trainer.close()
 

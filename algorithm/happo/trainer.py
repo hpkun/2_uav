@@ -520,7 +520,11 @@ class HAPPOTrainer:
         return {"alpha": alpha, "override": override, **override}
 
     def _apply_curriculum_override(self) -> None:
-        self.vector_env.set_randomization_override(self.curriculum_state()["override"])
+        state = deepcopy(self.curriculum_state())
+        self.vector_env.set_randomization_override(state["override"])
+        # Immutable snapshot of the reset contract actually applied for the
+        # rollout about to be collected.  Do not recompute it at rollout end.
+        self.applied_curriculum_state = state
 
     def _empty_rollout_metrics(self) -> dict[str, Any]:
         return {
@@ -2215,7 +2219,7 @@ class HAPPOTrainer:
         metrics.update({"actor_loss": float(np.mean([v for rows in actor_losses for v in rows])), "critic_loss": float(np.mean(critic_losses)), "entropy": float(np.mean(entropies)), "agent_update_order": order})
         metrics.update(credit_metrics)
         metrics.update(rgaa_metrics)
-        curriculum = self.curriculum_state()
+        curriculum = deepcopy(self.applied_curriculum_state)
         metrics.update({
             "curriculum_alpha": float(curriculum["alpha"]),
             "curriculum_team_xy_jitter": float(curriculum["team_xy_jitter"]),
@@ -2509,7 +2513,15 @@ class HAPPOTrainer:
                 "vector_base_seed": self.vector_env.base_seed,
                 "randomization_curriculum_state": {
                     "sampled_steps": int(self.env_steps),
-                    "applied_override": deepcopy(self.vector_env.randomization_override),
+                    "applied_alpha": float(self.applied_curriculum_state["alpha"]),
+                    "applied_override": deepcopy(self.applied_curriculum_state["override"]),
+                    "applied_values": {
+                        key: float(self.applied_curriculum_state[key])
+                        for key in (
+                            "team_xy_jitter", "slot_xy_jitter", "altitude_jitter",
+                            "speed_jitter", "heading_jitter_deg",
+                        )
+                    },
                 },
             },
         }
@@ -2902,12 +2914,27 @@ class HAPPOTrainer:
         self.env_steps = int(data["sampled_steps"])
         if bool(self.config["randomization_curriculum_enabled"]):
             saved_curriculum = rollout.get("randomization_curriculum_state")
-            expected_curriculum = {
-                "sampled_steps": self.env_steps,
-                "applied_override": deepcopy(self.vector_env.randomization_override),
-            }
-            if saved_curriculum != expected_curriculum:
+            if not isinstance(saved_curriculum, Mapping):
+                raise RuntimeError("resume checkpoint is missing applied curriculum state")
+            if int(saved_curriculum.get("sampled_steps", -1)) != self.env_steps:
+                raise RuntimeError("resume TACM curriculum sampled_steps mismatch")
+            applied_override = deepcopy(saved_curriculum.get("applied_override"))
+            if applied_override != self.vector_env.randomization_override:
                 raise RuntimeError("resume TACM curriculum state mismatch")
+            applied_values = saved_curriculum.get("applied_values")
+            if not isinstance(applied_values, Mapping):
+                raise RuntimeError("resume checkpoint is missing applied curriculum values")
+            self.applied_curriculum_state = {
+                "alpha": float(saved_curriculum["applied_alpha"]),
+                "override": applied_override,
+                **{key: float(applied_values[key]) for key in (
+                    "team_xy_jitter", "slot_xy_jitter", "altitude_jitter",
+                    "speed_jitter", "heading_jitter_deg",
+                )},
+            }
+        else:
+            # Disabled curriculum checkpoints retain canonical profile behavior.
+            self.applied_curriculum_state = deepcopy(self.curriculum_state())
         self.last_rollout_metrics = self._empty_rollout_metrics()
         return self.env_steps
 

@@ -42,6 +42,11 @@ randomization amplitudes from canonical `learnability` to canonical `main` durin
 vector environments persist the active override in exact-continuation checkpoints. Evaluation
 does not use the curriculum.
 
+The formal 1M launcher performs exactly one deterministic final episode as an execution smoke.
+It is labeled `final_evaluation_role: execution_smoke` and is not a formal result. Formal
+stochastic evaluation remains a separate invocation using environment seeds 3000--3099 and
+independently configured action seeds 4000--4099.
+
 TACM stores a strict versioned teacher, temporal, DBM initialization, and curriculum contract.
 The same training seed gives byte-exact initial DBM and TACM actor parameters.
 
