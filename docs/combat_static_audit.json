@@ -1,0 +1,58 @@
+{
+  "environment_version": "heterogeneous_mavuav_4v4_v3_9",
+  "scope": "FACTS FROM CODE only",
+  "attack_gate": {
+    "distance_m": [1000.0, 3000.0],
+    "distance_inclusive": true,
+    "ata_deg_strict_upper": 30.0,
+    "aa_deg_strict_upper": 90.0,
+    "hold_steps": 3,
+    "explicit_fire_action": false,
+    "target_lock_required": false,
+    "reward_target_match_required": false,
+    "explicit_visibility_required": false,
+    "pairwise_independent": true
+  },
+  "attribution": {
+    "multiple_targets_per_attacker_step_possible": true,
+    "multiple_attackers_per_target_step_possible": true,
+    "unique_killer_defined": false,
+    "mav_can_attack_blue": true
+  },
+  "visibility": {
+    "uav_direct_range_m": 8000.0,
+    "mav_direct_range_m": 12000.0,
+    "attack_gate_implies_direct_visibility_under_current_range_model": true,
+    "combat_resolver_checks_visibility": false
+  },
+  "reward_credit": {
+    "blue_kill_event_value": 100.0,
+    "blue_kill_event_is_shared": true,
+    "uav_reward_target_is_combat_lock": false,
+    "rgaa_auxiliary_includes_shared_blue_kill": false,
+    "rgaa_team_advantage_includes_shared_blue_kill": true
+  },
+  "classifications": {
+    "CLEARLY INTENTIONAL BY DESIGN": [
+      "three-step pairwise geometric gate",
+      "dense angle-distance process reward plus exact-gate bonus",
+      "shared team event reward"
+    ],
+    "POTENTIAL CREDIT-ASSIGNMENT AMBIGUITY": [
+      "shared kill credit",
+      "reward target is not combat target lock",
+      "simultaneous candidates have no unique killer"
+    ],
+    "POTENTIAL INCIDENTAL-KILL MECHANISM": [
+      "no explicit fire action",
+      "multi-target attack pairs",
+      "Blue nearest-Red pursuit may create engagement opportunities",
+      "streak-2 geometry may persist under a control intervention"
+    ],
+    "REALISM LIMITATION BUT NOT NECESSARILY PERFORMANCE BUG": [
+      "MAV can kill",
+      "no missile/ammunition/damage model",
+      "range-only sensor model"
+    ]
+  }
+}
