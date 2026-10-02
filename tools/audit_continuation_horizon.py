@@ -27,7 +27,10 @@ from env.mavuav import (
 )
 
 
-SUPPORTED_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_9"
+SUPPORTED_ENVIRONMENT_VERSIONS = frozenset((
+    "heterogeneous_mavuav_4v4_v3_9",
+    "heterogeneous_mavuav_4v4_v3_10",
+))
 SUPPORTED_REWARD_MODE = "heterogeneous_role_coupled_gate_v1"
 DEFAULT_HORIZONS = (75, 100, 125, 150, 200)
 JITTER_FIELDS = (
@@ -81,18 +84,18 @@ def _checkpoint_label(path: Path) -> str:
 
 def validate_audit_contract(payload: Mapping[str, Any], env_config: Mapping[str, Any]) -> int:
     validate_checkpoint_contract(dict(payload), dict(env_config))
-    if env_config["environment_version"] != SUPPORTED_ENVIRONMENT_VERSION:
-        raise RuntimeError("continuation audit only supports the frozen v3.9 environment")
+    if env_config["environment_version"] not in SUPPORTED_ENVIRONMENT_VERSIONS:
+        raise RuntimeError("continuation audit only supports the frozen v3.9/v3.10 environments")
     reward_mode = payload.get("reward_mode")
     if reward_mode != SUPPORTED_REWARD_MODE or reward_mode not in ROLE_REWARD_MODES:
-        raise RuntimeError("continuation audit requires the v3.9 role-reward contract")
+        raise RuntimeError("continuation audit requires the v3.9/v3.10 role-reward contract")
     if float(env_config["reward"]["terminal_draw"]) != 0.0:
         raise RuntimeError("single-pass continuation audit requires terminal_draw == 0")
     if str(env_config.get("shaping", {}).get("mode", "absolute")) == "potential":
         raise RuntimeError("single-pass continuation audit rejects timeout-dependent potential shaping")
     observation_horizon = int(env_config["simulation"]["max_decision_steps"])
     if observation_horizon != 75:
-        raise RuntimeError("supported v3.9 continuation audit requires observation horizon 75")
+        raise RuntimeError("supported v3.9/v3.10 continuation audit requires observation horizon 75")
     trainer_config = payload.get("trainer_config", payload.get("config", {}))
     method = payload.get("method_variant", trainer_config.get("method_variant"))
     if method != TACM_RGAA_METHOD or payload.get("algorithm") != "tacm_rgaa_happo":

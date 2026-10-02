@@ -1,0 +1,41 @@
+{
+  "environment_version": "heterogeneous_mavuav_4v4_v3_10",
+  "scope": "FACTS FROM CODE only",
+  "change_classification": "task semantic correction, not performance tuning",
+  "legacy_v39": {
+    "mav_direct_attack_capability": true,
+    "preserved_without_modification": true
+  },
+  "formal_v310": {
+    "mav_direct_attack_capability": false,
+    "direct_red_attackers": ["UAV1", "UAV2", "UAV3"],
+    "blue_can_attack_mav": true,
+    "mav_to_blue_streak_slots_retained": true,
+    "mav_to_blue_streak_slots_always_zero": true
+  },
+  "dimensions": {
+    "observation": 100,
+    "global_state": 117,
+    "action": 3
+  },
+  "attack_gate": {
+    "distance_m": [1000.0, 3000.0],
+    "ata_deg_strict_upper": 30.0,
+    "aa_deg_strict_upper": 90.0,
+    "hold_steps": 3
+  },
+  "mav_reward": {
+    "role_process_terms": ["threat", "aspect", "awareness"],
+    "direct_attack_shaping": "none",
+    "attacker_specific_kill_bonus": false,
+    "receives_shared_blue_kill_reward": true,
+    "receives_terminal_team_reward": true,
+    "receives_safety_team_reward": true
+  },
+  "unchanged_from_v39": [
+    "dynamics", "battlefield", "sensors", "ideal Red datalink",
+    "Blue nearest-Red policy", "action semantics", "boundary handling",
+    "reward coefficients", "role reward", "safety reward",
+    "win/loss/draw conditions", "75-step horizon", "randomization profiles"
+  ]
+}

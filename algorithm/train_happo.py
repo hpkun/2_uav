@@ -1003,6 +1003,7 @@ def main(
             **trainer.lp_cr_rgaa_metadata,
             **trainer.ls_rgaa_metadata,
             **trainer.lsa_rgaa_metadata,
+            **trainer.combat_capability_metadata,
         }
         with (run_dir / "summary.json").open("w", encoding="utf-8") as stream:
             json.dump(summary, stream, indent=2, ensure_ascii=False)

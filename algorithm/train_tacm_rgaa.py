@@ -1,4 +1,4 @@
-"""Train TACM-RGAA-v1 on the frozen v3.9 task."""
+"""Train TACM-RGAA-v1 on an explicitly validated v3.9/v3.10 task."""
 from pathlib import Path
 import sys
 

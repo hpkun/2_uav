@@ -26,7 +26,10 @@ from env.vector_env import _environment_state, _restore_environment_state
 from tools.audit_continuation_horizon import load_tacm_checkpoint
 
 
-CONDITIONS = ("POLICY", "TRIM", "UNIFORM_RANDOM", "UAV_ACTION_CYCLIC")
+CONDITIONS = (
+    "POLICY", "TRIM", "UNIFORM_RANDOM", "UAV_TRIM",
+    "UAV_UNIFORM_RANDOM", "UAV_ACTION_CYCLIC",
+)
 UAV_IDS = RED_IDS[1:]
 # Recipient <- source.  Equivalently U1 -> U2, U2 -> U3, U3 -> U1.
 CYCLIC_SOURCE = {"UAV1": "UAV3", "UAV2": "UAV1", "UAV3": "UAV2"}
@@ -70,7 +73,7 @@ def _restore_torch_rng(state: tuple[torch.Tensor, list[torch.Tensor] | None]) ->
 
 
 def recompute_reward_targets(env: HeterogeneousMAVUAVAirCombatEnv) -> dict[str, str | None]:
-    """Pure reconstruction of the v3.9 UAV selector on the current state."""
+    """Pure pre-action reconstruction of the v3.9/v3.10 UAV reward selector."""
     normalization = env.config["normalization"]
     maximum_range = float(env.config["combat"]["distance"][1])
     available = [bid for bid in BLUE_IDS if env.entities[bid].state.alive and env.team_visible(bid)]
@@ -135,6 +138,16 @@ def condition_actions(
     sampled = _sample_policy_actions(actors, observations, device)
     if condition == "POLICY":
         return sampled
+    if condition == "UAV_TRIM":
+        return {"MAV": sampled["MAV"].copy(), **{
+            aid: np.zeros(3, dtype=np.float32) for aid in UAV_IDS
+        }}
+    if condition == "UAV_UNIFORM_RANDOM":
+        if random_rng is None:
+            raise ValueError("UAV_UNIFORM_RANDOM requires an explicit RNG")
+        return {"MAV": sampled["MAV"].copy(), **{
+            aid: random_rng.uniform(-1.0, 1.0, 3).astype(np.float32) for aid in UAV_IDS
+        }}
     if condition == "UAV_ACTION_CYCLIC":
         return {
             "MAV": sampled["MAV"].copy(),
@@ -281,8 +294,8 @@ def run_condition_episode(
             pre[(aid, bid)] = {
                 **_pair_geometry(env, aid, bid),
                 "attack_streak": int(env._attack_streak.get((aid, bid), 0)),
-                "reward_selected_target": targets[aid],
-                "target_match": reward_target_matches(aid, bid, targets),
+                "pre_action_selector_target": targets[aid],
+                "pre_action_selector_match": reward_target_matches(aid, bid, targets),
                 "direct_visibility": bool(env.direct_visible(aid, bid)),
                 "datalink_visibility": bool(env.datalink_visible(aid, bid)),
             }
@@ -303,6 +316,10 @@ def run_condition_episode(
                     })
                 cf_rows.extend(rows); audited_opportunities += 1
         observations, _, terminated, truncated, info = env.step(actions)
+        post_step_targets = {
+            "MAV": None,
+            **{aid: info.get(f"reward_target_{aid}") for aid in UAV_IDS},
+        }
         event_pairs = red_attack_event_pairs(info["attack_events"])
         event_set = set(event_pairs)
         counters["attack_events"] += len(event_pairs)
@@ -327,8 +344,12 @@ def run_condition_episode(
                 current_kill = {
                     "decision_step": step, **kill_geometry,
                     "attack_streak": int(pre[(aid, bid)]["attack_streak"] + 1),
-                    "reward_selected_target": targets[aid],
-                    "target_match": reward_target_matches(aid, bid, targets),
+                    "pre_action_selector_target": targets[aid],
+                    "pre_action_selector_match": reward_target_matches(aid, bid, targets),
+                    "post_step_reward_target": post_step_targets[aid],
+                    "post_step_reward_target_match": bool(
+                        aid in UAV_IDS and post_step_targets[aid] == bid
+                    ),
                     "direct_visibility": pre[(aid, bid)]["direct_visibility"],
                     "datalink_visibility": pre[(aid, bid)]["datalink_visibility"],
                     **command_fields[aid],
@@ -339,10 +360,14 @@ def run_condition_episode(
                     "condition": condition, "episode": episode, "decision_step": step,
                     "target": bid, "candidate_attacker": aid,
                     "candidate_attacker_count": len(candidates),
-                    "reward_selected_target": pre[(aid, bid)]["reward_selected_target"],
-                    "reward_target_match": pre[(aid, bid)]["target_match"],
-                    "three_step_reward_target_consistent": bool(
-                        len(history) == 3 and all(row["target_match"] for row in history)
+                    "pre_action_selector_target": pre[(aid, bid)]["pre_action_selector_target"],
+                    "pre_action_selector_match": pre[(aid, bid)]["pre_action_selector_match"],
+                    "post_step_reward_target": post_step_targets[aid],
+                    "post_step_reward_target_match": bool(
+                        aid in UAV_IDS and post_step_targets[aid] == bid
+                    ),
+                    "three_step_pre_action_selector_consistent": bool(
+                        len(history) == 3 and all(row["pre_action_selector_match"] for row in history)
                     ),
                     **{key: current_kill[key] for key in (
                         "direct_visibility", "datalink_visibility", "distance", "ATA_deg", "AA_deg",
@@ -369,8 +394,12 @@ def run_condition_episode(
             per_agent[aid]["streak2"] += int(resulting_streak >= 2)
             history_row = {
                 "decision_step": step, **post, "attack_streak": resulting_streak,
-                "reward_selected_target": targets[aid],
-                "target_match": reward_target_matches(aid, bid, targets),
+                "pre_action_selector_target": targets[aid],
+                "pre_action_selector_match": reward_target_matches(aid, bid, targets),
+                "post_step_reward_target": post_step_targets[aid],
+                "post_step_reward_target_match": bool(
+                    aid in UAV_IDS and post_step_targets[aid] == bid
+                ),
                 "direct_visibility": pre[(aid, bid)]["direct_visibility"],
                 "datalink_visibility": pre[(aid, bid)]["datalink_visibility"],
                 **command_fields[aid],
@@ -382,8 +411,12 @@ def run_condition_episode(
                     "checkpoint": f"{loaded['checkpoint'].parent.name}/{loaded['checkpoint'].name}",
                     "condition": condition, "episode": episode, "decision_step": step,
                     "attacker": aid, "target": bid,
-                    "reward_selected_target": targets[aid],
-                    "reward_target_match": reward_target_matches(aid, bid, targets),
+                    "pre_action_selector_target": targets[aid],
+                    "pre_action_selector_match": reward_target_matches(aid, bid, targets),
+                    "post_step_reward_target": post_step_targets[aid],
+                    "post_step_reward_target_match": bool(
+                        aid in UAV_IDS and post_step_targets[aid] == bid
+                    ),
                     **history_row,
                 })
         done = bool(terminated or truncated)
@@ -392,8 +425,12 @@ def run_condition_episode(
         "checkpoint": f"{loaded['checkpoint'].parent.name}/{loaded['checkpoint'].name}",
         "training_seed": loaded["training_seed"], "sampled_steps": loaded["sampled_steps"],
         "condition": condition, "episode": episode, "environment_seed": environment_seed,
-        "action_seed": action_seed if condition in ("POLICY", "UAV_ACTION_CYCLIC") else None,
-        "control_action_seed": control_action_seed if condition == "UNIFORM_RANDOM" else None,
+        "action_seed": action_seed if condition in (
+            "POLICY", "UAV_TRIM", "UAV_UNIFORM_RANDOM", "UAV_ACTION_CYCLIC",
+        ) else None,
+        "control_action_seed": control_action_seed if condition in (
+            "UNIFORM_RANDOM", "UAV_UNIFORM_RANDOM",
+        ) else None,
         "outcome": summary["outcome"], "episode_return": float(summary["episode_return"]),
         "episode_length": int(summary["episode_length"]),
         "MAV_survival": bool(summary["mav_survived"]),
@@ -422,6 +459,10 @@ def run_condition_episode(
             f"{aid}_streak_ge_2_count": values["streak2"],
             f"{aid}_attack_event_pair_count": values["events"],
         })
+    if loaded["environment_config"]["environment_version"].endswith("v3_10") and any((
+        counters["mav_events"], counters["mav_candidates"], counters["mav_only"],
+    )):
+        raise AssertionError("v3.10 unarmed-MAV combat sanity violated")
     all_rows = [episode_row, *attack_rows, *death_rows, *geometry_rows, *cf_rows]
     _finite_rows(all_rows)
     return {
@@ -457,6 +498,44 @@ def summarize_conditions(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, An
                     "MAV_only_candidate_death_count",
                 )},
             })
+    return result
+
+
+def paired_condition_episode_records(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    result = []
+    checkpoints = list(dict.fromkeys(str(row["checkpoint"]) for row in rows))
+    for checkpoint in checkpoints:
+        policy = {
+            int(row["episode"]): row for row in rows
+            if row["checkpoint"] == checkpoint and row["condition"] == "POLICY"
+        }
+        for condition in CONDITIONS[1:]:
+            control = {
+                int(row["episode"]): row for row in rows
+                if row["checkpoint"] == checkpoint and row["condition"] == condition
+            }
+            for episode in sorted(set(policy) & set(control)):
+                p, c = policy[episode], control[episode]
+                result.append({
+                    "checkpoint": checkpoint, "training_seed": int(p["training_seed"]),
+                    "episode": episode, "environment_seed": int(p["environment_seed"]),
+                    "control_condition": condition,
+                    "policy_outcome": p["outcome"], "control_outcome": c["outcome"],
+                    "policy_red_kills": int(p["red_attack_kills"]),
+                    "control_red_kills": int(c["red_attack_kills"]),
+                    "delta_red_kills": int(p["red_attack_kills"]) - int(c["red_attack_kills"]),
+                    "policy_return": float(p["episode_return"]),
+                    "control_return": float(c["episode_return"]),
+                    "delta_return": float(p["episode_return"]) - float(c["episode_return"]),
+                    "policy_gate_fraction": float(p["red_gate_active_fraction"]),
+                    "control_gate_fraction": float(c["red_gate_active_fraction"]),
+                    "delta_gate_fraction": float(p["red_gate_active_fraction"]) - float(c["red_gate_active_fraction"]),
+                    "policy_attack_events": int(p["attack_event_pair_count"]),
+                    "control_attack_events": int(c["attack_event_pair_count"]),
+                    "delta_attack_events": int(p["attack_event_pair_count"]) - int(c["attack_event_pair_count"]),
+                    "policy_MAV_survival": bool(p["MAV_survival"]),
+                    "control_MAV_survival": bool(c["MAV_survival"]),
+                })
     return result
 
 
@@ -550,11 +629,13 @@ def add_alignment_summaries(
         }
         summary.update({
             "uav_attack_event_candidates": len(attacks),
-            "attack_event_reward_target_match_rate": _mean(attacks, "reward_target_match"),
+            "attack_event_pre_action_selector_match_rate": _mean(attacks, "pre_action_selector_match"),
+            "attack_event_post_step_reward_target_match_rate": _mean(attacks, "post_step_reward_target_match"),
             "uav_death_candidates": len(deaths),
-            "death_candidate_reward_target_match_rate": _mean(deaths, "reward_target_match"),
-            "three_step_reward_target_consistency_rate": _mean(
-                deaths, "three_step_reward_target_consistent",
+            "death_candidate_pre_action_selector_match_rate": _mean(deaths, "pre_action_selector_match"),
+            "death_candidate_post_step_reward_target_match_rate": _mean(deaths, "post_step_reward_target_match"),
+            "three_step_pre_action_selector_consistency_rate": _mean(
+                deaths, "three_step_pre_action_selector_consistent",
             ),
             "blue_death_events": len(death_events),
             **{
@@ -580,6 +661,7 @@ def write_outputs(output: Path, all_rows: Mapping[str, list[dict[str, Any]]], pr
     condition_summary = summarize_conditions(episodes)
     add_alignment_summaries(condition_summary, attacks, deaths)
     paired = paired_condition_comparisons(episodes)
+    paired_episodes = paired_condition_episode_records(episodes)
     geometry_summary = summarize_prekill(geometry)
     cf_summary = summarize_counterfactuals(cf)
     _write_csv(output / "condition_episode_records.csv", episodes, (*EPISODE_FIELDS, *[
@@ -587,6 +669,7 @@ def write_outputs(output: Path, all_rows: Mapping[str, list[dict[str, Any]]], pr
     ]))
     _write_csv(output / "condition_summary.csv", condition_summary)
     _write_csv(output / "paired_condition_comparison.csv", paired)
+    _write_csv(output / "paired_condition_episode_records.csv", paired_episodes)
     _write_csv(output / "attack_event_records.csv", attacks)
     _write_csv(output / "death_candidate_records.csv", deaths)
     _write_csv(output / "prekill_geometry_records.csv", geometry)
@@ -612,6 +695,8 @@ def write_outputs(output: Path, all_rows: Mapping[str, list[dict[str, Any]]], pr
             "The audit tests operational state-action dependence, not subjective intent or understanding.",
             "One-step streak-2 interventions isolate immediate gate completion, not long-horizon tactical causality.",
             "Candidate attack pairs are retained; no unique killer is fabricated for simultaneous candidates.",
+            "UAV_ACTION_CYCLIC breaks both state-action matching and private actor-identity matching; it is not a pure state-action causal intervention.",
+            "Pre-action selector targets are a read-only reconstruction, whereas post-step reward targets come from the environment's actual reward diagnostics.",
         ],
     }
     (output / "combat_skill_audit_summary.json").write_text(

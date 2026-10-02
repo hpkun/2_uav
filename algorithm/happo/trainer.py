@@ -156,7 +156,7 @@ def _resolved_reward_mode(environment_config: Mapping[str, Any]) -> str:
     shaping_mode = str(environment_config.get("shaping", {}).get("mode", "absolute"))
     return ("heterogeneous_role_v1" if version.endswith("v3_7") else
             "heterogeneous_role_coupled_v1" if version.endswith("v3_8") else
-            "heterogeneous_role_coupled_gate_v1" if version.endswith("v3_9") else
+            "heterogeneous_role_coupled_gate_v1" if version.endswith(("v3_9", "v3_10")) else
             shaping_mode)
 
 
@@ -233,6 +233,13 @@ class HAPPOTrainer:
             if self.loss_separated_enabled else None
         )
         self.environment_config = load_environment_config(env_config)
+        self.combat_capability_metadata = {
+            "mav_direct_attack_capability": bool(
+                self.environment_config["combat"].get("mav_can_attack", True)
+            ),
+            "mav_direct_attack_shaping": "none",
+            "mav_receives_shared_team_kill_reward": True,
+        }
         shaping = self.environment_config.get("shaping", {})
         self.reward_shaping_mode = str(shaping.get("mode", "absolute"))
         version = self.environment_config["environment_version"]
@@ -257,14 +264,17 @@ class HAPPOTrainer:
                 "actor_variant='vanilla', and critic_variant='mlp'"
             )
         if self.role_guided_enabled and (
-            version != "heterogeneous_mavuav_4v4_v3_9"
+            version not in (
+                "heterogeneous_mavuav_4v4_v3_9",
+                "heterogeneous_mavuav_4v4_v3_10",
+            )
             or self.reward_mode != "heterogeneous_role_coupled_gate_v1"
             or declared_role_reward_mode != "heterogeneous_role_coupled_gate_v1"
             or c["actor_variant"] != "vanilla"
             or c["critic_variant"] != "mlp"
         ):
             raise ValueError(
-                "RGAA/CR-RGAA-HAPPO requires v3.9 heterogeneous_role_coupled_gate_v1, "
+                "RGAA/CR-RGAA-HAPPO requires v3.9/v3.10 heterogeneous_role_coupled_gate_v1, "
                 "actor_variant='vanilla', and critic_variant='mlp'"
             )
         if self.role_guided_enabled and float(c["role_advantage_coef"]) < 0.0:
@@ -2433,6 +2443,7 @@ class HAPPOTrainer:
         payload.update(self.lp_cr_rgaa_metadata)
         payload.update(self.ls_rgaa_metadata)
         payload.update(self.lsa_rgaa_metadata)
+        payload.update(self.combat_capability_metadata)
         if self.rgaa_enabled:
             payload["algorithm"] = (
                 "tacm_rgaa_happo" if self.tacm_enabled else
@@ -2536,6 +2547,7 @@ class HAPPOTrainer:
         state.update(self.lp_cr_rgaa_metadata)
         state.update(self.ls_rgaa_metadata)
         state.update(self.lsa_rgaa_metadata)
+        state.update(self.combat_capability_metadata)
         if self.rgaa_enabled:
             state["algorithm"] = (
                 "tacm_rgaa_happo" if self.tacm_enabled else
@@ -2610,6 +2622,10 @@ class HAPPOTrainer:
         actual = (data.get("environment_version"), data.get("observation_dim"), data.get("global_state_dim"))
         if actual != expected:
             raise RuntimeError("incompatible checkpoint contract for HAPPO environment")
+        for field, value in self.combat_capability_metadata.items():
+            if field in data or self.environment_config["environment_version"].endswith("v3_10"):
+                if data.get(field) != value:
+                    raise RuntimeError(f"incompatible checkpoint combat capability contract: {field}")
         checkpoint_mode = data.get("reward_mode", data.get("reward_shaping_mode", "absolute"))
         checkpoint_gamma = float(data.get("shaping_gamma") or 0.0)
         if checkpoint_mode != self.reward_mode or (

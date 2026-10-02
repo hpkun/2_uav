@@ -51,11 +51,20 @@ def validate_checkpoint_contract(payload: dict[str, Any], env_config: dict[str, 
     expected = (env_config["environment_version"], OBS_DIM, GLOBAL_STATE_DIM)
     if actual != expected:
         raise RuntimeError("incompatible HAPPO checkpoint environment contract")
-    env_shaping = env_config.get("shaping", {})
     version = env_config["environment_version"]
+    if version.endswith("v3_10"):
+        expected_capability = {
+            "mav_direct_attack_capability": False,
+            "mav_direct_attack_shaping": "none",
+            "mav_receives_shared_team_kill_reward": True,
+        }
+        for field, value in expected_capability.items():
+            if payload.get(field) != value:
+                raise RuntimeError(f"incompatible HAPPO checkpoint combat capability: {field}")
+    env_shaping = env_config.get("shaping", {})
     env_mode = ("heterogeneous_role_v1" if version.endswith("v3_7") else
                 "heterogeneous_role_coupled_v1" if version.endswith("v3_8") else
-                "heterogeneous_role_coupled_gate_v1" if version.endswith("v3_9") else
+                "heterogeneous_role_coupled_gate_v1" if version.endswith(("v3_9", "v3_10")) else
                 str(env_shaping.get("mode", "absolute")))
     checkpoint_mode = str(payload.get("reward_mode", payload.get("reward_shaping_mode", "absolute")))
     if checkpoint_mode != env_mode:
@@ -160,7 +169,7 @@ def main(expected_critic_variant: str = "mlp") -> None:
     version = env_config["environment_version"]
     reward_mode = ("heterogeneous_role_v1" if version.endswith("v3_7") else
                    "heterogeneous_role_coupled_v1" if version.endswith("v3_8") else
-                   "heterogeneous_role_coupled_gate_v1" if version.endswith("v3_9") else
+                   "heterogeneous_role_coupled_gate_v1" if version.endswith(("v3_9", "v3_10")) else
                    str(env_config.get("shaping", {}).get("mode", "absolute")))
     training_profile = str(payload["environment_profile"])
     rows = []

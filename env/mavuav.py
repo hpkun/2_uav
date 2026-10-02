@@ -37,8 +37,9 @@ CURRENT_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_6"
 ROLE_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_7"
 COUPLED_ROLE_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_8"
 GLOBAL_ROLE_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_9"
+UNARMED_MAV_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_10"
 ROLE_REWARD_MODES = frozenset(("heterogeneous_role_v1", "heterogeneous_role_coupled_v1", "heterogeneous_role_coupled_gate_v1"))
-SUPPORTED_ENVIRONMENT_VERSIONS = frozenset((ENVIRONMENT_VERSION, CURRENT_ENVIRONMENT_VERSION, ROLE_ENVIRONMENT_VERSION, COUPLED_ROLE_ENVIRONMENT_VERSION, GLOBAL_ROLE_ENVIRONMENT_VERSION))
+SUPPORTED_ENVIRONMENT_VERSIONS = frozenset((ENVIRONMENT_VERSION, CURRENT_ENVIRONMENT_VERSION, ROLE_ENVIRONMENT_VERSION, COUPLED_ROLE_ENVIRONMENT_VERSION, GLOBAL_ROLE_ENVIRONMENT_VERSION, UNARMED_MAV_ENVIRONMENT_VERSION))
 OBS_DIM = 100
 GLOBAL_STATE_DIM = 117
 CROSS_TEAM_ATTACK_PAIRS = tuple((red, blue) for red in RED_IDS for blue in BLUE_IDS) + tuple(
@@ -116,8 +117,16 @@ def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
     if float(cfg["safety"]["red_safe_distance"]) <= 0 or float(cfg["safety"]["red_safe_distance_penalty"]) > 0:
         raise ValueError("safety distance must be positive and penalty non-positive")
     combat = cfg["combat"]
-    if set(combat) != {"distance", "ata_deg", "aa_deg", "hold_steps"}:
+    legacy_combat_fields = {"distance", "ata_deg", "aa_deg", "hold_steps"}
+    expected_combat_fields = (
+        legacy_combat_fields | {"mav_can_attack"}
+        if cfg["environment_version"] == UNARMED_MAV_ENVIRONMENT_VERSION
+        else legacy_combat_fields
+    )
+    if set(combat) != expected_combat_fields:
         raise ValueError("combat has unknown or missing fields")
+    if cfg["environment_version"] == UNARMED_MAV_ENVIRONMENT_VERSION and combat["mav_can_attack"] is not False:
+        raise ValueError("v3.10 combat.mav_can_attack must be false")
     combat["distance"] = _pair(combat["distance"], "combat.distance")
     if int(combat["hold_steps"]) <= 0:
         raise ValueError("combat.hold_steps must be positive")
@@ -167,7 +176,7 @@ def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("v3.8 blue_kill must be +100")
     else:
         if shaping is not None:
-            raise ValueError("v3.9 must omit PBRS shaping")
+            raise ValueError("v3.9/v3.10 must omit PBRS shaping")
         role = cfg.get("role_reward")
         frozen = {
             "mode": "heterogeneous_role_coupled_gate_v1",
@@ -176,9 +185,9 @@ def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
             "mav": {"threat_weight": .3, "aspect_weight": .2, "awareness_weight": .4, "aspect_threshold_deg": 45.0, "awareness_threshold_deg": 90.0, "awareness_gain": .3},
         }
         if role != frozen:
-            raise ValueError("v3.9 role_reward must match the frozen heterogeneous_role_coupled_gate_v1 contract")
+            raise ValueError("v3.9/v3.10 role_reward must match the frozen heterogeneous_role_coupled_gate_v1 contract")
         if float(cfg["reward"]["blue_kill"]) != 100.0:
-            raise ValueError("v3.9 blue_kill must be +100")
+            raise ValueError("v3.9/v3.10 blue_kill must be +100")
     if set(cfg["blue_policy"]) != {"target_strategy", "guidance_mode", "target_refresh_steps"}:
         raise ValueError("blue_policy has unknown or missing fields")
     if cfg["blue_policy"]["target_strategy"] != BluePolicy.TARGET_STRATEGY:
@@ -270,6 +279,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
             ROLE_ENVIRONMENT_VERSION: "heterogeneous_role_v1",
             COUPLED_ROLE_ENVIRONMENT_VERSION: "heterogeneous_role_coupled_v1",
             GLOBAL_ROLE_ENVIRONMENT_VERSION: "heterogeneous_role_coupled_gate_v1",
+            UNARMED_MAV_ENVIRONMENT_VERSION: "heterogeneous_role_coupled_gate_v1",
         }
         self.reward_mode = role_modes.get(self.config["environment_version"], str(shaping.get("mode", "absolute")))
         self.shaping_gamma = float(shaping.get("gamma", 0.0))
@@ -509,6 +519,9 @@ class HeterogeneousMAVUAVAirCombatEnv:
             for target_id in target_ids:
                 target = self.entities[target_id]
                 key = (attacker_id, target_id)
+                if attacker_id == "MAV" and not bool(self.config["combat"].get("mav_can_attack", True)):
+                    self._attack_streak[key] = 0
+                    continue
                 if not target.state.alive:
                     self._attack_streak[key] = 0
                     continue

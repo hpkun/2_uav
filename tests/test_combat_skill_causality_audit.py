@@ -57,6 +57,16 @@ def test_condition_actions_do_not_add_samples_and_cyclic_mapping_is_exact():
     trim = condition_actions("TRIM", policy, observations, "cpu", None)
     assert all(np.array_equal(value, np.zeros(3)) for value in trim.values())
     assert [actor.calls for actor in policy.actors] == [2, 2, 2, 2]
+    uav_trim = condition_actions("UAV_TRIM", policy, observations, "cpu", None)
+    assert [actor.calls for actor in policy.actors] == [3, 3, 3, 3]
+    np.testing.assert_array_equal(uav_trim["MAV"], normal["MAV"])
+    assert all(np.array_equal(uav_trim[aid], np.zeros(3)) for aid in RED_IDS[1:])
+    uav_random = condition_actions(
+        "UAV_UNIFORM_RANDOM", policy, observations, "cpu", np.random.default_rng(17),
+    )
+    assert [actor.calls for actor in policy.actors] == [4, 4, 4, 4]
+    np.testing.assert_array_equal(uav_random["MAV"], normal["MAV"])
+    assert all(np.all((-1 <= uav_random[aid]) & (uav_random[aid] <= 1)) for aid in RED_IDS[1:])
 
 
 def test_uniform_random_is_bounded_reproducible_and_seed_sensitive():
@@ -183,6 +193,7 @@ def test_output_schema_handles_zero_counterfactuals(tmp_path):
     }, {"profile": "main"})
     expected = {
         "condition_episode_records.csv", "condition_summary.csv", "paired_condition_comparison.csv",
+        "paired_condition_episode_records.csv",
         "attack_event_records.csv", "death_candidate_records.csv", "prekill_geometry_records.csv",
         "prekill_geometry_summary.csv", "streak2_counterfactual_records.csv",
         "streak2_counterfactual_summary.csv", "combat_skill_audit_summary.json",
@@ -193,9 +204,10 @@ def test_output_schema_handles_zero_counterfactuals(tmp_path):
 
 
 def test_curriculum_configs_are_fair_and_original_configs_remain_noncurriculum():
-    configs = validate_configs(); reference = configs["tacm_rgaa"]
-    for config in configs.values():
-        assert all(config[field] == reference[field] for field in COMMON_FIELDS)
+    for version in ("v3_9", "v3_10"):
+        configs = validate_configs(version); reference = configs["tacm_rgaa"]
+        for config in configs.values():
+            assert all(config[field] == reference[field] for field in COMMON_FIELDS)
     for filename in ("happo_rgaa_v39.yaml", "happo_rgaa_wide_v39.yaml", "happo_dbm_rgaa_v39.yaml"):
         original = load_training(ROOT / "configs" / filename)
         assert original["device"] == "cpu"
@@ -203,8 +215,19 @@ def test_curriculum_configs_are_fair_and_original_configs_remain_noncurriculum()
 
 
 def test_launcher_contract_and_manifest_fields_are_explicit():
-    text = (ROOT / "run_role_guided_v39_main_curriculum_1m.sh").read_text(encoding="utf-8")
-    for token in ("rgaa rgaa_wide dbm_rgaa", "for seed in 5 7 9", "--steps 1000000", "--final-eval-episodes 1", "--eval-interval 0"):
-        assert token in text
-    assert "method,seed,run_name,output_folder,log_file,config,checkpoint_final" in text
-    assert "PIPESTATUS[0]" in text and "exit \"${status}\"" in text
+    for filename in (
+        "run_role_guided_v39_main_curriculum_1m.sh",
+        "run_role_guided_v310_main_curriculum_1m.sh",
+    ):
+        text = (ROOT / filename).read_text(encoding="utf-8")
+        for token in ("rgaa rgaa_wide dbm_rgaa", "for seed in 5 7 9", "--steps 1000000", "--final-eval-episodes 1", "--eval-interval 0"):
+            assert token in text
+        for entrypoint in (
+            "algorithm/train_happo_rgaa.py", "algorithm/train_rgaa_wide.py",
+            "algorithm/train_dbm_rgaa.py",
+        ):
+            assert entrypoint in text
+        assert "method,seed,entrypoint,config,environment_config,environment_version,run_name,output_folder,log_file,checkpoint_final" in text
+        assert "PIPESTATUS[0]" in text and "exit \"${status}\"" in text
+    tacm = (ROOT / "run_tacm_v310_main_curriculum_1m.sh").read_text(encoding="utf-8")
+    assert "algorithm/train_tacm_rgaa.py" in tacm and "for seed in 5 7 9" in tacm
