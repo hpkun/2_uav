@@ -56,6 +56,10 @@ from .dbm_rgaa import (
     RGAA_WIDE_UAV_HIDDEN_DIM, build_method_actors, dbm_metadata,
     dbm_rollout_diagnostics, wide_metadata,
 )
+from .tacm_rgaa import (
+    TACM_RGAA_METHOD, TACMRoleAdvantageRolloutBuffer, context_distillation_loss,
+    tactical_teacher, tacm_context_coefficient, tacm_metadata, temporal_router_loss,
+)
 
 
 DEFAULTS = {
@@ -74,6 +78,12 @@ DEFAULTS = {
     "dbm_init_scale": DBM_EXPERT_INIT_SCALE,
     "dbm_initialization_semantics": DBM_INITIALIZATION_SEMANTICS,
     "uav_actor_hidden_dim": RGAA_WIDE_UAV_HIDDEN_DIM,
+    "tacm_tau_group": 0.25, "tacm_tau_teacher": 0.25,
+    "tacm_context_coef_start": 0.05, "tacm_context_coef_end": 0.01,
+    "tacm_context_anneal_steps": 500000, "tacm_temporal_coef": 0.01,
+    "randomization_curriculum_enabled": False,
+    "curriculum_start_profile": "learnability", "curriculum_end_profile": "main",
+    "curriculum_steps": 400000,
     "ls_auxiliary_semantics": LS_AUXILIARY_SEMANTICS,
     "lsa_credit_semantics": LSA_CREDIT_SEMANTICS,
     "cr_rgaa_relational_dim": 64, "cr_rgaa_attention_heads": 4,
@@ -120,6 +130,14 @@ DBM_RESUME_CONFIG_FIELDS = (
     "role_module_enabled", "dbm_role_count", "dbm_residual_scale",
     "dbm_init_scale", "dbm_initialization_semantics",
 )
+TACM_RESUME_CONFIG_FIELDS = (
+    "tacm_tau_group", "tacm_tau_teacher", "tacm_context_coef_start",
+    "tacm_context_coef_end", "tacm_context_anneal_steps", "tacm_temporal_coef",
+)
+CURRICULUM_RESUME_CONFIG_FIELDS = (
+    "randomization_curriculum_enabled", "curriculum_start_profile",
+    "curriculum_end_profile", "curriculum_steps",
+)
 
 
 def preceding_factor_update(factor: torch.Tensor, old_log_prob: torch.Tensor, new_log_prob: torch.Tensor, active: torch.Tensor) -> torch.Tensor:
@@ -162,7 +180,7 @@ class HAPPOTrainer:
         if c["environment_profile"] not in ("learnability", "main"):
             raise ValueError("environment_profile must be 'learnability' or 'main'")
         if c["method_variant"] not in (
-            "baseline", "agp", RGAA_METHOD, DBM_RGAA_METHOD, RGAA_WIDE_METHOD,
+            "baseline", "agp", RGAA_METHOD, DBM_RGAA_METHOD, RGAA_WIDE_METHOD, TACM_RGAA_METHOD,
             CR_RGAA_METHOD, LP_CR_RGAA_METHOD,
             LS_RGAA_METHOD, LSA_RGAA_METHOD, *CREDIT_METHODS,
         ):
@@ -181,11 +199,12 @@ class HAPPOTrainer:
             raise ValueError("TAM critic currently requires tam_value_loss_type='huber'")
         self.agp_enabled = c["method_variant"] == "agp"
         self.credit_enabled = c["method_variant"] in CREDIT_METHODS
-        self.dbm_enabled = c["method_variant"] == DBM_RGAA_METHOD
-        self.dbm_rgaa_enabled = self.dbm_enabled
+        self.tacm_enabled = c["method_variant"] == TACM_RGAA_METHOD
+        self.dbm_enabled = c["method_variant"] in (DBM_RGAA_METHOD, TACM_RGAA_METHOD)
+        self.dbm_rgaa_enabled = c["method_variant"] == DBM_RGAA_METHOD
         self.rgaa_wide_enabled = c["method_variant"] == RGAA_WIDE_METHOD
         self.rgaa_enabled = c["method_variant"] in (
-            RGAA_METHOD, DBM_RGAA_METHOD, RGAA_WIDE_METHOD,
+            RGAA_METHOD, DBM_RGAA_METHOD, RGAA_WIDE_METHOD, TACM_RGAA_METHOD,
         )
         self.cr_rgaa_enabled = c["method_variant"] == CR_RGAA_METHOD
         self.lp_cr_rgaa_enabled = c["method_variant"] == LP_CR_RGAA_METHOD
@@ -254,7 +273,7 @@ class HAPPOTrainer:
             raise ValueError(
                 f"RGAA role_aux_reward_mode must be {ROLE_AUX_REWARD_MODE!r}"
             )
-        if self.dbm_rgaa_enabled:
+        if self.dbm_enabled:
             if int(c["dbm_role_count"]) != DBM_ROLE_COUNT:
                 raise ValueError(f"DBM-RGAA-v1 requires dbm_role_count={DBM_ROLE_COUNT}")
             if float(c["dbm_residual_scale"]) < 0.0:
@@ -263,6 +282,16 @@ class HAPPOTrainer:
                 raise ValueError("dbm_init_scale must be positive")
             if c["dbm_initialization_semantics"] != DBM_INITIALIZATION_SEMANTICS:
                 raise ValueError("unsupported DBM initialization semantics")
+        if self.tacm_enabled:
+            if min(float(c["tacm_tau_group"]), float(c["tacm_tau_teacher"])) <= 0.0:
+                raise ValueError("TACM temperatures must be positive")
+            if int(c["tacm_context_anneal_steps"]) <= 0 or int(c["curriculum_steps"]) <= 0:
+                raise ValueError("TACM anneal/curriculum steps must be positive")
+        if bool(c["randomization_curriculum_enabled"]):
+            if c["environment_profile"] != c["curriculum_end_profile"]:
+                raise ValueError("curriculum training must declare the end environment profile")
+            if c["curriculum_start_profile"] not in ("learnability", "main") or c["curriculum_end_profile"] not in ("learnability", "main"):
+                raise ValueError("invalid curriculum profile")
         if self.rgaa_wide_enabled and int(c["uav_actor_hidden_dim"]) <= 0:
             raise ValueError("uav_actor_hidden_dim must be positive")
         if self.loss_separated_enabled and c["ls_auxiliary_semantics"] != LS_AUXILIARY_SEMANTICS:
@@ -294,10 +323,10 @@ class HAPPOTrainer:
             int(c["num_envs"]), self.environment_config, seed=int(c["seed"]), profile=c["environment_profile"],
         )
         if c["actor_variant"] == "vanilla" and c["method_variant"] in (
-            DBM_RGAA_METHOD, RGAA_WIDE_METHOD,
+            DBM_RGAA_METHOD, RGAA_WIDE_METHOD, TACM_RGAA_METHOD,
         ):
             self.actors = build_method_actors(
-                method_variant=str(c["method_variant"]),
+                method_variant=(DBM_RGAA_METHOD if self.tacm_enabled else str(c["method_variant"])),
                 training_seed=int(c["seed"]),
                 hidden_dim=int(c["hidden_dim"]),
                 log_std_init=float(c["actor_log_std_init"]),
@@ -463,6 +492,8 @@ class HAPPOTrainer:
             self.process_mav_critic_optimizer = self.process_uav_critic_optimizer = None
             self.loss_mav_critic_optimizer = self.loss_uav_critic_optimizer = None
         self.buffer = self.make_buffer(int(c["rollout_steps"]))
+        self.env_steps = 0
+        self._apply_curriculum_override()
         self.observations, self.global_states, self.active_masks, _ = self.vector_env.reset()
         if self.is_recurrent:
             self.actor_hidden_states = np.zeros(
@@ -474,9 +505,22 @@ class HAPPOTrainer:
                 (int(c["num_envs"]), int(c["tam_critic_gru_hidden_dim"])), dtype=np.float32,
             )
             self.critic_recurrent_masks = np.zeros(int(c["num_envs"]), dtype=np.float32)
-        self.env_steps = 0
         self.completed_episodes: list[dict[str, Any]] = []
         self.last_rollout_metrics = self._empty_rollout_metrics()
+
+    def curriculum_state(self) -> dict[str, Any]:
+        fields = ("team_xy_jitter", "slot_xy_jitter", "altitude_jitter", "speed_jitter", "heading_jitter_deg")
+        if not bool(self.config["randomization_curriculum_enabled"]):
+            profile = self.environment_config["randomization_profiles"][self.config["environment_profile"]]
+            return {"alpha": 1.0, "override": None, **{key: float(profile[key]) for key in fields}}
+        alpha = min(max(float(self.env_steps) / int(self.config["curriculum_steps"]), 0.0), 1.0)
+        start = self.environment_config["randomization_profiles"][self.config["curriculum_start_profile"]]
+        end = self.environment_config["randomization_profiles"][self.config["curriculum_end_profile"]]
+        override = {key: float(start[key] + alpha * (end[key] - start[key])) for key in fields}
+        return {"alpha": alpha, "override": override, **override}
+
+    def _apply_curriculum_override(self) -> None:
+        self.vector_env.set_randomization_override(self.curriculum_state()["override"])
 
     def _empty_rollout_metrics(self) -> dict[str, Any]:
         return {
@@ -489,7 +533,7 @@ class HAPPOTrainer:
 
     @property
     def actor_architecture(self) -> dict[str, Any]:
-        if self.dbm_rgaa_enabled:
+        if self.dbm_enabled:
             mav_architecture = {
                 "type": "gaussian_mlp", "observation_dim": OBS_DIM,
                 "hidden_layers": [int(self.config["hidden_dim"])] * 2, "action_dim": 3,
@@ -682,6 +726,8 @@ class HAPPOTrainer:
             )
         if self.loss_separated_enabled:
             return LossSeparatedRoleRolloutBuffer(horizon, int(self.config["num_envs"]))
+        if self.tacm_enabled:
+            return TACMRoleAdvantageRolloutBuffer(horizon, int(self.config["num_envs"]))
         if self.role_guided_enabled:
             return RoleAdvantageRolloutBuffer(horizon, int(self.config["num_envs"]))
         return RolloutBuffer(horizon, int(self.config["num_envs"]))
@@ -701,7 +747,14 @@ class HAPPOTrainer:
 
     @property
     def dbm_metadata(self) -> dict[str, Any]:
-        return dbm_metadata(self.config)
+        config = dict(self.config)
+        if self.tacm_enabled:
+            config["method_variant"] = DBM_RGAA_METHOD
+        return dbm_metadata(config) if self.dbm_enabled else {}
+
+    @property
+    def tacm_metadata(self) -> dict[str, Any]:
+        return tacm_metadata(self.config)
 
     @property
     def rgaa_wide_metadata(self) -> dict[str, Any]:
@@ -865,7 +918,7 @@ class HAPPOTrainer:
             checkpoint_architecture = dict(checkpoint_architecture)
             checkpoint_architecture.setdefault("attention_mode", "learned")
         strict_method_architecture = self.config["method_variant"] in (
-            DBM_RGAA_METHOD, RGAA_WIDE_METHOD,
+            DBM_RGAA_METHOD, RGAA_WIDE_METHOD, TACM_RGAA_METHOD,
         )
         if (checkpoint_variant in ("hrta", "structured_uniform", "recurrent", "tam", *PCTA_FAMILY) or strict_method_architecture) and checkpoint_architecture != self.actor_architecture:
             raise RuntimeError(
@@ -894,7 +947,7 @@ class HAPPOTrainer:
             )
 
     def _validate_rgaa_actor_method_contract(self, data: Mapping[str, Any]) -> None:
-        if self.dbm_rgaa_enabled:
+        if self.dbm_enabled:
             expected = self.dbm_metadata
             for field in (
                 "dbm_rgaa_version", "role_module_enabled", "dbm_role_count",
@@ -916,10 +969,18 @@ class HAPPOTrainer:
     def collect_rollout(self) -> list[dict[str, Any]]:
         if self.is_recurrent:
             return self._collect_recurrent_rollout()
+        self._apply_curriculum_override()
         self.buffer.reset(); completed = []
         raw_terms: list[np.ndarray] = []
         shaping_terms: list[np.ndarray] = []
         for _ in range(self.buffer.horizon):
+            teacher = (
+                tactical_teacher(
+                    self.global_states, self.environment_config,
+                    tau_group=float(self.config["tacm_tau_group"]),
+                    tau_teacher=float(self.config["tacm_tau_teacher"]),
+                ) if self.tacm_enabled else None
+            )
             actions, log_probs = [], []
             with torch.no_grad():
                 for agent, actor in enumerate(self.actors.actors):
@@ -984,9 +1045,11 @@ class HAPPOTrainer:
                 auxiliary = extract_rgaa_auxiliary_rewards(
                     infos, self.environment_config["reward"],
                 )
-                self.buffer.insert(
-                    self.observations, self.global_states, action_array, log_prob_array,
-                    training_rewards, values, terminated, truncated, self.active_masks,
+                insert_kwargs = dict(
+                    observations=self.observations, states=self.global_states,
+                    actions=action_array, log_probs=log_prob_array,
+                    rewards=training_rewards, values=values, terminated=terminated,
+                    truncated=truncated, active_masks=self.active_masks,
                     role_rewards=auxiliary.auxiliary_rewards,
                     role_process_rewards=auxiliary.process_rewards,
                     own_loss_events=auxiliary.own_loss_events,
@@ -994,6 +1057,14 @@ class HAPPOTrainer:
                     blue_attack_loss_events=auxiliary.blue_attack_loss_events,
                     role_values=role_values,
                 )
+                if self.tacm_enabled:
+                    assert isinstance(self.buffer, TACMRoleAdvantageRolloutBuffer) and teacher is not None
+                    transition_event = np.asarray([
+                        bool(info.get("killed_ids")) or bool(info.get("death_causes")) for info in infos
+                    ], dtype=bool)
+                    self.buffer.insert_tacm(teacher, transition_event, **insert_kwargs)
+                else:
+                    self.buffer.insert(**insert_kwargs)
             else:
                 self.buffer.insert(self.observations, self.global_states, action_array, log_prob_array, training_rewards, values, terminated, truncated, self.active_masks)
             completed.extend(info["episode_summary"] for info in infos if "episode_summary" in info)
@@ -1051,6 +1122,7 @@ class HAPPOTrainer:
         """Collect a rollout while preserving hidden state across rollout boundaries."""
         if not isinstance(self.buffer, RecurrentRolloutBuffer):
             raise TypeError("recurrent actor requires RecurrentRolloutBuffer")
+        self._apply_curriculum_override()
         self.buffer.reset()
         completed: list[dict[str, Any]] = []
         for _ in range(self.buffer.horizon):
@@ -1641,6 +1713,19 @@ class HAPPOTrainer:
                 self.last_lp_cr_rgaa_consistency = torch.zeros_like(self.last_lp_cr_rgaa_team_normalized_advantages)
                 self.last_lp_cr_rgaa_combined_advantages = torch.zeros_like(self.last_lp_cr_rgaa_team_normalized_advantages)
                 self.last_lp_cr_rgaa_ppo_advantages = torch.zeros_like(self.last_lp_cr_rgaa_team_normalized_advantages)
+        tacm_teacher = tacm_confidence = None
+        tacm_context_total = tacm_context_count = 0.0
+        tacm_temporal_total = 0.0; tacm_temporal_pairs = 0
+        tacm_coef = 0.0
+        if self.tacm_enabled:
+            if not isinstance(self.buffer, TACMRoleAdvantageRolloutBuffer):
+                raise TypeError("TACM requires TACMRoleAdvantageRolloutBuffer")
+            tacm_teacher = torch.as_tensor(self.buffer.teacher_probabilities.reshape(-1, 3, 2), device=self.device)
+            tacm_confidence = torch.as_tensor(self.buffer.teacher_confidence.reshape(-1, 3), device=self.device)
+            tacm_coef = tacm_context_coefficient(
+                self.env_steps, float(c["tacm_context_coef_start"]),
+                float(c["tacm_context_coef_end"]), int(c["tacm_context_anneal_steps"]),
+            )
         factor = torch.ones_like(advantages)
         order = [int(v) for v in self.rng.permutation(num_agents)]
         actor_losses: list[list[float]] = [[] for _ in RED_IDS]; entropies: list[float] = []
@@ -1862,6 +1947,15 @@ class HAPPOTrainer:
                     effective = (factor[idx] * normalized[idx]).detach()
                     policy_loss = -torch.minimum(ratio * effective, ratio.clamp(1.0 - clip, 1.0 + clip) * effective).mean()
                     loss = policy_loss - float(c["entropy_coef"]) * entropy.mean()
+                    if self.tacm_enabled and agent > 0:
+                        assert tacm_teacher is not None and tacm_confidence is not None
+                        context_loss, _ = context_distillation_loss(
+                            self.actors.actors[agent], observations[idx, agent],
+                            tacm_teacher[idx, agent - 1], tacm_confidence[idx, agent - 1],
+                        )
+                        loss = loss + tacm_coef * context_loss
+                        tacm_context_total += float(context_loss.detach().item()) * len(idx)
+                        tacm_context_count += len(idx)
                     optimizer.zero_grad(); loss.backward()
                     nn.utils.clip_grad_norm_(self.actors.actors[agent].parameters(), float(c["max_grad_norm"])); optimizer.step()
                     actor_losses[agent].append(float(policy_loss.item())); entropies.append(float(entropy.mean().item()))
@@ -1883,6 +1977,27 @@ class HAPPOTrainer:
                     pcta_pairs += temporal.valid_pairs
                     pcta_attention_entropy_sum += temporal.attention_entropy_sum
                     pcta_switches += temporal.target_switches
+            if self.tacm_enabled and agent > 0:
+                assert isinstance(self.buffer, TACMRoleAdvantageRolloutBuffer)
+                temporal_loss, valid_pairs = temporal_router_loss(
+                    self.actors.actors[agent],
+                    observations[:, agent].reshape(self.buffer.horizon, self.buffer.num_envs, OBS_DIM),
+                    (active_masks[:, agent] > 0.5).reshape(self.buffer.horizon, self.buffer.num_envs),
+                    torch.as_tensor(self.buffer.terminated, device=self.device),
+                    torch.as_tensor(self.buffer.truncated, device=self.device),
+                    torch.as_tensor(self.buffer.transition_event, device=self.device),
+                    torch.as_tensor(self.buffer.engagement_target[:, :, agent - 1], device=self.device),
+                    torch.as_tensor(self.buffer.threat_target, device=self.device),
+                    torch.as_tensor(self.buffer.teacher_probabilities[:, :, agent - 1], device=self.device),
+                    torch.as_tensor(self.buffer.teacher_confidence[:, :, agent - 1], device=self.device),
+                )
+                if valid_pairs:
+                    weighted_temporal = float(c["tacm_temporal_coef"]) * temporal_loss
+                    optimizer.zero_grad(); weighted_temporal.backward()
+                    nn.utils.clip_grad_norm_(self.actors.actors[agent].network.router.parameters(), float(c["max_grad_norm"]))
+                    optimizer.step()
+                    tacm_temporal_total += float(temporal_loss.detach().item()) * valid_pairs
+                    tacm_temporal_pairs += valid_pairs
             with torch.no_grad():
                 new_all, _ = self.actors.actors[agent].evaluate_actions(observations[:, agent], actions[:, agent])
                 factor = preceding_factor_update(factor, old_log_probs[:, agent], new_all, active_masks[:, agent])
@@ -2020,7 +2135,74 @@ class HAPPOTrainer:
                         float(lambdas[team_negative_role_positive].mean().item())
                         if team_negative_role_positive.any() else 0.0
                     )
-        if self.dbm_rgaa_enabled and bool(c["role_module_enabled"]):
+        if self.tacm_enabled:
+            if not isinstance(self.buffer, TACMRoleAdvantageRolloutBuffer):
+                raise TypeError("TACM diagnostics require TACMRoleAdvantageRolloutBuffer")
+            rgaa_metrics.update({
+                "tacm_context_loss": tacm_context_total / tacm_context_count if tacm_context_count else 0.0,
+                "tacm_context_weighted_loss": tacm_coef * (
+                    tacm_context_total / tacm_context_count if tacm_context_count else 0.0
+                ),
+                "tacm_context_coef": tacm_coef,
+                "tacm_temporal_loss": tacm_temporal_total / tacm_temporal_pairs if tacm_temporal_pairs else 0.0,
+                "tacm_temporal_weighted_loss": float(c["tacm_temporal_coef"]) * (
+                    tacm_temporal_total / tacm_temporal_pairs if tacm_temporal_pairs else 0.0
+                ),
+                "tacm_temporal_valid_pairs": float(tacm_temporal_pairs),
+                "tacm_mav_threat_mean": float(self.buffer.mav_threat.mean()),
+                "tacm_teacher_confidence_mean": float(self.buffer.teacher_confidence.mean()),
+            })
+            active_uav = self.buffer.active_masks[:, :, 1:] > 0.5
+            teacher_mode = self.buffer.teacher_probabilities.argmax(axis=-1)
+            primary = self.buffer.cover_assignment.argmax(axis=-1)
+            for ui, aid in enumerate(RED_IDS[1:]):
+                mask = active_uav[:, :, ui]
+                denominator = int(mask.sum())
+                with torch.no_grad():
+                    _, kl = context_distillation_loss(
+                        self.actors.actors[ui + 1],
+                        torch.as_tensor(
+                            self.buffer.observations[:, :, ui + 1].reshape(-1, OBS_DIM),
+                            device=self.device,
+                        ),
+                        torch.as_tensor(
+                            self.buffer.teacher_probabilities[:, :, ui].reshape(-1, 2),
+                            device=self.device,
+                        ),
+                        torch.as_tensor(
+                            self.buffer.teacher_confidence[:, :, ui].reshape(-1),
+                            device=self.device,
+                        ),
+                    )
+                kl_np = kl.cpu().numpy().reshape(self.buffer.horizon, self.buffer.num_envs)
+                rgaa_metrics.update({
+                    f"tacm_teacher_engagement_prob_{aid}": float(
+                        self.buffer.teacher_probabilities[:, :, ui, 0][mask].mean()
+                    ) if denominator else 0.0,
+                    f"tacm_teacher_cover_prob_{aid}": float(
+                        self.buffer.teacher_probabilities[:, :, ui, 1][mask].mean()
+                    ) if denominator else 0.0,
+                    f"tacm_teacher_confidence_{aid}": float(
+                        self.buffer.teacher_confidence[:, :, ui][mask].mean()
+                    ) if denominator else 0.0,
+                    f"tacm_engagement_score_{aid}": float(
+                        self.buffer.engagement_scores[:, :, ui][mask].mean()
+                    ) if denominator else 0.0,
+                    f"tacm_cover_responsibility_{aid}": float(
+                        self.buffer.cover_responsibility[:, :, ui][mask].mean()
+                    ) if denominator else 0.0,
+                    f"tacm_cover_assignment_{aid}": float(
+                        self.buffer.cover_assignment[:, :, ui][mask].mean()
+                    ) if denominator else 0.0,
+                    f"tacm_context_kl_{aid}": float(kl_np[mask].mean()) if denominator else 0.0,
+                    f"tacm_teacher_cover_rate_{aid}": float(
+                        (teacher_mode[:, :, ui][mask] == 1).mean()
+                    ) if denominator else 0.0,
+                    f"tacm_primary_cover_rate_{aid}": float(
+                        ((primary == ui) & mask & (self.buffer.mav_threat > 0.0)).sum()
+                    ) / denominator if denominator else 0.0,
+                })
+        if self.dbm_enabled and bool(c["role_module_enabled"]):
             with torch.no_grad():
                 rgaa_metrics.update(dbm_rollout_diagnostics(
                     self.actors,
@@ -2033,6 +2215,15 @@ class HAPPOTrainer:
         metrics.update({"actor_loss": float(np.mean([v for rows in actor_losses for v in rows])), "critic_loss": float(np.mean(critic_losses)), "entropy": float(np.mean(entropies)), "agent_update_order": order})
         metrics.update(credit_metrics)
         metrics.update(rgaa_metrics)
+        curriculum = self.curriculum_state()
+        metrics.update({
+            "curriculum_alpha": float(curriculum["alpha"]),
+            "curriculum_team_xy_jitter": float(curriculum["team_xy_jitter"]),
+            "curriculum_slot_xy_jitter": float(curriculum["slot_xy_jitter"]),
+            "curriculum_altitude_jitter": float(curriculum["altitude_jitter"]),
+            "curriculum_speed_jitter": float(curriculum["speed_jitter"]),
+            "curriculum_heading_jitter_deg": float(curriculum["heading_jitter_deg"]),
+        })
         if c["actor_variant"] in LEGACY_PCTA_FAMILY:
             raw_consistency = pcta_loss_sum / pcta_pairs if pcta_pairs else 0.0
             metrics.update({
@@ -2232,6 +2423,7 @@ class HAPPOTrainer:
         payload.update(self.tam_metadata)
         payload.update(self.rgaa_metadata)
         payload.update(self.dbm_metadata)
+        payload.update(self.tacm_metadata)
         payload.update(self.rgaa_wide_metadata)
         payload.update(self.cr_rgaa_metadata)
         payload.update(self.lp_cr_rgaa_metadata)
@@ -2239,6 +2431,7 @@ class HAPPOTrainer:
         payload.update(self.lsa_rgaa_metadata)
         if self.rgaa_enabled:
             payload["algorithm"] = (
+                "tacm_rgaa_happo" if self.tacm_enabled else
                 "dbm_rgaa_happo" if self.dbm_rgaa_enabled else
                 "rgaa_wide_happo" if self.rgaa_wide_enabled else "rgaa_happo"
             )
@@ -2314,6 +2507,10 @@ class HAPPOTrainer:
                 "environment_states": self.vector_env.get_env_states(),
                 "vector_reset_counts": self.vector_env.reset_counts.copy(),
                 "vector_base_seed": self.vector_env.base_seed,
+                "randomization_curriculum_state": {
+                    "sampled_steps": int(self.env_steps),
+                    "applied_override": deepcopy(self.vector_env.randomization_override),
+                },
             },
         }
         state.update(self.pcta_metadata)
@@ -2321,6 +2518,7 @@ class HAPPOTrainer:
         state.update(self.tam_metadata)
         state.update(self.rgaa_metadata)
         state.update(self.dbm_metadata)
+        state.update(self.tacm_metadata)
         state.update(self.rgaa_wide_metadata)
         state.update(self.cr_rgaa_metadata)
         state.update(self.lp_cr_rgaa_metadata)
@@ -2328,6 +2526,7 @@ class HAPPOTrainer:
         state.update(self.lsa_rgaa_metadata)
         if self.rgaa_enabled:
             state["algorithm"] = (
+                "tacm_rgaa_happo" if self.tacm_enabled else
                 "dbm_rgaa_happo" if self.dbm_rgaa_enabled else
                 "rgaa_wide_happo" if self.rgaa_wide_enabled else "rgaa_happo"
             )
@@ -2478,6 +2677,10 @@ class HAPPOTrainer:
             if any(field not in data for field in required):
                 raise RuntimeError("RGAA checkpoint is missing role critic training state")
             self._validate_rgaa_actor_method_contract(data)
+            if self.tacm_enabled:
+                for field, expected in self.tacm_metadata.items():
+                    if data.get(field) != expected:
+                        raise RuntimeError(f"incompatible TACM-RGAA checkpoint contract: {field}")
         if self.cr_rgaa_enabled:
             expected_cr = self.cr_rgaa_metadata
             for field in (
@@ -2556,8 +2759,28 @@ class HAPPOTrainer:
                 raise RuntimeError(
                     f"resume config mismatch: {field} checkpoint={checkpoint_value!r} current={current_value!r}"
                 )
-        if self.dbm_rgaa_enabled:
+        if self.dbm_enabled:
             for field in DBM_RESUME_CONFIG_FIELDS:
+                if saved_config.get(field, DEFAULTS[field]) != self.config.get(field):
+                    raise RuntimeError(
+                        f"resume config mismatch: {field} "
+                        f"checkpoint={saved_config.get(field, DEFAULTS[field])!r} "
+                        f"current={self.config.get(field)!r}"
+                    )
+        if bool(self.config["randomization_curriculum_enabled"]):
+            for field in CURRICULUM_RESUME_CONFIG_FIELDS:
+                if saved_config.get(field, DEFAULTS[field]) != self.config.get(field):
+                    raise RuntimeError(
+                        f"resume curriculum config mismatch: {field} "
+                        f"checkpoint={saved_config.get(field, DEFAULTS[field])!r} "
+                        f"current={self.config.get(field)!r}"
+                    )
+        if self.tacm_enabled:
+            expected_tacm = self.tacm_metadata
+            for field in expected_tacm:
+                if data.get(field) != expected_tacm[field]:
+                    raise RuntimeError(f"incompatible TACM-RGAA checkpoint contract: {field}")
+            for field in TACM_RESUME_CONFIG_FIELDS:
                 if saved_config.get(field, DEFAULTS[field]) != self.config.get(field):
                     raise RuntimeError(
                         f"resume config mismatch: {field} "
@@ -2677,6 +2900,14 @@ class HAPPOTrainer:
             rollout.get("vector_base_seed"),
         )
         self.env_steps = int(data["sampled_steps"])
+        if bool(self.config["randomization_curriculum_enabled"]):
+            saved_curriculum = rollout.get("randomization_curriculum_state")
+            expected_curriculum = {
+                "sampled_steps": self.env_steps,
+                "applied_override": deepcopy(self.vector_env.randomization_override),
+            }
+            if saved_curriculum != expected_curriculum:
+                raise RuntimeError("resume TACM curriculum state mismatch")
         self.last_rollout_metrics = self._empty_rollout_metrics()
         return self.env_steps
 
@@ -2711,6 +2942,10 @@ class HAPPOTrainer:
                 if data.get(field) != self.rgaa_metadata[field]:
                     raise RuntimeError(f"incompatible RGAA checkpoint contract: {field}")
             self._validate_rgaa_actor_method_contract(data)
+            if self.tacm_enabled:
+                for field, expected in self.tacm_metadata.items():
+                    if data.get(field) != expected:
+                        raise RuntimeError(f"incompatible TACM-RGAA checkpoint contract: {field}")
         if self.cr_rgaa_enabled:
             for field in (
                 "cr_rgaa_version", "role_aux_reward_mode", "role_advantage_coef",

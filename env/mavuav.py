@@ -248,6 +248,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
             int(self.config["blue_policy"]["target_refresh_steps"]),
         )
         self.rng = np.random.default_rng(seed)
+        self.randomization_override: dict[str, float] | None = None
         self.entities: dict[str, Aircraft] = {}
         self.step_count = 0
         self.episode_return = 0.0
@@ -293,7 +294,13 @@ class HeterogeneousMAVUAVAirCombatEnv:
         self.profile = str(options.get("profile", self.profile))
         if self.profile not in self.config["randomization_profiles"]:
             raise ValueError(f"unknown randomization profile: {self.profile}")
-        random_cfg = self.config["randomization_profiles"][self.profile]
+        override = options.get("randomization_override", self.randomization_override)
+        if override is not None:
+            expected = {"team_xy_jitter", "slot_xy_jitter", "altitude_jitter", "speed_jitter", "heading_jitter_deg"}
+            if set(override) != expected or any(float(override[key]) < 0.0 for key in expected):
+                raise ValueError("invalid randomization_override")
+            self.randomization_override = {key: float(override[key]) for key in expected}
+        random_cfg = self.randomization_override or self.config["randomization_profiles"][self.profile]
         team_offsets: dict[str, tuple[float, float]] = {}
         if randomize:
             team_jitter = float(random_cfg["team_xy_jitter"])
@@ -361,6 +368,16 @@ class HeterogeneousMAVUAVAirCombatEnv:
             if not self.entities[aid].state.alive:
                 result[aid] = np.zeros(3, dtype=np.float64)
         return result
+
+    def set_randomization_override(self, override: Mapping[str, Any] | None) -> None:
+        """Set a temporary initialization-only randomization contract."""
+        if override is None:
+            self.randomization_override = None
+            return
+        expected = {"team_xy_jitter", "slot_xy_jitter", "altitude_jitter", "speed_jitter", "heading_jitter_deg"}
+        if set(override) != expected or any(float(override[key]) < 0.0 for key in expected):
+            raise ValueError("invalid randomization_override")
+        self.randomization_override = {key: float(override[key]) for key in expected}
 
     def step(self, actions: Mapping[str, np.ndarray] | np.ndarray | list[np.ndarray]):
         if not self._running:

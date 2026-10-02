@@ -32,6 +32,7 @@ def _environment_state(env: HeterogeneousMAVUAVAirCombatEnv) -> dict[str, Any]:
         "blue_attack_kills": set(env._blue_attack_kills),
         "rng": deepcopy(env.rng.bit_generator.state),
         "profile": env.profile,
+        "randomization_override": deepcopy(env.randomization_override),
         "blue_policy_state": deepcopy(env.blue_policy.state_dict()),
     }
 
@@ -55,6 +56,7 @@ def _restore_environment_state(env: HeterogeneousMAVUAVAirCombatEnv, state: Mapp
     env._blue_attack_kills = set(state["blue_attack_kills"])
     env.rng.bit_generator.state = deepcopy(state["rng"])
     env.profile = state["profile"]
+    env.randomization_override = deepcopy(state.get("randomization_override"))
     env.blue_policy.load_state_dict(deepcopy(state["blue_policy_state"]))
 
 
@@ -118,6 +120,9 @@ def _worker(
                     result = None
                 elif command == "get_pid":
                     result = os.getpid()
+                elif command == "set_randomization_override":
+                    env.set_randomization_override(payload)
+                    result = None
                 elif command == "close":
                     connection.send((True, None))
                     break
@@ -163,6 +168,7 @@ class MAVUAVVectorEnv:
         self.envs: list[HeterogeneousMAVUAVAirCombatEnv] = []
         self._connections: list[Connection] = []
         self._processes: list[mp.Process] = []
+        self.randomization_override: dict[str, float] | None = None
 
         if not self.parallel:
             self.envs = [
@@ -312,6 +318,15 @@ class MAVUAVVectorEnv:
             return (os.getpid(),) * self.num_envs
         return tuple(int(value) for value in self._send_all("get_pid", [None] * self.num_envs))
 
+    def set_randomization_override(self, override: Mapping[str, Any] | None) -> None:
+        value = None if override is None else {key: float(item) for key, item in override.items()}
+        if self.parallel:
+            self._send_all("set_randomization_override", [value] * self.num_envs)
+        else:
+            for env in self.envs:
+                env.set_randomization_override(value)
+        self.randomization_override = deepcopy(value)
+
     def get_env_states(self) -> list[dict[str, Any]]:
         if self.parallel:
             results = self._send_all("get_state", [None] * self.num_envs)
@@ -345,6 +360,10 @@ class MAVUAVVectorEnv:
         else:
             for env, state in zip(self.envs, states):
                 _restore_environment_state(env, state)
+        restored_overrides = [deepcopy(state.get("randomization_override")) for state in states]
+        if any(value != restored_overrides[0] for value in restored_overrides[1:]):
+            raise RuntimeError("restored vector environments have inconsistent randomization overrides")
+        self.randomization_override = restored_overrides[0]
 
     def close(self) -> None:
         if self._closed:

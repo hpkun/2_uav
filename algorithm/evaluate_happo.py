@@ -21,6 +21,7 @@ from algorithm.happo.networks import IndependentActors
 from algorithm.happo.dbm_rgaa import (
     DBM_RGAA_METHOD, RGAA_WIDE_METHOD, build_method_actors, dbm_metadata, wide_metadata,
 )
+from algorithm.happo.tacm_rgaa import TACM_RGAA_METHOD, tacm_metadata
 from algorithm.happo.relational_critic import RelationalCentralizedCritic
 from env.mavuav import GLOBAL_STATE_DIM, OBS_DIM, ROLE_REWARD_MODES, load_environment_config
 
@@ -36,6 +37,7 @@ def parse_args() -> argparse.Namespace:
         "--action-mode", choices=("deterministic", "stochastic"), default="deterministic",
     )
     parser.add_argument("--action-seed", type=int, default=2000)
+    parser.add_argument("--env-seed-start", type=int, default=1000)
     return parser.parse_args()
 
 
@@ -68,7 +70,7 @@ def validate_checkpoint_contract(payload: dict[str, Any], env_config: dict[str, 
     method_variant = payload.get(
         "method_variant", trainer_config.get("method_variant", "baseline"),
     )
-    if method_variant in (DBM_RGAA_METHOD, RGAA_WIDE_METHOD):
+    if method_variant in (DBM_RGAA_METHOD, RGAA_WIDE_METHOD, TACM_RGAA_METHOD):
         if "environment_config" not in payload:
             raise RuntimeError(
                 f"{method_variant} checkpoint is missing resolved environment_config"
@@ -103,7 +105,7 @@ def main(expected_critic_variant: str = "mlp") -> None:
     method_variant = payload.get("method_variant", trainer_config.get("method_variant", "baseline"))
     if method_variant not in (
         "baseline", "agp", "cf_happo", "rdc_happo", "rgaa", "cr_rgaa", "lp_cr_rgaa",
-        "ls_rgaa", "lsa_rgaa", DBM_RGAA_METHOD, RGAA_WIDE_METHOD,
+        "ls_rgaa", "lsa_rgaa", DBM_RGAA_METHOD, RGAA_WIDE_METHOD, TACM_RGAA_METHOD,
     ):
         raise RuntimeError(f"unsupported HAPPO method_variant: {method_variant!r}")
     critic_variant = payload.get("critic_variant", trainer_config.get("critic_variant", "mlp"))
@@ -118,20 +120,27 @@ def main(expected_critic_variant: str = "mlp") -> None:
             raise RuntimeError("RC-HAPPO evaluator requires method_variant='baseline'")
         if critic_architecture != RelationalCentralizedCritic.architecture():
             raise RuntimeError("incompatible relational critic architecture metadata")
-    if method_variant in (DBM_RGAA_METHOD, RGAA_WIDE_METHOD):
+    if method_variant in (DBM_RGAA_METHOD, RGAA_WIDE_METHOD, TACM_RGAA_METHOD):
         contract_config = dict(trainer_config)
-        contract_config["method_variant"] = method_variant
+        contract_config["method_variant"] = (
+            DBM_RGAA_METHOD if method_variant == TACM_RGAA_METHOD else method_variant
+        )
         expected_method_metadata = (
             dbm_metadata(contract_config)
-            if method_variant == DBM_RGAA_METHOD else wide_metadata(contract_config)
+            if method_variant in (DBM_RGAA_METHOD, TACM_RGAA_METHOD)
+            else wide_metadata(contract_config)
         )
         for field, expected_value in expected_method_metadata.items():
             if payload.get(field) != expected_value:
                 raise RuntimeError(
                     f"incompatible {method_variant} checkpoint contract: {field}"
                 )
+        if method_variant == TACM_RGAA_METHOD:
+            for field, expected_value in tacm_metadata(trainer_config).items():
+                if payload.get(field) != expected_value:
+                    raise RuntimeError(f"incompatible TACM-RGAA checkpoint contract: {field}")
         actors = build_method_actors(
-            method_variant=method_variant,
+            method_variant=(DBM_RGAA_METHOD if method_variant == TACM_RGAA_METHOD else method_variant),
             training_seed=int(trainer_config["seed"]),
             hidden_dim=int(trainer_config["hidden_dim"]),
             log_std_init=float(trainer_config.get("actor_log_std_init", -0.5)),
@@ -162,6 +171,7 @@ def main(expected_critic_variant: str = "mlp") -> None:
         "lsa_rgaa_happo" if method_variant == "lsa_rgaa" else
         "cr_rgaa_happo" if method_variant == "cr_rgaa" else
         "rgaa_happo" if method_variant == "rgaa" else
+        "tacm_rgaa_happo" if method_variant == TACM_RGAA_METHOD else
         "dbm_rgaa_happo" if method_variant == DBM_RGAA_METHOD else
         "rgaa_wide_happo" if method_variant == RGAA_WIDE_METHOD else
         method_variant if method_variant in ("cf_happo", "rdc_happo") else
@@ -170,7 +180,7 @@ def main(expected_critic_variant: str = "mlp") -> None:
     deterministic = args.action_mode == "deterministic"
     effective_action_seed = None if deterministic else int(args.action_seed)
     records = evaluate_actors(
-        actors, env_config, args.episodes, args.profile, seed=1000, device=device,
+        actors, env_config, args.episodes, args.profile, seed=args.env_seed_start, device=device,
         deterministic=deterministic,
         action_seed=effective_action_seed,
     )
@@ -181,7 +191,7 @@ def main(expected_critic_variant: str = "mlp") -> None:
             "critic_variant": critic_variant,
             "blue_target_strategy": "nearest_red_aircraft", "training_profile": training_profile,
             "evaluation_profile": args.profile,
-            "evaluation_environment_seed_start": 1000,
+            "evaluation_environment_seed_start": int(args.env_seed_start),
             "episodes": args.episodes, "evaluation_episodes": args.episodes,
             "training_seed": int(trainer_config.get("seed", 0)),
             "action_mode": args.action_mode,
@@ -208,7 +218,7 @@ def main(expected_critic_variant: str = "mlp") -> None:
         json.dump({
             "algorithm": algorithm, "checkpoint": str(checkpoint), "training_profile": training_profile,
             "evaluation_profile": args.profile, "method_variant": method_variant,
-            "evaluation_environment_seed_start": 1000,
+            "evaluation_environment_seed_start": int(args.env_seed_start),
             "evaluation_episodes": args.episodes,
             "training_seed": int(trainer_config.get("seed", 0)),
             "action_mode": args.action_mode,

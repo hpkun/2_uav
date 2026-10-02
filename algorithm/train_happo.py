@@ -23,6 +23,7 @@ import yaml
 from algorithm.happo import HAPPOTrainer
 from algorithm.happo.trainer import LEGACY_PCTA_FAMILY, PCTA_V2_VARIANT
 from algorithm.happo.dbm_rgaa import DBM_RGAA_METHOD, RGAA_WIDE_METHOD
+from algorithm.happo.tacm_rgaa import TACM_RGAA_METHOD
 from algorithm.happo.evaluation import evaluate_actors, evaluate_recurrent_actors, summarize_records
 from env.mavuav import RED_IDS, ROLE_REWARD_MODES, load_environment_config
 
@@ -41,6 +42,9 @@ TRAINING_FIELDS = (
     *(f"actor_{i}_loss" for i in range(len(RED_IDS))),
     "critic_loss", "entropy", "method_variant",
     "agp_raw_mean", "agp_raw_mean_abs", "agp_shaping_mean", "agp_shaping_mean_abs",
+    "curriculum_alpha", "curriculum_team_xy_jitter", "curriculum_slot_xy_jitter",
+    "curriculum_altitude_jitter", "curriculum_speed_jitter",
+    "curriculum_heading_jitter_deg",
 )
 PCTA_FIELDS = (
     "pcta_consistency_loss", "pcta_consistency_weighted_loss",
@@ -105,6 +109,18 @@ DBM_RGAA_FIELDS = RGAA_FIELDS + tuple(
         f"dbm_max_soft_occupancy_{aid}", f"dbm_max_hard_occupancy_{aid}",
         f"dbm_active_sample_count_{aid}",
     )
+)
+TACM_RGAA_FIELDS = DBM_RGAA_FIELDS + (
+    "tacm_context_loss", "tacm_context_weighted_loss", "tacm_context_coef",
+    "tacm_temporal_loss", "tacm_temporal_weighted_loss", "tacm_temporal_valid_pairs",
+    "tacm_mav_threat_mean", "tacm_teacher_confidence_mean",
+    *(field for aid in RED_IDS[1:] for field in (
+        f"tacm_teacher_engagement_prob_{aid}", f"tacm_teacher_cover_prob_{aid}",
+        f"tacm_teacher_confidence_{aid}", f"tacm_engagement_score_{aid}",
+        f"tacm_cover_responsibility_{aid}", f"tacm_cover_assignment_{aid}",
+        f"tacm_context_kl_{aid}", f"tacm_teacher_cover_rate_{aid}",
+        f"tacm_primary_cover_rate_{aid}",
+    )),
 )
 CR_RGAA_FIELDS = RGAA_FIELDS + (
     "cr_role_critic_total_loss", "cr_relational_residual_abs_mean",
@@ -197,6 +213,7 @@ def _algorithm_name(
             "rdc_happo": "rdc_happo",
             "rgaa": "rgaa_happo",
             DBM_RGAA_METHOD: "dbm_rgaa_happo",
+            TACM_RGAA_METHOD: "tacm_rgaa_happo",
             RGAA_WIDE_METHOD: "rgaa_wide_happo",
             "cr_rgaa": "cr_rgaa_happo",
             "lp_cr_rgaa": "lp_cr_rgaa_happo",
@@ -663,6 +680,7 @@ def _initial_resolved(
         **trainer.tam_metadata,
         **trainer.rgaa_metadata,
         **trainer.dbm_metadata,
+        **trainer.tacm_metadata,
         **trainer.rgaa_wide_metadata,
         **trainer.cr_rgaa_metadata,
         **trainer.lp_cr_rgaa_metadata,
@@ -811,7 +829,7 @@ def main(
                 f"{int(trainer.config['cr_rgaa_attention_heads'])} heads / "
                 f"dim {int(trainer.config['cr_rgaa_relational_dim'])}",
             ])
-        if method_variant == DBM_RGAA_METHOD:
+        if method_variant in (DBM_RGAA_METHOD, TACM_RGAA_METHOD):
             start_lines.append(
                 "DBM diagnostics source: "
                 f"{trainer.dbm_metadata['dbm_diagnostics_source']}"
@@ -834,6 +852,8 @@ def main(
             training_fields = TRAINING_FIELDS + CREDIT_FIELDS + RDC_FIELDS
         elif method_variant == "cf_happo":
             training_fields = TRAINING_FIELDS + CF_FIELDS
+        elif method_variant == TACM_RGAA_METHOD:
+            training_fields = TRAINING_FIELDS + TACM_RGAA_FIELDS
         elif method_variant == DBM_RGAA_METHOD:
             training_fields = TRAINING_FIELDS + DBM_RGAA_FIELDS
         elif method_variant in ("rgaa", RGAA_WIDE_METHOD):
@@ -948,6 +968,10 @@ def main(
             "critic_architecture": trainer.critic_architecture,
             "critic_parameter_count": trainer.critic_parameter_count,
             "actor_log_std_init": float(trainer.config["actor_log_std_init"]),
+            "randomization_curriculum_enabled": bool(trainer.config["randomization_curriculum_enabled"]),
+            "curriculum_start_profile": trainer.config["curriculum_start_profile"],
+            "curriculum_end_profile": trainer.config["curriculum_end_profile"],
+            "curriculum_steps": int(trainer.config["curriculum_steps"]),
             "status": "complete", "sampled_steps": trainer.env_steps,
             "training_profile": args.profile, "seed": args.seed, "device": device,
             "num_envs": args.num_envs, "completed_episodes": completed,
@@ -965,6 +989,7 @@ def main(
             **trainer.tam_metadata,
             **trainer.rgaa_metadata,
             **trainer.dbm_metadata,
+            **trainer.tacm_metadata,
             **trainer.rgaa_wide_metadata,
             **trainer.cr_rgaa_metadata,
             **trainer.lp_cr_rgaa_metadata,
