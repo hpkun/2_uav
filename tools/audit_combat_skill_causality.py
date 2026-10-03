@@ -40,10 +40,64 @@ EPISODE_FIELDS = (
     "episode_return", "episode_length", "MAV_survival", "UAV_survivors",
     "red_attack_kills", "blue_attack_kills", "red_gate_entry_count",
     "red_gate_active_pair_steps", "red_gate_pair_exposures", "red_gate_active_fraction",
+    "uav_attack_gate_entry_count", "uav_attack_gate_active_pair_steps",
+    "uav_attack_gate_pair_exposures", "uav_attack_gate_active_fraction",
+    "MAV_geometric_gate_entry_count", "MAV_geometric_gate_active_pair_steps",
+    "MAV_geometric_gate_pair_exposures", "MAV_geometric_gate_fraction",
     "streak2_opportunities", "attack_event_pair_count", "simultaneous_multi_target_red_attack_steps",
     "ambiguous_blue_death_count", "MAV_attack_event_pair_count",
     "MAV_death_candidate_count", "MAV_only_candidate_death_count",
 )
+
+
+def gate_step_statistics(
+    pair_rows: Sequence[Mapping[str, Any]], *, mav_can_attack: bool,
+    mav_previous_gate: Mapping[tuple[str, str], bool],
+) -> tuple[dict[str, Any], dict[tuple[str, str], bool]]:
+    """Account a post-action geometry snapshot under the versioned combat contract.
+
+    ``red`` means attack-capable Red pairs. It includes MAV in legacy v3.9 and
+    excludes MAV in unarmed-MAV v3.10. Explicit UAV and MAV-geometric channels
+    keep that version-dependent meaning auditable.
+    """
+    counts: dict[str, Any] = {
+        "red_entries": 0, "red_active": 0, "red_exposures": 0,
+        "uav_entries": 0, "uav_active": 0, "uav_exposures": 0,
+        "mav_geometric_entries": 0, "mav_geometric_active": 0,
+        "mav_geometric_exposures": 0,
+        "per_agent": {
+            aid: {"gate_active": 0, "exposures": 0, "streak1": 0, "streak2": 0}
+            for aid in RED_IDS
+        },
+    }
+    next_mav_gate = dict(mav_previous_gate)
+    for row in pair_rows:
+        aid, bid = str(row["attacker"]), str(row["target"])
+        gate = bool(row["gate"])
+        previous_streak = int(row["previous_streak"])
+        attack_capable = aid != "MAV" or bool(mav_can_attack)
+        agent = counts["per_agent"][aid]
+        agent["exposures"] += 1
+        agent["gate_active"] += int(gate)
+        if attack_capable:
+            counts["red_exposures"] += 1
+            counts["red_active"] += int(gate)
+            counts["red_entries"] += int(gate and previous_streak == 0)
+            resulting_streak = previous_streak + 1 if gate else 0
+            agent["streak1"] += int(resulting_streak >= 1)
+            agent["streak2"] += int(resulting_streak >= 2)
+        if aid in UAV_IDS:
+            counts["uav_exposures"] += 1
+            counts["uav_active"] += int(gate)
+            counts["uav_entries"] += int(gate and previous_streak == 0)
+        elif aid == "MAV":
+            pair = (aid, bid)
+            was_gate = bool(mav_previous_gate.get(pair, False))
+            counts["mav_geometric_exposures"] += 1
+            counts["mav_geometric_active"] += int(gate)
+            counts["mav_geometric_entries"] += int(gate and not was_gate)
+            next_mav_gate[pair] = gate
+    return counts, next_mav_gate
 
 
 def _module_sha256(module: Any) -> str:
@@ -265,6 +319,9 @@ def run_condition_episode(
     }
     counters = {
         "gate_entries": 0, "gate_active": 0, "gate_exposures": 0,
+        "uav_gate_entries": 0, "uav_gate_active": 0, "uav_gate_exposures": 0,
+        "mav_geometric_gate_entries": 0, "mav_geometric_gate_active": 0,
+        "mav_geometric_gate_exposures": 0,
         "streak2": 0, "attack_events": 0, "multi_target_steps": 0,
         "ambiguous_deaths": 0, "mav_events": 0, "mav_candidates": 0,
         "mav_only": 0,
@@ -280,6 +337,8 @@ def run_condition_episode(
     total_opportunities = audited_opportunities = 0
     done = False
     info: dict[str, Any] = {}
+    mav_previous_geometric_gate: dict[tuple[str, str], bool] = {}
+    mav_can_attack = bool(loaded["environment_config"]["combat"].get("mav_can_attack", True))
     while not done:
         step = int(env.step_count + 1)
         targets = recompute_reward_targets(env)
@@ -383,15 +442,15 @@ def run_condition_episode(
                         "condition": condition, "episode": episode, "death_step": step,
                         "relative_step": relative, "attacker": aid, "target": bid, **historic,
                     })
+        post_pair_rows = []
         for aid, bid in pre_alive_pairs:
             post = _pair_geometry(env, aid, bid)
             previous_streak = int(pre[(aid, bid)]["attack_streak"])
             resulting_streak = previous_streak + 1 if post["gate"] else 0
-            counters["gate_exposures"] += 1; per_agent[aid]["exposures"] += 1
-            counters["gate_active"] += int(post["gate"]); per_agent[aid]["gate_active"] += int(post["gate"])
-            counters["gate_entries"] += int(post["gate"] and previous_streak == 0)
-            per_agent[aid]["streak1"] += int(resulting_streak >= 1)
-            per_agent[aid]["streak2"] += int(resulting_streak >= 2)
+            post_pair_rows.append({
+                "attacker": aid, "target": bid, "gate": post["gate"],
+                "previous_streak": previous_streak,
+            })
             history_row = {
                 "decision_step": step, **post, "attack_streak": resulting_streak,
                 "pre_action_selector_target": targets[aid],
@@ -419,6 +478,22 @@ def run_condition_episode(
                     ),
                     **history_row,
                 })
+        gate_step, mav_previous_geometric_gate = gate_step_statistics(
+            post_pair_rows, mav_can_attack=mav_can_attack,
+            mav_previous_gate=mav_previous_geometric_gate,
+        )
+        counters["gate_entries"] += int(gate_step["red_entries"])
+        counters["gate_active"] += int(gate_step["red_active"])
+        counters["gate_exposures"] += int(gate_step["red_exposures"])
+        counters["uav_gate_entries"] += int(gate_step["uav_entries"])
+        counters["uav_gate_active"] += int(gate_step["uav_active"])
+        counters["uav_gate_exposures"] += int(gate_step["uav_exposures"])
+        counters["mav_geometric_gate_entries"] += int(gate_step["mav_geometric_entries"])
+        counters["mav_geometric_gate_active"] += int(gate_step["mav_geometric_active"])
+        counters["mav_geometric_gate_exposures"] += int(gate_step["mav_geometric_exposures"])
+        for aid in RED_IDS:
+            for field in ("gate_active", "exposures", "streak1", "streak2"):
+                per_agent[aid][field] += int(gate_step["per_agent"][aid][field])
         done = bool(terminated or truncated)
     summary = info["episode_summary"]
     episode_row = {
@@ -441,6 +516,19 @@ def run_condition_episode(
         "red_gate_active_pair_steps": counters["gate_active"],
         "red_gate_pair_exposures": counters["gate_exposures"],
         "red_gate_active_fraction": counters["gate_active"] / max(counters["gate_exposures"], 1),
+        "uav_attack_gate_entry_count": counters["uav_gate_entries"],
+        "uav_attack_gate_active_pair_steps": counters["uav_gate_active"],
+        "uav_attack_gate_pair_exposures": counters["uav_gate_exposures"],
+        "uav_attack_gate_active_fraction": (
+            counters["uav_gate_active"] / max(counters["uav_gate_exposures"], 1)
+        ),
+        "MAV_geometric_gate_entry_count": counters["mav_geometric_gate_entries"],
+        "MAV_geometric_gate_active_pair_steps": counters["mav_geometric_gate_active"],
+        "MAV_geometric_gate_pair_exposures": counters["mav_geometric_gate_exposures"],
+        "MAV_geometric_gate_fraction": (
+            counters["mav_geometric_gate_active"]
+            / max(counters["mav_geometric_gate_exposures"], 1)
+        ),
         "streak2_opportunities": counters["streak2"],
         "attack_event_pair_count": counters["attack_events"],
         "simultaneous_multi_target_red_attack_steps": counters["multi_target_steps"],
@@ -492,6 +580,7 @@ def summarize_conditions(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, An
                 **{f"mean_{field}": _mean(current, field) for field in (
                     "episode_return", "episode_length", "MAV_survival", "UAV_survivors",
                     "red_attack_kills", "blue_attack_kills", "red_gate_active_fraction",
+                    "uav_attack_gate_active_fraction", "MAV_geometric_gate_fraction",
                     "streak2_opportunities", "attack_event_pair_count",
                     "simultaneous_multi_target_red_attack_steps", "ambiguous_blue_death_count",
                     "MAV_attack_event_pair_count", "MAV_death_candidate_count",
@@ -684,6 +773,11 @@ def write_outputs(output: Path, all_rows: Mapping[str, list[dict[str, Any]]], pr
             "combat_requires_reward_target_or_visibility": False,
             "pairwise_resolver": True,
             "unique_killer_attribution": False,
+            "red_gate_statistics_contract": (
+                "attack-capable Red-to-Blue pairs; UAV-only when mav_can_attack=false"
+            ),
+            "uav_attack_gate_statistics_contract": "UAV1/UAV2/UAV3-to-Blue pairs only",
+            "mav_geometric_gate_statistics_are_separate": True,
         },
         "DESCRIPTIVE BEHAVIORAL EVIDENCE": {
             "condition_summary": condition_summary, "paired_condition_comparison": paired,
@@ -760,6 +854,12 @@ def main() -> None:
         "profile": args.profile, "episodes_per_checkpoint_condition": args.episodes,
         "environment_seed_start": args.env_seed_start,
         "environment_seed_end": args.env_seed_start + args.episodes - 1,
+        "environment_version": reference_config["environment_version"],
+        "red_gate_statistics_semantics": (
+            "UAV-only attack-capable pairs"
+            if not bool(reference_config["combat"].get("mav_can_attack", True))
+            else "all attack-capable Red pairs including MAV"
+        ),
         "action_mode": "stochastic", "action_seed_start": args.action_seed,
         "action_seed_end": args.action_seed + args.episodes - 1,
         "uniform_random_seed_start": args.uniform_random_seed,

@@ -14,7 +14,8 @@ from env.mavuav import RED_IDS, HeterogeneousMAVUAVAirCombatEnv, load_environmen
 from env.vector_env import _environment_state
 from tools.audit_combat_skill_causality import (
     CONDITIONS, candidate_attackers, condition_actions, evaluate_streak2_opportunity,
-    intervention_action_sets, recompute_reward_targets, red_attack_event_pairs, reward_target_matches,
+    gate_step_statistics, intervention_action_sets, recompute_reward_targets,
+    paired_condition_episode_records, red_attack_event_pairs, reward_target_matches,
     run_condition_episode, write_outputs,
 )
 from tools.validate_role_guided_curriculum_configs import COMMON_FIELDS, load_training, validate_configs
@@ -41,6 +42,67 @@ class CountingActors:
 
 def v39():
     return deepcopy(load_environment_config(ROOT / "configs/env_v39.yaml"))
+
+
+def test_gate_accounting_excludes_unarmed_mav_but_keeps_separate_geometry():
+    mav_only = [{
+        "attacker": "MAV", "target": "Blue1", "gate": True,
+        "previous_streak": 0,
+    }]
+    v310, next_gate = gate_step_statistics(
+        mav_only, mav_can_attack=False, mav_previous_gate={},
+    )
+    assert (v310["red_exposures"], v310["red_active"], v310["red_entries"]) == (0, 0, 0)
+    assert (v310["uav_exposures"], v310["uav_active"], v310["uav_entries"]) == (0, 0, 0)
+    assert (
+        v310["mav_geometric_exposures"], v310["mav_geometric_active"],
+        v310["mav_geometric_entries"],
+    ) == (1, 1, 1)
+    assert next_gate[("MAV", "Blue1")] is True
+
+    # Remaining inside the geometric gate is active but is not a second entry.
+    again, _ = gate_step_statistics(
+        mav_only, mav_can_attack=False, mav_previous_gate=next_gate,
+    )
+    assert again["mav_geometric_active"] == 1
+    assert again["mav_geometric_entries"] == 0
+
+
+def test_gate_accounting_counts_v310_uav_and_preserves_v39_mav_history():
+    uav = [{
+        "attacker": "UAV1", "target": "Blue2", "gate": True,
+        "previous_streak": 0,
+    }]
+    v310, _ = gate_step_statistics(uav, mav_can_attack=False, mav_previous_gate={})
+    assert (v310["red_exposures"], v310["red_active"], v310["red_entries"]) == (1, 1, 1)
+    assert (v310["uav_exposures"], v310["uav_active"], v310["uav_entries"]) == (1, 1, 1)
+
+    mav = [{
+        "attacker": "MAV", "target": "Blue3", "gate": True,
+        "previous_streak": 0,
+    }]
+    v39_stats, _ = gate_step_statistics(mav, mav_can_attack=True, mav_previous_gate={})
+    assert (
+        v39_stats["red_exposures"], v39_stats["red_active"], v39_stats["red_entries"],
+    ) == (1, 1, 1)
+    assert v39_stats["per_agent"]["MAV"]["streak1"] == 1
+
+
+def test_paired_episode_gate_fraction_uses_corrected_red_contract():
+    common = {
+        "checkpoint": "run/checkpoint.pt", "training_seed": 5, "episode": 0,
+        "environment_seed": 3000, "outcome": "draw", "red_attack_kills": 0,
+        "episode_return": 0.0, "attack_event_pair_count": 0, "MAV_survival": True,
+    }
+    rows = [
+        {**common, "condition": "POLICY", "red_gate_active_fraction": 0.25},
+        {**common, "condition": "UAV_TRIM", "red_gate_active_fraction": 0.10},
+    ]
+    paired = paired_condition_episode_records(rows)
+    row = next(item for item in paired if item["control_condition"] == "UAV_TRIM")
+    assert row["policy_gate_fraction"] == 0.25
+    assert row["control_gate_fraction"] == 0.10
+    assert np.isclose(row["delta_gate_fraction"], 0.15)
 
 
 def test_condition_actions_do_not_add_samples_and_cyclic_mapping_is_exact():
@@ -181,6 +243,12 @@ def test_output_schema_handles_zero_counterfactuals(tmp_path):
             "UAV_survivors": 3, "red_attack_kills": 0, "blue_attack_kills": 0,
             "red_gate_entry_count": 0, "red_gate_active_pair_steps": 0,
             "red_gate_pair_exposures": 1, "red_gate_active_fraction": 0.0,
+            "uav_attack_gate_entry_count": 0, "uav_attack_gate_active_pair_steps": 0,
+            "uav_attack_gate_pair_exposures": 1, "uav_attack_gate_active_fraction": 0.0,
+            "MAV_geometric_gate_entry_count": 0,
+            "MAV_geometric_gate_active_pair_steps": 0,
+            "MAV_geometric_gate_pair_exposures": 1,
+            "MAV_geometric_gate_fraction": 0.0,
             "streak2_opportunities": 0, "attack_event_pair_count": 0,
             "simultaneous_multi_target_red_attack_steps": 0, "ambiguous_blue_death_count": 0,
             "MAV_attack_event_pair_count": 0, "MAV_death_candidate_count": 0,
