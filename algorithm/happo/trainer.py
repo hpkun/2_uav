@@ -103,6 +103,31 @@ DEFAULTS = {
     "tam_value_loss_type": "huber", "tam_huber_delta": 10.0,
 }
 
+
+def _apply_tacm_temporal_update(
+    actor: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    temporal_loss: torch.Tensor,
+    valid_pairs: int,
+    coefficient: float,
+    max_grad_norm: float,
+) -> bool:
+    """Apply TACM's router-only temporal update when it is enabled.
+
+    A non-positive coefficient is a strict ablation contract: no zeroing,
+    backward pass, clipping, or optimizer step is allowed.  This matters for
+    stateful optimizers whose momentum can otherwise move parameters even when
+    the current weighted gradient is zero.
+    """
+    if int(valid_pairs) <= 0 or float(coefficient) <= 0.0:
+        return False
+    weighted_temporal = float(coefficient) * temporal_loss
+    optimizer.zero_grad()
+    weighted_temporal.backward()
+    nn.utils.clip_grad_norm_(actor.network.router.parameters(), float(max_grad_norm))
+    optimizer.step()
+    return True
+
 LEGACY_PCTA_FAMILY = frozenset(("pcta", "pcta_attention_only", "pcta_uniform"))
 PCTA_V2_VARIANT = "pcta_v2"
 PCTA_FAMILY = frozenset((*LEGACY_PCTA_FAMILY, PCTA_V2_VARIANT))
@@ -2006,12 +2031,12 @@ class HAPPOTrainer:
                     torch.as_tensor(self.buffer.teacher_confidence[:, :, agent - 1], device=self.device),
                 )
                 if valid_pairs:
-                    weighted_temporal = float(c["tacm_temporal_coef"]) * temporal_loss
-                    optimizer.zero_grad(); weighted_temporal.backward()
-                    nn.utils.clip_grad_norm_(self.actors.actors[agent].network.router.parameters(), float(c["max_grad_norm"]))
-                    optimizer.step()
                     tacm_temporal_total += float(temporal_loss.detach().item()) * valid_pairs
                     tacm_temporal_pairs += valid_pairs
+                    _apply_tacm_temporal_update(
+                        self.actors.actors[agent], optimizer, temporal_loss, valid_pairs,
+                        float(c["tacm_temporal_coef"]), float(c["max_grad_norm"]),
+                    )
             with torch.no_grad():
                 new_all, _ = self.actors.actors[agent].evaluate_actions(observations[:, agent], actions[:, agent])
                 factor = preceding_factor_update(factor, old_log_probs[:, agent], new_all, active_masks[:, agent])
