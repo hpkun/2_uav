@@ -51,8 +51,10 @@ OUTPUT_FILES = {
     "episodes": "semantic_episode_summary.csv",
     "interventions": "semantic_mode_intervention.csv",
     "events": "semantic_event_analysis.csv",
+    "event_centered": "semantic_event_centered.csv",
     "last_blue": "semantic_last_blue_analysis.csv",
 }
+TEMPORAL_EPSILON = 1e-12
 
 
 def _json(value: Any) -> str:
@@ -171,6 +173,7 @@ def static_contract_audit() -> dict[str, Any]:
             ],
             "weight": "min(confidence_t, confidence_t+1)",
             "previous_router_stop_gradient": True,
+            "mask_vs_effective": "mask-valid pair receives effective supervision only when min adjacent teacher confidence > 1e-12",
             "direct_gradient_targets": ["router at t+1"],
             "order": "PPO+context -> temporal router-only -> recompute log probability -> HAPPO factor",
             "evidence": ["algorithm/happo/tacm_rgaa.py:127-141", "algorithm/happo/trainer.py:1956-2017"],
@@ -180,6 +183,10 @@ def static_contract_audit() -> dict[str, Any]:
             "execution_inputs": "each actor receives only its own 100D local observation",
             "training_only": ["tactical teacher", "global state", "team critic", "role critics", "temporal targets"],
             "evidence": ["algorithm/happo/evaluation.py:42-78", "algorithm/evaluate_happo.py:100-167"],
+        },
+        "mode_naming": {
+            "code_labels": ["engagement", "cover_support"],
+            "paper_wording": "MAV-support/support is a semantic guide label, not a causal protection claim",
         },
         "v3_10_combat": {
             "status": "confirmed",
@@ -260,7 +267,50 @@ def _geometry(env: HeterogeneousMAVUAVAirCombatEnv, attacker: str, target: str |
 
 
 def _vec_fields(prefix: str, value: np.ndarray) -> dict[str, float]:
-    return {f"{prefix}_{axis}": float(value[index]) for index, axis in enumerate(("ux", "uy", "uz"))}
+    return {
+        f"{prefix}_action_dim{index}": float(value[index])
+        for index in range(len(value))
+    }
+
+
+def target_change(previous_exists: bool, previous: str | None, current: str | None) -> tuple[bool, str]:
+    """Classify the exact adjacent target-id comparison used by training."""
+    if not previous_exists or previous == current:
+        return False, "none"
+    if previous is None and current is not None:
+        return True, "acquisition"
+    if previous is not None and current is None:
+        return True, "loss"
+    return True, "replacement"
+
+
+def temporal_pair_diagnostics(
+    current: Mapping[str, Any], following: Mapping[str, Any] | None,
+    *, epsilon: float = TEMPORAL_EPSILON,
+) -> dict[str, Any]:
+    """Reproduce the training temporal mask and its confidence weight."""
+    valid = bool(
+        following is not None
+        and current.get("uav_active", True)
+        and following.get("uav_active", True)
+        and not current.get("terminated", False)
+        and not current.get("truncated", False)
+        and not current.get("transition_event", False)
+        and current.get("engagement_target") == following.get("engagement_target")
+        and current.get("threat_target") == following.get("threat_target")
+        and current.get("teacher_dominant_mode") == following.get("teacher_dominant_mode")
+    )
+    weight = (
+        min(float(current["teacher_confidence"]), float(following["teacher_confidence"]))
+        if valid and following is not None else 0.0
+    )
+    return {
+        "temporal_mask_valid": valid,
+        "temporal_weight": weight,
+        "temporal_effective": bool(valid and weight > epsilon),
+        # Compatibility alias. New analysis never uses this ambiguous name.
+        "temporal_pair_valid": valid,
+    }
 
 
 def _intervention_row(base: Mapping[str, Any], intervention: Mapping[str, Any]) -> dict[str, Any]:
@@ -335,11 +385,23 @@ def run_episode(
                 p_teacher = teacher.probabilities[0, ui]
                 p_router = np.asarray(intervention["router_probabilities"])
                 entropy = float(-(p_router * np.log(np.maximum(p_router, 1e-12))).sum())
+                prior = previous.get(aid)
+                target_switched, target_change_type = target_change(
+                    prior is not None,
+                    prior.get("engagement_target") if prior is not None else None,
+                    engagement_target,
+                )
+                threat_switched, threat_change_type = target_change(
+                    prior is not None,
+                    prior.get("threat_target") if prior is not None else None,
+                    threat_target,
+                )
                 base = {
                     "checkpoint": str(loaded["checkpoint"]), "training_seed": loaded["training_seed"],
                     "sampled_steps": loaded["sampled_steps"], "episode": episode,
                     "environment_seed": environment_seed, "action_seed": None if deterministic else action_seed,
                     "action_mode": action_mode, "decision_step": decision_step, "uav_id": aid,
+                    "uav_active": True,
                     "red_kills_pre": pre_kills, "alive_red_count": len(alive_red),
                     "alive_blue_count": len(alive_blue), "alive_red": ";".join(alive_red),
                     "alive_blue": ";".join(alive_blue),
@@ -371,11 +433,15 @@ def run_episode(
                     "threat_to_mav_aa_deg": threat_geometry["aa_deg"],
                     "threat_to_mav_exact_gate": threat_geometry["gate"],
                     "threat_to_mav_attack_streak": threat_geometry["streak"],
-                    "target_switch": previous.get(aid, {}).get("engagement_target") not in (None, engagement_target),
-                    "threat_switch": previous.get(aid, {}).get("threat_target") not in (None, threat_target),
-                    "teacher_mode_switch": previous.get(aid, {}).get("teacher_dominant_mode") not in (None, int(np.argmax(p_teacher))),
+                    "target_switch": target_switched,
+                    "engagement_target_change_type": target_change_type,
+                    "threat_switch": threat_switched,
+                    "threat_target_change_type": threat_change_type,
+                    "teacher_mode_switch": bool(prior is not None and prior["teacher_dominant_mode"] != int(np.argmax(p_teacher))),
                     "transition_kill": False, "transition_death": False,
-                    "transition_event": False, "temporal_pair_valid": False,
+                    "transition_event": False, "temporal_mask_valid": False,
+                    "temporal_weight": 0.0, "temporal_effective": False,
+                    "temporal_pair_valid": False,
                     "red_kill_targets": "", "red_kill_attackers": "", "red_death_targets": "",
                 }
                 for key in (
@@ -399,14 +465,7 @@ def run_episode(
         # Current state closes the previous temporal pair using the exact training mask semantics.
         for aid, prior in previous.items():
             now = current.get(aid)
-            prior["temporal_pair_valid"] = bool(
-                now is not None
-                and not prior.get("terminated", False) and not prior.get("truncated", False)
-                and not prior["transition_event"]
-                and prior["engagement_target"] == now["engagement_target"]
-                and prior["threat_target"] == now["threat_target"]
-                and prior["teacher_dominant_mode"] == now["teacher_dominant_mode"]
-            )
+            prior.update(temporal_pair_diagnostics(prior, now))
         observations, _, terminated, truncated, info = env.step(np.asarray(actions, np.float32))
         done = bool(terminated or truncated)
         final_info = info
@@ -529,15 +588,35 @@ def expert_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _continuous_future(
+    series: Sequence[Mapping[str, Any]], index: int, horizon: int, target_field: str,
+) -> list[Mapping[str, Any]]:
+    original = series[index].get(target_field)
+    if original is None:
+        return []
+    result = []
+    for item in series[index + 1:index + 1 + horizon]:
+        if item.get(target_field) != original:
+            break
+        result.append(item)
+    return result
+
+
+def _kill_pairs(row: Mapping[str, Any]) -> list[tuple[str, str]]:
+    targets = [item for item in str(row.get("red_kill_targets", "")).split(";") if item]
+    attackers = [item for item in str(row.get("red_kill_attackers", "")).split(";") if item]
+    return list(zip(attackers, targets))
+
+
 def behavior_associations(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Descriptive future behavior by router mode; episodes are never crossed."""
+    """Future associations constrained to the first continuous target segment."""
     groups: dict[tuple[int, str], list[Mapping[str, Any]]] = defaultdict(list)
     for row in rows:
         groups[(int(row["episode"]), str(row["uav_id"]))].append(row)
     output = []
+    confidences = np.asarray([float(row["teacher_confidence"]) for row in rows])
+    high = float(np.quantile(confidences, .75)) if len(confidences) else 1.0
     for subset_label in ("all", "teacher_high_confidence"):
-        confidences = np.asarray([float(row["teacher_confidence"]) for row in rows])
-        high = float(np.quantile(confidences, .75)) if len(confidences) else 1.0
         for mode in (0, 1):
             for horizon in (1, 3, 5, 10):
                 records = []
@@ -550,127 +629,208 @@ def behavior_associations(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, A
                         future = series[index + 1:index + 1 + horizon]
                         if not future:
                             continue
-                        same_target = [item for item in future if item["engagement_target"] == row["engagement_target"]]
-                        same_threat = [item for item in future if item["threat_target"] == row["threat_target"]]
+                        target_segment = _continuous_future(series, index, horizon, "engagement_target")
+                        threat_segment = _continuous_future(series, index, horizon, "threat_target")
+                        target_pairs = [pair for item in target_segment for pair in _kill_pairs(item)]
+                        original_target = row.get("engagement_target")
+                        original_threat = row.get("threat_target")
+                        target_end = target_segment[-1] if target_segment else None
+                        threat_end = threat_segment[-1] if threat_segment else None
                         records.append({
-                            "gate_entry": any(bool(item["engagement_exact_gate"]) for item in same_target),
-                            "streak_increase": any((item["engagement_attack_streak"] or 0) > (row["engagement_attack_streak"] or 0) for item in same_target),
-                            **{f"streak_ge_{level}": any((item["engagement_attack_streak"] or 0) >= level for item in same_target) for level in (1, 2, 3)},
-                            "red_kill": any(bool(item["transition_kill"]) for item in future),
-                            "distance_improvement": (float(row["engagement_distance"]) - float(same_target[-1]["engagement_distance"])) if same_target and row["engagement_distance"] is not None and same_target[-1]["engagement_distance"] is not None else None,
-                            "ata_improvement": (float(row["engagement_ata_deg"]) - float(same_target[-1]["engagement_ata_deg"])) if same_target and row["engagement_ata_deg"] is not None and same_target[-1]["engagement_ata_deg"] is not None else None,
-                            "aa_improvement": (float(row["engagement_aa_deg"]) - float(same_target[-1]["engagement_aa_deg"])) if same_target and row["engagement_aa_deg"] is not None and same_target[-1]["engagement_aa_deg"] is not None else None,
-                            "intercept_distance_improvement": (float(row["intercept_distance"]) - float(same_threat[-1]["intercept_distance"])) if same_threat and row["intercept_distance"] is not None and same_threat[-1]["intercept_distance"] is not None else None,
-                            "intercept_ata_improvement": (float(row["intercept_ata_deg"]) - float(same_threat[-1]["intercept_ata_deg"])) if same_threat and row["intercept_ata_deg"] is not None and same_threat[-1]["intercept_ata_deg"] is not None else None,
-                            "intercept_aa_improvement": (float(row["intercept_aa_deg"]) - float(same_threat[-1]["intercept_aa_deg"])) if same_threat and row["intercept_aa_deg"] is not None and same_threat[-1]["intercept_aa_deg"] is not None else None,
-                            "intercept_gate": any(bool(item["intercept_exact_gate"]) for item in same_threat),
-                            "mav_threat_reduction": float(row["mav_threat"]) - float(future[-1]["mav_threat"]),
-                            "threat_geometry_worsened": bool(same_threat and row["threat_to_mav_ata_deg"] is not None and same_threat[-1]["threat_to_mav_ata_deg"] is not None and float(same_threat[-1]["threat_to_mav_ata_deg"]) > float(row["threat_to_mav_ata_deg"])),
-                            "threat_blue_killed": any(row["threat_target"] in str(item["red_kill_targets"]).split(";") for item in future),
+                            "continuous_target_steps": len(target_segment),
+                            "continuous_threat_steps": len(threat_segment),
+                            "gate_entry": any(bool(item["engagement_exact_gate"]) for item in target_segment),
+                            "streak_increase": any((item["engagement_attack_streak"] or 0) > (row["engagement_attack_streak"] or 0) for item in target_segment),
+                            **{f"streak_ge_{level}": any((item["engagement_attack_streak"] or 0) >= level for item in target_segment) for level in (1, 2, 3)},
+                            "any_team_kill": any(bool(item["transition_kill"]) for item in future),
+                            "engagement_target_killed": bool(original_target is not None and any(target == original_target for _, target in target_pairs)),
+                            "engagement_target_killed_by_this_uav": bool(original_target is not None and any(attacker == row["uav_id"] and target == original_target for attacker, target in target_pairs)),
+                            "distance_improvement": (float(row["engagement_distance"]) - float(target_end["engagement_distance"])) if target_end is not None and row["engagement_distance"] is not None and target_end["engagement_distance"] is not None else None,
+                            "ata_improvement": (float(row["engagement_ata_deg"]) - float(target_end["engagement_ata_deg"])) if target_end is not None and row["engagement_ata_deg"] is not None and target_end["engagement_ata_deg"] is not None else None,
+                            "aa_improvement": (float(row["engagement_aa_deg"]) - float(target_end["engagement_aa_deg"])) if target_end is not None and row["engagement_aa_deg"] is not None and target_end["engagement_aa_deg"] is not None else None,
+                            "intercept_distance_improvement": (float(row["intercept_distance"]) - float(threat_end["intercept_distance"])) if threat_end is not None and row["intercept_distance"] is not None and threat_end["intercept_distance"] is not None else None,
+                            "intercept_ata_improvement": (float(row["intercept_ata_deg"]) - float(threat_end["intercept_ata_deg"])) if threat_end is not None and row["intercept_ata_deg"] is not None and threat_end["intercept_ata_deg"] is not None else None,
+                            "intercept_aa_improvement": (float(row["intercept_aa_deg"]) - float(threat_end["intercept_aa_deg"])) if threat_end is not None and row["intercept_aa_deg"] is not None and threat_end["intercept_aa_deg"] is not None else None,
+                            "intercept_gate": any(bool(item["intercept_exact_gate"]) for item in threat_segment),
+                            "threat_to_mav_distance_change": (float(threat_end["threat_to_mav_distance"]) - float(row["threat_to_mav_distance"])) if threat_end is not None and row["threat_to_mav_distance"] is not None and threat_end["threat_to_mav_distance"] is not None else None,
+                            "threat_to_mav_ata_change": (float(threat_end["threat_to_mav_ata_deg"]) - float(row["threat_to_mav_ata_deg"])) if threat_end is not None and row["threat_to_mav_ata_deg"] is not None and threat_end["threat_to_mav_ata_deg"] is not None else None,
+                            "threat_to_mav_aa_change": (float(threat_end["threat_to_mav_aa_deg"]) - float(row["threat_to_mav_aa_deg"])) if threat_end is not None and row["threat_to_mav_aa_deg"] is not None and threat_end["threat_to_mav_aa_deg"] is not None else None,
+                            "threat_to_mav_gate_lost": bool(threat_end is not None and row["threat_to_mav_exact_gate"] and not threat_end["threat_to_mav_exact_gate"]),
+                            "mav_threat_score_reduction": (float(row["mav_threat"]) - float(threat_end["mav_threat"])) if threat_end is not None else None,
+                            "threat_geometry_disrupted": bool(threat_end is not None and row["threat_to_mav_exact_gate"] and not threat_end["threat_to_mav_exact_gate"]),
+                            "threat_blue_killed": any(original_threat == target for item in threat_segment for _, target in _kill_pairs(item)),
                         })
+                fields = (
+                    "continuous_target_steps", "continuous_threat_steps", "gate_entry", "streak_increase",
+                    "streak_ge_1", "streak_ge_2", "streak_ge_3", "any_team_kill",
+                    "engagement_target_killed", "engagement_target_killed_by_this_uav",
+                    "distance_improvement", "ata_improvement", "aa_improvement",
+                    "intercept_distance_improvement", "intercept_ata_improvement", "intercept_aa_improvement",
+                    "intercept_gate", "threat_to_mav_distance_change", "threat_to_mav_ata_change",
+                    "threat_to_mav_aa_change", "threat_to_mav_gate_lost", "mav_threat_score_reduction",
+                    "threat_geometry_disrupted", "threat_blue_killed",
+                )
                 output.append({
-                    "subset": subset_label, "confidence_top_q25_boundary": high if subset_label != "all" else None,
-                    "router_mode": TACM_MODE_LABELS[mode], "horizon_steps": horizon, "states": len(records),
-                    **{field: _mean(records, field) for field in (
-                        "gate_entry", "streak_increase", "streak_ge_1", "streak_ge_2", "streak_ge_3", "red_kill",
-                        "distance_improvement", "ata_improvement", "aa_improvement", "intercept_distance_improvement",
-                        "intercept_ata_improvement", "intercept_aa_improvement", "intercept_gate",
-                        "mav_threat_reduction", "threat_geometry_worsened", "threat_blue_killed",
-                    )},
+                    "analysis_type": "behavior_association", "subset": subset_label,
+                    "confidence_top_q25_boundary": high if subset_label != "all" else None,
+                    "router_mode": TACM_MODE_LABELS[mode], "horizon_steps": horizon,
+                    "states": len(records), **{field: _mean(records, field) for field in fields},
                 })
     return output
 
 
-def event_analysis(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def _mode_runs(modes: Sequence[int]) -> list[int]:
+    if not modes:
+        return []
+    runs, length = [], 1
+    for left, right in zip(modes, modes[1:]):
+        if left == right: length += 1
+        else: runs.append(length); length = 1
+    runs.append(length)
+    return runs
+
+
+def event_centered_records(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     groups: dict[tuple[int, str], list[Mapping[str, Any]]] = defaultdict(list)
     for row in rows:
         groups[(int(row["episode"]), str(row["uav_id"]))].append(row)
-    stable_pairs = []
-    event_pairs: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    event_windows: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
-    run_lengths: list[int] = []
-    response_latency: list[int] = []
+    output = []
+    for (episode, aid), series in groups.items():
+        for index, anchor in enumerate(series):
+            events = []
+            if anchor.get("transition_kill"): events.append("kill")
+            if anchor.get("transition_death"): events.append("death")
+            if anchor.get("engagement_target_change_type") != "none":
+                events.append(f"engagement_target_{anchor['engagement_target_change_type']}")
+            if anchor.get("threat_target_change_type") != "none":
+                events.append(f"mav_threat_target_{anchor['threat_target_change_type']}")
+            if anchor.get("teacher_mode_switch"): events.append("teacher_dominant_mode_switch")
+            for event_type in events:
+                for relative in range(-3, 4):
+                    position = index + relative
+                    if position < 0 or position >= len(series):
+                        continue
+                    row = series[position]
+                    movement = abs(float(row["router_engagement_probability"]) - float(anchor["router_engagement_probability"])) + abs(float(row["router_support_probability"]) - float(anchor["router_support_probability"]))
+                    output.append({
+                        "episode": episode, "uav_id": aid, "event_type": event_type,
+                        "event_step": anchor["decision_step"], "relative_step": relative,
+                        "observation_step": row["decision_step"],
+                        "router_engagement_probability": row["router_engagement_probability"],
+                        "router_support_probability": row["router_support_probability"],
+                        "router_dominant_mode": row["router_dominant_mode"],
+                        "teacher_engagement_probability": row["teacher_engagement_probability"],
+                        "teacher_support_probability": row["teacher_support_probability"],
+                        "teacher_dominant_mode": row["teacher_dominant_mode"],
+                        "router_teacher_hard_agreement": int(row["router_dominant_mode"]) == int(row["teacher_dominant_mode"]),
+                        "router_entropy": row["router_entropy"],
+                        "router_teacher_l1": abs(float(row["router_engagement_probability"]) - float(row["teacher_engagement_probability"])) + abs(float(row["router_support_probability"]) - float(row["teacher_support_probability"])),
+                        "router_l1_movement_from_event": movement,
+                        "hard_mode_change_from_event": int(row["router_dominant_mode"]) != int(anchor["router_dominant_mode"]),
+                    })
+    return output
+
+
+def teacher_response_analysis(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[tuple[int, str], list[Mapping[str, Any]]] = defaultdict(list)
+    for row in rows:
+        groups[(int(row["episode"]), str(row["uav_id"]))].append(row)
+    per_horizon: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for series in groups.values():
-        run = 1
+        for index, row in enumerate(series):
+            if not row.get("teacher_mode_switch"):
+                continue
+            new_mode = int(row["teacher_dominant_mode"])
+            for horizon in (1, 2, 3):
+                if index + horizon >= len(series):
+                    continue
+                window = series[index:index + horizon + 1]
+                if not all(int(item["teacher_dominant_mode"]) == new_mode for item in window):
+                    continue
+                latency = next((delay for delay, item in enumerate(window)
+                                if int(item["router_dominant_mode"]) == new_mode), None)
+                per_horizon[horizon].append({"followed": latency is not None, "latency": latency})
+    return [{
+        "analysis_type": "teacher_mode_response", "context": "sustained_teacher_switch",
+        "horizon_steps": horizon, "eligible_sustained_switches": len(per_horizon[horizon]),
+        "router_follow_count": sum(item["followed"] for item in per_horizon[horizon]),
+        "follow_within_horizon_rate": _mean(per_horizon[horizon], "followed"),
+        "response_latency_mean": _mean([item for item in per_horizon[horizon] if item["latency"] is not None], "latency"),
+    } for horizon in (1, 2, 3)]
+
+
+def _context_summary(
+    groups: Mapping[tuple[int, str], Sequence[Mapping[str, Any]]], field: str, label: str,
+) -> dict[str, Any]:
+    pairs, state_rows, run_lengths = [], [], []
+    for series in groups.values():
+        segments: list[list[int]] = []
+        segment: list[int] = []
         for index in range(len(series) - 1):
             left, right = series[index], series[index + 1]
-            switched = int(left["router_dominant_mode"]) != int(right["router_dominant_mode"])
-            movement = abs(float(left["router_engagement_probability"]) - float(right["router_engagement_probability"])) + abs(float(left["router_support_probability"]) - float(right["router_support_probability"]))
-            pair = {"hard_switch": switched, "router_l1_movement": movement}
-            if bool(left["temporal_pair_valid"]):
-                stable_pairs.append(pair)
-            labels = []
-            if left["transition_kill"]: labels.append("kill")
-            if left["transition_death"]: labels.append("death")
-            if right["target_switch"]: labels.append("engagement_target_switch")
-            if right["threat_switch"]: labels.append("mav_threat_target_switch")
-            if right["teacher_mode_switch"]: labels.append("teacher_dominant_mode_switch")
-            for label in labels:
-                event_pairs[label].append(pair)
-            if switched:
-                run_lengths.append(run); run = 1
-            else:
-                run += 1
-            if right["teacher_mode_switch"]:
-                new_mode = int(right["teacher_dominant_mode"])
-                latency = next((delay for delay in (0, 1, 2, 3) if index + 1 + delay < len(series) and int(series[index + 1 + delay]["router_dominant_mode"]) == new_mode), None)
-                if latency is not None: response_latency.append(latency)
-        for index, row in enumerate(series):
-            transition_labels = []
-            state_labels = []
-            if row["transition_kill"]: transition_labels.append("kill")
-            if row["transition_death"]: transition_labels.append("death")
-            if row["target_switch"]: state_labels.append("engagement_target_switch")
-            if row["threat_switch"]: state_labels.append("mav_threat_target_switch")
-            if row["teacher_mode_switch"]: state_labels.append("teacher_dominant_mode_switch")
-            for window in (1, 2, 3):
-                if index + window < len(series):
-                    right = series[index + window]
-                    movement = abs(float(row["router_engagement_probability"]) - float(right["router_engagement_probability"])) + abs(float(row["router_support_probability"]) - float(right["router_support_probability"]))
-                    for label in transition_labels:
-                        event_windows[(label, window)].append({
-                            "hard_switch": int(row["router_dominant_mode"]) != int(right["router_dominant_mode"]),
-                            "router_l1_movement": movement,
-                            "router_matches_current_teacher": int(right["router_dominant_mode"]) == int(right["teacher_dominant_mode"]),
-                        })
-                if index - window >= 0:
-                    left = series[index - window]
-                    movement = abs(float(left["router_engagement_probability"]) - float(row["router_engagement_probability"])) + abs(float(left["router_support_probability"]) - float(row["router_support_probability"]))
-                    for label in state_labels:
-                        event_windows[(label, window)].append({
-                            "hard_switch": int(left["router_dominant_mode"]) != int(row["router_dominant_mode"]),
-                            "router_l1_movement": movement,
-                            "router_matches_current_teacher": int(row["router_dominant_mode"]) == int(row["teacher_dominant_mode"]),
-                        })
-        run_lengths.append(run)
-    output = [{
-        "context": "stable_temporal_pairs", "pairs": len(stable_pairs),
-        "hard_switch_rate": _mean(stable_pairs, "hard_switch"),
-        "router_l1_movement": _mean(stable_pairs, "router_l1_movement"),
-        "router_probability_variance": float(np.var([row["router_engagement_probability"] for row in rows])) if rows else None,
-        "router_entropy": _mean(rows, "router_entropy"),
+            if bool(left.get(field, False)):
+                pairs.append({
+                    "hard_switch": int(left["router_dominant_mode"]) != int(right["router_dominant_mode"]),
+                    "router_l1_movement": abs(float(left["router_engagement_probability"]) - float(right["router_engagement_probability"])) + abs(float(left["router_support_probability"]) - float(right["router_support_probability"])),
+                    "temporal_weight": float(left.get("temporal_weight", 0.0)),
+                })
+                if not segment: segment = [index, index + 1]
+                elif segment[-1] == index: segment.append(index + 1)
+            elif segment:
+                segments.append(segment); segment = []
+        if segment: segments.append(segment)
+        unique = sorted({position for segment in segments for position in segment})
+        state_rows.extend(series[position] for position in unique)
+        for segment in segments:
+            run_lengths.extend(_mode_runs([int(series[position]["router_dominant_mode"]) for position in segment]))
+    return {
+        "analysis_type": "temporal_context", "context": label, "pairs": len(pairs),
+        "states": len(state_rows), "hard_switch_rate": _mean(pairs, "hard_switch"),
+        "router_l1_movement": _mean(pairs, "router_l1_movement"),
+        "router_engagement_probability_variance": float(np.var([row["router_engagement_probability"] for row in state_rows])) if state_rows else None,
+        "router_entropy": _mean(state_rows, "router_entropy"),
         "same_mode_run_length_mean": float(np.mean(run_lengths)) if run_lengths else None,
         "same_mode_run_length_median": float(np.median(run_lengths)) if run_lengths else None,
+        "temporal_weight_mean": _mean(pairs, "temporal_weight"),
+        "temporal_weight_distribution": _json(_distribution(pair["temporal_weight"] for pair in pairs)),
+    }
+
+
+def event_analysis(
+    rows: Sequence[Mapping[str, Any]], centered: Sequence[Mapping[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    groups: dict[tuple[int, str], list[Mapping[str, Any]]] = defaultdict(list)
+    for row in rows:
+        groups[(int(row["episode"]), str(row["uav_id"]))].append(row)
+    global_runs = [length for series in groups.values() for length in _mode_runs([int(row["router_dominant_mode"]) for row in series])]
+    output = [{
+        "analysis_type": "global_behavior", "context": "all_active_uav_states",
+        "states": len(rows), "router_engagement_probability_variance": float(np.var([row["router_engagement_probability"] for row in rows])) if rows else None,
+        "router_entropy": _mean(rows, "router_entropy"),
+        "global_mode_run_length_mean": float(np.mean(global_runs)) if global_runs else None,
+        "global_mode_run_length_median": float(np.median(global_runs)) if global_runs else None,
     }]
-    for label, pairs in event_pairs.items():
-        output.append({"context": label, "pairs": len(pairs), "hard_switch_rate": _mean(pairs, "hard_switch"),
-                       "router_l1_movement": _mean(pairs, "router_l1_movement")})
-    for (label, window), pairs in sorted(event_windows.items()):
+    output.append(_context_summary(groups, "temporal_mask_valid", "mask_valid_stable_context"))
+    output.append(_context_summary(groups, "temporal_effective", "effective_supervised_stable_context"))
+    centered = list(centered if centered is not None else event_centered_records(rows))
+    grouped_centered: dict[tuple[str, int], list[Mapping[str, Any]]] = defaultdict(list)
+    for row in centered:
+        grouped_centered[(str(row["event_type"]), int(row["relative_step"]))].append(row)
+    for (event_type, relative), current in sorted(grouped_centered.items()):
         output.append({
-            "context": f"{label}_window", "event": label, "window_steps": window,
-            "alignment": "transition event: state t to t+h; state switch: state t-h to t",
-            "pairs": len(pairs), "hard_switch_rate": _mean(pairs, "hard_switch"),
-            "router_l1_movement": _mean(pairs, "router_l1_movement"),
-            "router_matches_current_teacher_rate": _mean(pairs, "router_matches_current_teacher"),
+            "analysis_type": "event_centered_summary", "event_type": event_type,
+            "relative_step": relative, "sample_count": len(current),
+            **{f"mean_{field}": _mean(current, field) for field in (
+                "router_engagement_probability", "router_support_probability",
+                "teacher_engagement_probability", "teacher_support_probability", "router_entropy",
+                "router_teacher_l1", "router_l1_movement_from_event",
+            )},
+            "router_engagement_mode_rate": float(np.mean([int(row["router_dominant_mode"]) == 0 for row in current])),
+            "teacher_engagement_mode_rate": float(np.mean([int(row["teacher_dominant_mode"]) == 0 for row in current])),
+            "agreement_rate": _mean(current, "router_teacher_hard_agreement"),
+            "hard_mode_change_from_event_rate": _mean(current, "hard_mode_change_from_event"),
         })
-    teacher_switches = event_pairs.get("teacher_dominant_mode_switch", [])
-    output.append({
-        "context": "teacher_mode_response", "pairs": len(teacher_switches),
-        "response_observed_within_3_rate": len(response_latency) / len(teacher_switches) if teacher_switches else None,
-        "response_latency_mean": float(np.mean(response_latency)) if response_latency else None,
-        "response_latency_median": float(np.median(response_latency)) if response_latency else None,
-        **{f"follow_within_{horizon}_rate": float(np.mean(np.asarray(response_latency) <= horizon)) if response_latency else None for horizon in (1, 2, 3)},
-    })
+    output.extend(teacher_response_analysis(rows))
     return output
 
 
@@ -684,6 +844,9 @@ def last_blue_analysis(rows: Sequence[Mapping[str, Any]], episodes: Sequence[Map
         for aid in UAV_IDS:
             current = [row for row in phase if row["uav_id"] == aid]
             if not current: continue
+            target_runs = _mode_runs([row["engagement_target"] for row in current])
+            target_change_counts = Counter(row["engagement_target_change_type"] for row in current)
+            threat_change_counts = Counter(row["threat_target_change_type"] for row in current)
             output.append({
                 "episode": episode, "environment_seed": summary["environment_seed"], "uav_id": aid,
                 "steps": len(current), "teacher_engagement_probability": _mean(current, "teacher_engagement_probability"),
@@ -692,13 +855,38 @@ def last_blue_analysis(rows: Sequence[Mapping[str, Any]], episodes: Sequence[Map
                 "mav_threat": _mean(current, "mav_threat"),
                 "engagement_target_counts": _json(Counter(str(row["engagement_target"]) for row in current)),
                 "engagement_mode_occupancy": float(np.mean([row["router_dominant_mode"] == 0 for row in current])),
+                "support_mode_occupancy": float(np.mean([row["router_dominant_mode"] == 1 for row in current])),
                 "hard_mode_switch_rate": float(np.mean([current[i]["router_dominant_mode"] != current[i - 1]["router_dominant_mode"] for i in range(1, len(current))])) if len(current) > 1 else 0.0,
+                "teacher_router_agreement": float(np.mean([row["router_dominant_mode"] == row["teacher_dominant_mode"] for row in current])),
                 "expert_separation": _mean(current, "expert_output_distance"),
                 "attack_gate_entry_rate": float(np.mean([bool(row["engagement_exact_gate"]) for row in current])),
                 "max_attack_streak": max((int(row["engagement_attack_streak"] or 0) for row in current), default=0),
+                "temporal_mask_valid_rate": float(np.mean([bool(row["temporal_mask_valid"]) for row in current])),
+                "temporal_effective_rate": float(np.mean([bool(row["temporal_effective"]) for row in current])),
+                "temporal_weight_mean": _mean(current, "temporal_weight"),
+                "target_acquisition_count": int(target_change_counts["acquisition"]),
+                "target_loss_count": int(target_change_counts["loss"]),
+                "target_replacement_count": int(target_change_counts["replacement"]),
+                "threat_target_acquisition_count": int(threat_change_counts["acquisition"]),
+                "threat_target_loss_count": int(threat_change_counts["loss"]),
+                "threat_target_replacement_count": int(threat_change_counts["replacement"]),
+                "teacher_mode_switch_count": int(sum(bool(row["teacher_mode_switch"]) for row in current)),
+                "engagement_target_run_length_mean": float(np.mean(target_runs)) if target_runs else None,
+                "engagement_target_run_length_median": float(np.median(target_runs)) if target_runs else None,
                 "last_blue_distance": _mean(current, "engagement_distance"),
                 "last_blue_ata_deg": _mean(current, "engagement_ata_deg"),
                 "last_blue_aa_deg": _mean(current, "engagement_aa_deg"),
+                "last_blue_gate_rate": _mean(current, "engagement_exact_gate"),
+                "last_blue_attack_streak_mean": _mean(current, "engagement_attack_streak"),
+                "engagement_without_gate_rate": float(np.mean([
+                    row["router_dominant_mode"] == 0 and not row["engagement_exact_gate"] for row in current
+                ])),
+                "support_dominant_rate": float(np.mean([row["router_dominant_mode"] == 1 for row in current])),
+                "target_change_rate": float(np.mean([row["target_switch"] for row in current])),
+                "gate_without_streak3_rate": float(np.mean([
+                    bool(row["engagement_exact_gate"]) and int(row["engagement_attack_streak"] or 0) < 3
+                    for row in current
+                ])),
             })
     return output
 
@@ -720,23 +908,22 @@ def episode_bootstrap(rows: Sequence[Mapping[str, Any]], seed: int = 7319, sampl
     return result
 
 
-def evidence_categories(
+def evidence_sections(
     alignment: Mapping[str, Any], experts: Mapping[str, Any], events: Sequence[Mapping[str, Any]],
     associations: Sequence[Mapping[str, Any]], last_blue: Sequence[Mapping[str, Any]], episodes: int,
 ) -> dict[str, Any]:
-    """Conservative interpretive labels; raw statistics remain authoritative."""
-    enough = episodes >= 20
-    stable = next((row for row in events if row["context"] == "stable_temporal_pairs"), {})
+    """Expose data availability without automatic scientific-strength labels."""
+    stable = next((row for row in events if row.get("context") == "effective_supervised_stable_context"), {})
     engage = [row for row in associations if row["subset"] == "teacher_high_confidence" and row["router_mode"] == "engagement"]
     support = [row for row in associations if row["subset"] == "teacher_high_confidence" and row["router_mode"] == "cover_support"]
     return {
-        "router_semantic_alignment": {"evidence_strength": "moderate" if enough and alignment else "inconclusive", "key_statistics": alignment, "interpretation": "Association with the centralized teacher; not causal proof."},
-        "expert_behavioral_separation": {"evidence_strength": "moderate" if enough and experts else "inconclusive", "key_statistics": experts, "interpretation": "Same-state interventions test available control separation, not realized causal benefit."},
-        "event_aware_persistence": {"evidence_strength": "moderate" if enough and stable else "inconclusive", "key_statistics": stable, "interpretation": "Stable/event-conditioned router movement is descriptive."},
-        "engagement_behavior_association": {"evidence_strength": "weak" if enough and engage else "inconclusive", "key_statistics": engage, "interpretation": "Future behavior conditional on router state; insufficient to establish causality."},
-        "support_behavior_association": {"evidence_strength": "weak" if enough and support else "inconclusive", "key_statistics": support, "interpretation": "Future threat geometry conditional on router state; insufficient to establish protection causality."},
-        "last_blue_cleanup_behavior": {"evidence_strength": "weak" if enough and last_blue else "inconclusive", "key_statistics": {"three_kill_draw_uav_rows": len(last_blue)}, "interpretation": "Descriptive last-Blue behavior only."},
-        "decentralized_execution_contract": {"evidence_strength": "strong", "key_statistics": {"teacher_called_for_action": False, "critic_called_for_action": False, "actor_input": "local observation"}, "interpretation": "Confirmed by code path and action-invariance tests."},
+        "router_semantic_alignment": {"data_status": "available" if alignment else "unavailable", "sample_count": alignment.get("rows", 0), "available_statistics": alignment, "note": "Teacher/router association only; no causal rating is assigned."},
+        "expert_behavioral_separation": {"data_status": "available" if experts else "unavailable", "sample_count": sum(item.get("states", 0) for item in experts.values()), "available_statistics": experts, "note": "Same-state interventions measure available control separation."},
+        "event_aware_persistence": {"data_status": "available" if stable else "unavailable", "sample_count": stable.get("pairs", 0), "available_statistics": stable, "note": "Effective temporal context is separated from mask-valid and global behavior."},
+        "engagement_behavior_association": {"data_status": "available" if engage else "unavailable", "sample_count": sum(item.get("states", 0) for item in engage), "available_statistics": engage, "note": "Descriptive future association; insufficient to establish causality."},
+        "support_behavior_association": {"data_status": "available" if support else "unavailable", "sample_count": sum(item.get("states", 0) for item in support), "available_statistics": support, "note": "MAV-support is a code-level label, not proof of causal protection."},
+        "last_blue_cleanup_behavior": {"data_status": "available" if last_blue else "unavailable", "sample_count": len(last_blue), "available_statistics": {"three_kill_draw_uav_rows": len(last_blue)}, "note": "Descriptive last-Blue behavior only."},
+        "decentralized_execution_contract": {"data_status": "available", "sample_count": episodes, "available_statistics": {"teacher_called_for_action": False, "critic_called_for_action": False, "actor_input": "local observation"}, "note": "Code-path contract plus action-invariance tests; no mechanism-strength label."},
     }
 
 
@@ -756,7 +943,8 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
         )
         step_rows.extend(rows); interventions.extend(mode_rows); episode_rows.append(summary)
     associations = behavior_associations(step_rows)
-    events = event_analysis(step_rows)
+    centered = event_centered_records(step_rows)
+    events = event_analysis(step_rows, centered)
     last_blue = last_blue_analysis(step_rows, episode_rows)
     alignment = alignment_summary(step_rows)
     experts = expert_summary(interventions)
@@ -764,13 +952,28 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
     write_csv(output / OUTPUT_FILES["episodes"], episode_rows)
     write_csv(output / OUTPUT_FILES["interventions"], interventions)
     write_csv(output / OUTPUT_FILES["events"], events + associations)
+    write_csv(output / OUTPUT_FILES["event_centered"], centered, fields=(
+        "episode", "uav_id", "event_type", "event_step", "relative_step",
+        "observation_step", "router_engagement_probability", "router_support_probability",
+        "router_dominant_mode", "teacher_engagement_probability", "teacher_support_probability",
+        "teacher_dominant_mode", "router_teacher_hard_agreement", "router_entropy",
+        "router_teacher_l1", "router_l1_movement_from_event", "hard_mode_change_from_event",
+    ))
     write_csv(output / OUTPUT_FILES["last_blue"], last_blue, fields=(
         "episode", "environment_seed", "uav_id", "steps",
         "teacher_engagement_probability", "router_engagement_probability",
         "router_support_probability", "mav_threat", "engagement_target_counts",
-        "engagement_mode_occupancy", "hard_mode_switch_rate", "expert_separation",
+        "engagement_mode_occupancy", "support_mode_occupancy", "hard_mode_switch_rate",
+        "teacher_router_agreement", "expert_separation",
         "attack_gate_entry_rate", "max_attack_streak", "last_blue_distance",
-        "last_blue_ata_deg", "last_blue_aa_deg",
+        "temporal_mask_valid_rate", "temporal_effective_rate", "temporal_weight_mean",
+        "target_acquisition_count", "target_loss_count", "target_replacement_count",
+        "threat_target_acquisition_count", "threat_target_loss_count",
+        "threat_target_replacement_count", "teacher_mode_switch_count",
+        "engagement_target_run_length_mean", "engagement_target_run_length_median",
+        "last_blue_ata_deg", "last_blue_aa_deg", "last_blue_gate_rate",
+        "last_blue_attack_streak_mean", "engagement_without_gate_rate",
+        "support_dominant_rate", "target_change_rate", "gate_without_streak3_rate",
     ))
     summary = {
         "audit": "TACM-RGAA-v1 semantic-mode audit", "read_only": True,
@@ -786,7 +989,7 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
         "router_semantic_alignment": alignment, "expert_behavioral_separation": experts,
         "event_aware_persistence": events, "behavior_associations": associations,
         "last_blue_cleanup": {"three_kill_draw_uav_rows": len(last_blue)},
-        "evidence_categories": evidence_categories(alignment, experts, events, associations, last_blue, args.episodes),
+        "evidence_sections": evidence_sections(alignment, experts, events, associations, last_blue, args.episodes),
         "limitations": [
             "Step records are temporally correlated and are not treated as independent inferential samples.",
             "Behavior associations and same-state interventions do not establish causal tactical semantics.",
