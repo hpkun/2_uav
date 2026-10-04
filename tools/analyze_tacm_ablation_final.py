@@ -31,6 +31,10 @@ STABILITY_METRICS = {
     "red_kills": "mean_red_attack_kills",
 }
 MILESTONES = (1_600_000, 1_700_000, 1_800_000, 1_900_000, 2_000_000)
+MAX_MILESTONE_ERROR = 60_000
+TRAINING_REQUIRED_FIELDS = (
+    "sampled_steps", "red_win_rate", "mean_episode_return", "mean_red_attack_kills",
+)
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -47,6 +51,45 @@ def _stats(values: Iterable[float]) -> dict[str, float]:
         "std": statistics.stdev(data) if len(data) > 1 else 0.0,
         "median": statistics.median(data), "min": min(data), "max": max(data),
     }
+
+
+def validate_and_match_training_milestones(
+    rows: list[dict[str, Any]],
+) -> list[tuple[int, int, dict[str, Any]]]:
+    if not rows:
+        raise RuntimeError("training.csv is empty")
+    missing = [field for field in TRAINING_REQUIRED_FIELDS if field not in rows[0]]
+    if missing:
+        raise RuntimeError(f"training.csv missing required fields: {missing}")
+    parsed_steps = []
+    for index, row in enumerate(rows):
+        try:
+            step = int(row["sampled_steps"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise RuntimeError(f"training.csv sampled_steps is not an integer at row {index + 2}") from error
+        for field in TRAINING_REQUIRED_FIELDS[1:]:
+            try:
+                float(row[field])
+            except (KeyError, TypeError, ValueError) as error:
+                raise RuntimeError(f"training.csv field {field!r} is invalid at row {index + 2}") from error
+        parsed_steps.append(step)
+    if any(right <= left for left, right in zip(parsed_steps, parsed_steps[1:])):
+        raise RuntimeError("training.csv sampled_steps must be strictly increasing without duplicates")
+    matches = []
+    used_indices: set[int] = set()
+    for milestone in MILESTONES:
+        index = min(range(len(rows)), key=lambda position: abs(parsed_steps[position] - milestone))
+        if index in used_indices:
+            raise RuntimeError("late-training milestones do not map to five distinct log records")
+        error = parsed_steps[index] - milestone
+        if abs(error) > MAX_MILESTONE_ERROR:
+            raise RuntimeError(
+                f"late-training milestone {milestone} nearest record error {error} exceeds "
+                f"{MAX_MILESTONE_ERROR} sampled steps"
+            )
+        used_indices.add(index)
+        matches.append((milestone, error, rows[index]))
+    return matches
 
 
 def load_runs(manifest_dir: Path = MANIFEST_DIR) -> list[dict[str, Any]]:
@@ -95,16 +138,15 @@ def analyze(manifest_dir: Path, output_dir: Path) -> dict[str, Any]:
 
         with (run_dir / "training.csv").open(encoding="utf-8", newline="") as stream:
             training = list(csv.DictReader(stream))
-        chosen = []
-        for milestone in MILESTONES:
-            candidate = min(training, key=lambda item: abs(int(item["sampled_steps"]) - milestone))
-            chosen.append(candidate)
+        matches = validate_and_match_training_milestones(training)
+        chosen = [candidate for _, _, candidate in matches]
         stability_row: dict[str, Any] = {
             "method": run["method"], "paper_variant": run["paper_variant"],
             "training_seed": int(run["seed"]),
         }
-        for milestone, candidate in zip(MILESTONES, chosen):
+        for milestone, error, candidate in matches:
             stability_row[f"milestone_{milestone}_actual_steps"] = int(candidate["sampled_steps"])
+            stability_row[f"milestone_{milestone}_step_error"] = error
         for label, field in STABILITY_METRICS.items():
             values = [float(item[field]) for item in chosen]
             stability_row.update({

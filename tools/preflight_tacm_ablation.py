@@ -53,6 +53,26 @@ def validate_protocol(
                             "expected": "heterogeneous_mavuav_4v4_v3_10",
                             "actual": env["environment_version"]})
 
+    no_temporal = configs["no_temporal"]
+    full = configs["full"]
+    tacm_differences: list[dict[str, Any]] = []
+    for field in sorted((set(no_temporal) | set(full)) - {"tacm_temporal_coef"}):
+        if no_temporal.get(field) != full.get(field):
+            item = {"field": field, "no_temporal": no_temporal.get(field),
+                    "full": full.get(field)}
+            tacm_differences.append(item)
+            differences.append({"method": "no_temporal_vs_full", **item})
+    coefficient_contract = {
+        "no_temporal": no_temporal.get("tacm_temporal_coef"),
+        "full": full.get("tacm_temporal_coef"),
+    }
+    if coefficient_contract != {"no_temporal": 0.0, "full": 0.01}:
+        item = {"field": "tacm_temporal_coef",
+                "expected": {"no_temporal": 0.0, "full": 0.01},
+                "actual": coefficient_contract}
+        tacm_differences.append(item)
+        differences.append({"method": "no_temporal_vs_full", **item})
+
     structures: dict[str, Any] = {}
     trainers: dict[str, HAPPOTrainer] = {}
     if inspect_structures:
@@ -95,6 +115,12 @@ def validate_protocol(
         "status": "PASS" if not differences else "FAIL",
         "environment_version": env["environment_version"],
         "common_training_fields": {field: baseline.get(field) for field in COMMON_TRAINING_FIELDS},
+        "no_temporal_vs_full_contract": {
+            "status": "PASS" if not tacm_differences else "FAIL",
+            "allowed_difference": "tacm_temporal_coef",
+            "required_values": {"no_temporal": 0.0, "full": 0.01},
+            "differences": tacm_differences,
+        },
         "runtime_contract": runtime, "structures": structures, "differences": differences,
     }
 

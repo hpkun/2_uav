@@ -10,9 +10,10 @@ import torch
 
 from algorithm.happo.trainer import HAPPOTrainer, _apply_tacm_temporal_update
 from env.mavuav import load_environment_config
-from tools.analyze_tacm_ablation_final import analyze
+from tools.analyze_tacm_ablation_final import analyze, validate_and_match_training_milestones
 from tools.preflight_tacm_ablation import validate_protocol
 from tools.run_tacm_ablation_training import build_plan
+from tools.run_tacm_ablation_evaluation import validate_checkpoint_identity
 from tools.tacm_ablation_protocol import (
     CHECKPOINT_INTERVAL, EVAL_INTERVAL, EVALUATION_ACTION_SEED_START,
     EVALUATION_ENV_SEED_START, EVALUATION_EPISODES, LOG_INTERVAL, METHODS,
@@ -110,6 +111,91 @@ def test_preflight_passes_exact_contract_and_fails_each_common_drift():
     assert any(item["field"] == "environment_version" for item in report["differences"])
 
 
+@pytest.mark.parametrize(("field", "value"), (
+    ("dbm_residual_scale", 0.5), ("tacm_tau_teacher", 0.5),
+    ("tacm_context_coef_start", 0.1), ("role_advantage_coef", 0.25),
+    ("curriculum_steps", 300_000),
+))
+def test_no_temporal_full_contract_rejects_every_non_temporal_drift(field, value):
+    configs = {method: load_method_training(method) for method in METHODS}
+    configs["no_temporal"][field] = value
+    report = validate_protocol(configs, inspect_structures=False)
+    contract = report["no_temporal_vs_full_contract"]
+    assert report["status"] == "FAIL"
+    assert contract["status"] == "FAIL"
+    assert any(item["field"] == field for item in contract["differences"])
+
+
+@pytest.mark.parametrize(("method", "value"), (("no_temporal", 0.01), ("full", 0.0)))
+def test_temporal_coefficient_contract_is_exact(method, value):
+    configs = {name: load_method_training(name) for name in METHODS}
+    configs[method]["tacm_temporal_coef"] = value
+    report = validate_protocol(configs, inspect_structures=False)
+    assert report["status"] == "FAIL"
+    assert report["no_temporal_vs_full_contract"]["status"] == "FAIL"
+    assert any(item["field"] == "tacm_temporal_coef"
+               for item in report["no_temporal_vs_full_contract"]["differences"])
+
+
+def _checkpoint_payload(method: str, seed: int = 17) -> dict:
+    method_variant = METHODS[method]["method_variant"]
+    payload = {
+        "sampled_steps": TOTAL_STEPS,
+        "environment_version": "heterogeneous_mavuav_4v4_v3_10",
+        "environment_profile": "main", "environment_config": load_environment_config(ROOT / "configs" / "env_v310.yaml"),
+        "actor_variant": "vanilla", "critic_variant": "mlp",
+        "method_variant": method_variant,
+        "trainer_config": {
+            "seed": seed, "environment_profile": "main", "method_variant": method_variant,
+            "role_module_enabled": method != "happo",
+        },
+        "actors": {"actors.0.network.0.weight": torch.zeros(1)},
+    }
+    if method != "happo":
+        payload.update({
+            "role_critic_mav": {}, "role_critic_uav": {},
+            "role_aux_reward_mode": "process_plus_own_loss",
+            "role_advantage_coef": 0.5,
+        })
+    if method in ("no_temporal", "full"):
+        coefficient = 0.0 if method == "no_temporal" else 0.01
+        payload.update({
+            "algorithm": "tacm_rgaa_happo", "tacm_temporal_coef": coefficient,
+            "actors": {
+                "actors.1.network.router.weight": torch.zeros(1),
+                "actors.1.network.experts.0.weight": torch.zeros(1),
+            },
+        })
+        payload["trainer_config"]["tacm_temporal_coef"] = coefficient
+    return payload
+
+
+@pytest.mark.parametrize("method", tuple(METHODS))
+def test_checkpoint_identity_accepts_all_four_legal_methods(method):
+    identity = validate_checkpoint_identity(_checkpoint_payload(method), method, 17)
+    assert identity["method"] == method
+    assert identity["training_seed"] == 17
+
+
+def test_checkpoint_identity_rejects_seed_mismatch():
+    with pytest.raises(RuntimeError, match="training_seed"):
+        validate_checkpoint_identity(_checkpoint_payload("full", seed=17), "full", 23)
+
+
+def test_full_checkpoint_cannot_impersonate_no_temporal_and_reverse():
+    with pytest.raises(RuntimeError, match="temporal coefficient"):
+        validate_checkpoint_identity(_checkpoint_payload("full"), "no_temporal", 17)
+    with pytest.raises(RuntimeError, match="temporal coefficient"):
+        validate_checkpoint_identity(_checkpoint_payload("no_temporal"), "full", 17)
+
+
+def test_checkpoint_identity_rejects_method_variant_mismatch():
+    payload = _checkpoint_payload("full")
+    payload["method_variant"] = payload["trainer_config"]["method_variant"] = "rgaa"
+    with pytest.raises(RuntimeError, match="method_variant"):
+        validate_checkpoint_identity(payload, "full", 17)
+
+
 def test_training_dry_plan_has_only_fixed_seeds_and_budget():
     for method in METHODS:
         plan = build_plan(method, "TEST", python="python")
@@ -178,3 +264,37 @@ def test_final_analyzer_uses_fixed_formal_results_and_nearest_late_milestones(tm
         rows = list(csv.DictReader(stream))
     assert len(rows) == 12
     assert rows[0]["milestone_1600000_actual_steps"] == "1598000"
+    assert rows[0]["milestone_1600000_step_error"] == "-2000"
+    assert rows[0]["milestone_1700000_step_error"] == "1000"
+
+
+def _training_rows(steps=(1_598_000, 1_701_000, 1_799_000, 1_902_000, 2_000_000)):
+    return [{
+        "sampled_steps": str(step), "red_win_rate": ".5",
+        "mean_episode_return": "100", "mean_red_attack_kills": "2",
+    } for step in steps]
+
+
+def test_stability_milestones_are_unique_and_record_signed_error():
+    matches = validate_and_match_training_milestones(_training_rows())
+    assert [int(row["sampled_steps"]) for _, _, row in matches] == [
+        1_598_000, 1_701_000, 1_799_000, 1_902_000, 2_000_000,
+    ]
+    assert [error for _, error, _ in matches] == [-2_000, 1_000, -1_000, 2_000, 0]
+
+
+def test_stability_rejects_reused_or_distant_milestone_rows():
+    with pytest.raises(RuntimeError, match="five distinct"):
+        validate_and_match_training_milestones(_training_rows((1_650_000, 1_800_000, 1_900_000, 2_000_000)))
+    with pytest.raises(RuntimeError, match="exceeds 60000"):
+        validate_and_match_training_milestones(_training_rows((1_500_000, 1_700_000, 1_800_000, 1_900_000, 2_000_000)))
+
+
+@pytest.mark.parametrize("rows, message", (
+    (_training_rows((1_598_000, 1_701_000, 1_701_000, 1_902_000, 2_000_000)), "strictly increasing"),
+    (_training_rows((1_598_000, 1_799_000, 1_701_000, 1_902_000, 2_000_000)), "strictly increasing"),
+    ([{"sampled_steps": "1600000", "red_win_rate": ".5", "mean_episode_return": "1"}], "missing required"),
+))
+def test_stability_rejects_invalid_training_csv(rows, message):
+    with pytest.raises(RuntimeError, match=message):
+        validate_and_match_training_milestones(rows)
