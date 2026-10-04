@@ -16,6 +16,7 @@ from env.mavuav import BLUE_IDS, RED_IDS, HeterogeneousMAVUAVAirCombatEnv, load_
 from env.models import AircraftState
 from tools.audit_tacm_semantic_modes import (
     _continuous_future,
+    _transition_window,
     alignment_summary,
     behavior_associations,
     diagnostic_rng_invariant,
@@ -269,10 +270,29 @@ def test_alignment_summary_reports_disjoint_confidence_buckets_and_exact_agreeme
         _audit_row(4, teacher=(.1, .9), router=(.9, .1), confidence=.9),
     ]
     summary = alignment_summary(rows)
-    buckets = summary["confidence_quantile_buckets"]
+    overall = summary["overall"]
+    buckets = overall["confidence_quantile_buckets"]
     assert sum(buckets[label]["count"] for label in ("low", "middle", "high")) == 4
-    assert summary["hard_mode_agreement"] == .75
-    assert summary["confidence_weighted_kl"] > 0.0
+    assert overall["hard_mode_agreement"] == .75
+    assert overall["confidence_weighted_kl"] > 0.0
+    assert summary["by_uav"]["UAV1"]["rows"] == 4
+
+
+def test_alignment_summary_separates_three_independent_uav_routers():
+    rows = [
+        _audit_row(1, aid="UAV1", teacher=(.9, .1), router=(.9, .1)),
+        _audit_row(1, aid="UAV2", teacher=(.9, .1), router=(.9, .1)),
+        _audit_row(2, aid="UAV2", teacher=(.1, .9), router=(.9, .1)),
+        _audit_row(1, aid="UAV3", teacher=(.9, .1), router=(.1, .9)),
+    ]
+    summary = alignment_summary(rows)
+    assert summary["overall"]["rows"] == 4
+    assert summary["by_uav"]["UAV1"]["hard_mode_agreement"] == 1.0
+    assert summary["by_uav"]["UAV2"]["hard_mode_agreement"] == .5
+    assert summary["by_uav"]["UAV3"]["hard_mode_agreement"] == 0.0
+    assert summary["by_uav"]["UAV1"]["engagement_probability_correlation"] is None
+    for aid in ("UAV1", "UAV2", "UAV3"):
+        assert "router_engagement_mode_occupancy" in summary["by_uav"][aid]
 
 
 @pytest.mark.parametrize(("previous", "current", "expected"), (
@@ -303,23 +323,66 @@ def _association(rows, mode="engagement", horizon=1):
                 and row["horizon_steps"] == horizon)
 
 
-def test_kill_association_distinguishes_team_target_and_multi_attacker_membership():
-    current = _audit_row(1, target="Blue1")
-    unrelated = _audit_row(
-        2, target="Blue1", transition_kill=True,
-        red_kill_targets="Blue2", red_kill_attackers="UAV3",
+def test_immediate_transition_kill_is_aligned_with_anchor_state_and_attacker():
+    immediate = _audit_row(
+        1, target="Blue1", transition_kill=True,
+        red_kill_targets="Blue1", red_kill_attackers="UAV1",
     )
-    summary = _association([current, unrelated])
+    switched = _audit_row(2, target="Blue2", router=(.2, .8))
+    summary = _association([immediate, switched], horizon=1)
     assert summary["any_team_kill"] == 1.0
-    assert summary["engagement_target_killed"] == 0.0
-    assert summary["engagement_target_killed_by_this_uav"] == 0.0
-    multi = _audit_row(
-        2, target="Blue1", transition_kill=True,
-        red_kill_targets="Blue1;Blue1", red_kill_attackers="UAV2;UAV1",
-    )
-    summary = _association([current, multi])
     assert summary["engagement_target_killed"] == 1.0
     assert summary["engagement_target_killed_by_this_uav"] == 1.0
+
+
+@pytest.mark.parametrize(("targets", "attackers", "target_killed", "own_kill"), (
+    ("Blue1", "UAV2", 1.0, 0.0),
+    ("Blue2", "UAV3", 0.0, 0.0),
+    ("Blue1;Blue1", "UAV2;UAV1", 1.0, 1.0),
+))
+def test_immediate_kill_distinguishes_other_unrelated_and_multi_attacker(
+    targets, attackers, target_killed, own_kill,
+):
+    current = _audit_row(
+        1, target="Blue1", transition_kill=True,
+        red_kill_targets=targets, red_kill_attackers=attackers,
+    )
+    summary = _association([current, _audit_row(2, target="Blue2", router=(.2, .8))])
+    assert summary["any_team_kill"] == 1.0
+    assert summary["engagement_target_killed"] == target_killed
+    assert summary["engagement_target_killed_by_this_uav"] == own_kill
+
+
+def test_immediate_threat_kill_survives_next_state_threat_change():
+    current = _audit_row(
+        1, router=(.2, .8), threat="Blue3", transition_kill=True,
+        red_kill_targets="Blue3", red_kill_attackers="UAV2",
+    )
+    changed = _audit_row(2, router=(.8, .2), threat=None)
+    summary = _association([current, changed], mode="cover_support", horizon=1)
+    assert summary["threat_blue_killed"] == 1.0
+
+
+def test_transition_horizon_is_t_through_t_plus_h_minus_one():
+    rows = [
+        _audit_row(1),
+        _audit_row(2, transition_kill=True, red_kill_targets="Blue1",
+                   red_kill_attackers="UAV1", router=(.2, .8)),
+        _audit_row(3, transition_kill=True, red_kill_targets="Blue1",
+                   red_kill_attackers="UAV1", router=(.2, .8)),
+        _audit_row(4, router=(.2, .8)),
+    ]
+    assert _association(rows, horizon=1)["any_team_kill"] == 0.0
+    assert _association(rows, horizon=3)["any_team_kill"] == 1.0
+    # behavior_associations exposes only 1/3/5/10; horizon 3 includes t+1/t+2.
+    assert _association(rows, horizon=3)["engagement_target_killed"] == 1.0
+
+
+@pytest.mark.parametrize("horizon", (1, 2, 3, 5, 10))
+def test_transition_window_has_exact_horizon_without_off_by_one(horizon):
+    rows = [_audit_row(step) for step in range(20)]
+    window = _transition_window(rows, 4, horizon)
+    assert [row["decision_step"] for row in window] == list(range(4, 4 + horizon))
 
 
 def test_stable_context_statistics_exclude_unstable_large_router_change():
@@ -351,6 +414,56 @@ def test_event_centered_window_is_symmetric_and_never_crosses_agent_or_episode()
     assert {row["relative_step"] for row in centered} == set(range(-3, 4))
     assert {row["episode"] for row in centered} == {0}
     assert {row["uav_id"] for row in centered} == {"UAV1"}
+    assert {row["event_scope"] for row in centered} == {"agent"}
+
+
+def test_team_event_deduplication_and_shared_event_id():
+    rows = [
+        _audit_row(4, aid=aid, transition_kill=True)
+        for aid in ("UAV1", "UAV2", "UAV3")
+    ]
+    centered = event_centered_records(rows)
+    anchors = [row for row in centered if row["event_type"] == "kill" and row["relative_step"] == 0]
+    assert len(anchors) == 3
+    assert len({row["event_id"] for row in anchors}) == 1
+    assert len({row["team_event_id"] for row in anchors}) == 1
+    summary = next(row for row in event_analysis(rows, centered)
+                   if row.get("analysis_type") == "event_centered_summary"
+                   and row.get("event_type") == "kill" and row.get("relative_step") == 0)
+    assert summary["event_scope"] == "team"
+    assert summary["unique_team_events"] == 1
+    assert summary["unique_event_count"] == 1
+    assert summary["agent_anchor_count"] == 3
+    assert summary["centered_record_count"] == 3
+
+
+def test_team_events_on_different_steps_are_unique():
+    rows = []
+    for step in (4, 5):
+        rows.extend(_audit_row(step, aid=aid, transition_kill=True)
+                    for aid in ("UAV1", "UAV2", "UAV3"))
+    centered = event_centered_records(rows)
+    anchors = [row for row in centered if row["event_type"] == "kill" and row["relative_step"] == 0]
+    assert len({row["event_id"] for row in anchors}) == 2
+    summary = next(row for row in event_analysis(rows, centered)
+                   if row.get("analysis_type") == "event_centered_summary"
+                   and row.get("event_type") == "kill" and row.get("relative_step") == 0)
+    assert summary["unique_team_events"] == 2
+    assert summary["agent_anchor_count"] == 6
+
+
+def test_agent_target_events_remain_distinct_by_uav():
+    rows = [
+        _audit_row(3, aid=aid, engagement_target_change_type="replacement")
+        for aid in ("UAV1", "UAV2")
+    ]
+    centered = event_centered_records(rows)
+    anchors = [row for row in centered
+               if row["event_type"] == "engagement_target_replacement"
+               and row["relative_step"] == 0]
+    assert {row["event_scope"] for row in anchors} == {"agent"}
+    assert len({row["event_id"] for row in anchors}) == 2
+    assert {row["team_event_id"] for row in anchors} == {None}
 
 
 def test_teacher_response_rejects_transient_switch_and_tracks_sustained_latency():
@@ -428,7 +541,7 @@ def test_last_blue_summary_counts_reacquisition_and_effective_temporal_pairs():
 
 
 def test_evidence_sections_never_assign_automatic_strength_labels():
-    sections = evidence_sections({"rows": 1}, {"UAV1": {"states": 1}}, [], [], [], 100)
+    sections = evidence_sections({"overall": {"rows": 1}, "by_uav": {}}, {"UAV1": {"states": 1}}, [], [], [], 100)
     text = str(sections)
     assert "evidence_strength" not in text
     assert not any(label in text for label in ("strong", "moderate", "weak"))
