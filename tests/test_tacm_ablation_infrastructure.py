@@ -222,7 +222,8 @@ def test_formal_evaluation_command_is_fixed_stochastic_main_exact_protocol(tmp_p
     assert str(checkpoint) in command
 
 
-def test_final_analyzer_uses_fixed_formal_results_and_nearest_late_milestones(tmp_path):
+@pytest.mark.parametrize("precreated", (False, True))
+def test_final_analyzer_uses_fixed_formal_results_and_nearest_late_milestones(tmp_path, precreated):
     manifest_dir = tmp_path / "manifests"; manifest_dir.mkdir()
     for method_index, method in enumerate(METHODS):
         runs = []
@@ -255,6 +256,8 @@ def test_final_analyzer_uses_fixed_formal_results_and_nearest_late_milestones(tm
             "status": "complete", "seeds": list(PAPER_SEEDS), "runs": runs,
         }), encoding="utf-8")
     output = tmp_path / "analysis"
+    if precreated:
+        output.mkdir()
     analyze(manifest_dir, output)
     assert {path.name for path in output.iterdir()} == {
         "final_ablation_per_seed.csv", "final_ablation_summary.csv",
@@ -266,6 +269,16 @@ def test_final_analyzer_uses_fixed_formal_results_and_nearest_late_milestones(tm
     assert rows[0]["milestone_1600000_actual_steps"] == "1598000"
     assert rows[0]["milestone_1600000_step_error"] == "-2000"
     assert rows[0]["milestone_1700000_step_error"] == "1000"
+
+
+def test_final_analyzer_refuses_to_overwrite_existing_audit(tmp_path):
+    output = tmp_path / "analysis"
+    output.mkdir()
+    existing = output / "final_ablation_summary.json"
+    existing.write_text("existing result", encoding="utf-8")
+    with pytest.raises(FileExistsError, match="non-empty audit output"):
+        analyze(tmp_path / "unused_manifest", output)
+    assert existing.read_text(encoding="utf-8") == "existing result"
 
 
 def _training_rows(steps=(1_598_000, 1_701_000, 1_799_000, 1_902_000, 2_000_000)):

@@ -105,7 +105,13 @@ def load_runs(manifest_dir: Path = MANIFEST_DIR) -> list[dict[str, Any]]:
 
 
 def analyze(manifest_dir: Path, output_dir: Path) -> dict[str, Any]:
-    output_dir.mkdir(parents=True, exist_ok=False)
+    # Shell launchers may pre-create the destination for logging. Accept an
+    # empty directory, but never overwrite existing audit artifacts.
+    if output_dir.exists():
+        if not output_dir.is_dir() or any(output_dir.iterdir()):
+            raise FileExistsError(f"refusing to overwrite non-empty audit output: {output_dir}")
+    else:
+        output_dir.mkdir(parents=True, exist_ok=False)
     per_seed: list[dict[str, Any]] = []
     stability: list[dict[str, Any]] = []
     for run in load_runs(manifest_dir):
