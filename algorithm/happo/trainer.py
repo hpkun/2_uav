@@ -181,7 +181,7 @@ def _resolved_reward_mode(environment_config: Mapping[str, Any]) -> str:
     shaping_mode = str(environment_config.get("shaping", {}).get("mode", "absolute"))
     return ("heterogeneous_role_v1" if version.endswith("v3_7") else
             "heterogeneous_role_coupled_v1" if version.endswith("v3_8") else
-            "heterogeneous_role_coupled_gate_v1" if version.endswith(("v3_9", "v3_10")) else
+            "heterogeneous_role_coupled_gate_v1" if version.endswith(("v3_9", "v3_10", "v3_11")) else
             shaping_mode)
 
 
@@ -2648,7 +2648,7 @@ class HAPPOTrainer:
         if actual != expected:
             raise RuntimeError("incompatible checkpoint contract for HAPPO environment")
         for field, value in self.combat_capability_metadata.items():
-            if field in data or self.environment_config["environment_version"].endswith("v3_10"):
+            if field in data or self.environment_config["environment_version"].endswith(("v3_10", "v3_11")):
                 if data.get(field) != value:
                     raise RuntimeError(f"incompatible checkpoint combat capability contract: {field}")
         checkpoint_mode = data.get("reward_mode", data.get("reward_shaping_mode", "absolute"))

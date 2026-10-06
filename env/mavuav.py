@@ -38,8 +38,10 @@ ROLE_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_7"
 COUPLED_ROLE_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_8"
 GLOBAL_ROLE_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_9"
 UNARMED_MAV_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_10"
+SUPPORT_MAV_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_11"
+UNARMED_MAV_ENVIRONMENT_VERSIONS = frozenset((UNARMED_MAV_ENVIRONMENT_VERSION, SUPPORT_MAV_ENVIRONMENT_VERSION))
 ROLE_REWARD_MODES = frozenset(("heterogeneous_role_v1", "heterogeneous_role_coupled_v1", "heterogeneous_role_coupled_gate_v1"))
-SUPPORTED_ENVIRONMENT_VERSIONS = frozenset((ENVIRONMENT_VERSION, CURRENT_ENVIRONMENT_VERSION, ROLE_ENVIRONMENT_VERSION, COUPLED_ROLE_ENVIRONMENT_VERSION, GLOBAL_ROLE_ENVIRONMENT_VERSION, UNARMED_MAV_ENVIRONMENT_VERSION))
+SUPPORTED_ENVIRONMENT_VERSIONS = frozenset((ENVIRONMENT_VERSION, CURRENT_ENVIRONMENT_VERSION, ROLE_ENVIRONMENT_VERSION, COUPLED_ROLE_ENVIRONMENT_VERSION, GLOBAL_ROLE_ENVIRONMENT_VERSION, *UNARMED_MAV_ENVIRONMENT_VERSIONS))
 OBS_DIM = 100
 GLOBAL_STATE_DIM = 117
 CROSS_TEAM_ATTACK_PAIRS = tuple((red, blue) for red in RED_IDS for blue in BLUE_IDS) + tuple(
@@ -120,13 +122,13 @@ def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
     legacy_combat_fields = {"distance", "ata_deg", "aa_deg", "hold_steps"}
     expected_combat_fields = (
         legacy_combat_fields | {"mav_can_attack"}
-        if cfg["environment_version"] == UNARMED_MAV_ENVIRONMENT_VERSION
+        if cfg["environment_version"] in UNARMED_MAV_ENVIRONMENT_VERSIONS
         else legacy_combat_fields
     )
     if set(combat) != expected_combat_fields:
         raise ValueError("combat has unknown or missing fields")
-    if cfg["environment_version"] == UNARMED_MAV_ENVIRONMENT_VERSION and combat["mav_can_attack"] is not False:
-        raise ValueError("v3.10 combat.mav_can_attack must be false")
+    if cfg["environment_version"] in UNARMED_MAV_ENVIRONMENT_VERSIONS and combat["mav_can_attack"] is not False:
+        raise ValueError("v3.10/v3.11 combat.mav_can_attack must be false")
     combat["distance"] = _pair(combat["distance"], "combat.distance")
     if int(combat["hold_steps"]) <= 0:
         raise ValueError("combat.hold_steps must be positive")
@@ -280,6 +282,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
             COUPLED_ROLE_ENVIRONMENT_VERSION: "heterogeneous_role_coupled_v1",
             GLOBAL_ROLE_ENVIRONMENT_VERSION: "heterogeneous_role_coupled_gate_v1",
             UNARMED_MAV_ENVIRONMENT_VERSION: "heterogeneous_role_coupled_gate_v1",
+            SUPPORT_MAV_ENVIRONMENT_VERSION: "heterogeneous_role_coupled_gate_v1",
         }
         self.reward_mode = role_modes.get(self.config["environment_version"], str(shaping.get("mode", "absolute")))
         self.shaping_gamma = float(shaping.get("gamma", 0.0))
