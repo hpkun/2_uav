@@ -1,0 +1,27 @@
+# Formal v3.11 vanilla baseline; common protocol matches happo_eram_v311.yaml.
+training:
+  environment_profile: main
+  seed: 1
+  device: cuda
+  num_envs: 16
+  rollout_steps: 128
+  gamma: 0.99
+  gae_lambda: 0.95
+  ppo_epochs: 4
+  minibatch_size: 256
+  clip_coef: 0.2
+  actor_learning_rate: 0.0003
+  critic_learning_rate: 0.001
+  entropy_coef: 0.001
+  value_loss_coef: 0.5
+  max_grad_norm: 0.5
+  hidden_dim: 128
+  actor_log_std_init: -0.25
+  actor_variant: vanilla
+  critic_variant: mlp
+  method_variant: baseline
+  randomization_curriculum_enabled: true
+  curriculum_start_profile: learnability
+  curriculum_end_profile: main
+  curriculum_steps: 400000
+  final_evaluation_role: execution_smoke

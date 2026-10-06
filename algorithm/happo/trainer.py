@@ -217,7 +217,7 @@ class HAPPOTrainer:
         if c["actor_variant"] != "vanilla" and c["method_variant"] != "baseline":
             raise ValueError("non-baseline methods require actor_variant='vanilla'")
         if c["critic_variant"] not in ("mlp", "relational", "tam_attention", "entity_attention_recurrent"):
-            raise ValueError("critic_variant must be 'mlp', 'relational' or 'tam_attention'")
+            raise ValueError("critic_variant must be 'mlp', 'relational', 'tam_attention' or 'entity_attention_recurrent'")
         if c["critic_variant"] == "relational" and (
             c["actor_variant"] != "vanilla" or c["method_variant"] != "baseline"
         ):
@@ -441,7 +441,7 @@ class HAPPOTrainer:
         else:
             raise ValueError(
                 "actor_variant must be 'vanilla', 'hrta', 'structured_uniform', 'recurrent', "
-                "'tam', 'pcta', 'pcta_attention_only', 'pcta_uniform' or 'pcta_v2'"
+                "'tam', 'entity_recurrent', 'pcta', 'pcta_attention_only', 'pcta_uniform' or 'pcta_v2'"
             )
         if c["actor_variant"] in LEGACY_PCTA_FAMILY and float(c["pcta_consistency_coef"]) < 0.0:
             raise ValueError("pcta_consistency_coef cannot be negative")
@@ -3054,6 +3054,15 @@ class HAPPOTrainer:
             raise RuntimeError("incompatible HAPPO checkpoint reward shaping contract")
         self._validate_actor_architecture(data)
         self._validate_critic_architecture(data)
+        if self.is_eram:
+            validate_eram_metadata(data, self.config)
+            if data.get("critic_architecture") != self.critic_architecture:
+                raise RuntimeError("incompatible ERAM critic architecture")
+            if data.get("environment_config") != self.environment_config:
+                raise RuntimeError("ERAM weights environment config differs from checkpoint")
+            for field, expected in self.combat_capability_metadata.items():
+                if data.get(field) != expected:
+                    raise RuntimeError(f"incompatible ERAM combat capability contract: {field}")
         saved_config = data.get("trainer_config", data.get("config", {}))
         checkpoint_method = data.get("method_variant", saved_config.get("method_variant", "baseline"))
         if checkpoint_method != self.config["method_variant"]:
