@@ -21,6 +21,7 @@ import torch
 import yaml
 
 from algorithm.happo import HAPPOTrainer
+from algorithm.signal_checkpoint import SignalCheckpoint
 from algorithm.happo.trainer import LEGACY_PCTA_FAMILY, PCTA_V2_VARIANT
 from algorithm.happo.dbm_rgaa import DBM_RGAA_METHOD, RGAA_WIDE_METHOD
 from algorithm.happo.tacm_rgaa import TACM_RGAA_METHOD
@@ -778,6 +779,8 @@ def main(
         "actor_variant": actor_variant, "critic_variant": critic_variant, "method_variant": method_variant,
     })
     trainer = HAPPOTrainer(env_config, config)
+    termination = SignalCheckpoint()
+    termination.install()
     try:
         resumed_steps: int | None = None
         if args.resume:
@@ -904,6 +907,7 @@ def main(
                 **{field: metrics[field] for field in training_fields if field in metrics},
             }
             _append_csv(run_dir / "training.csv", row, training_fields)
+            termination.save_at_boundary(trainer, run_dir, log)
 
             crossed_logs = log_observer.consume(trainer.env_steps)
             if crossed_logs:
@@ -942,6 +946,7 @@ def main(
             window.clear()
         log(f"[TRAIN] optimization finished at {trainer.env_steps:,} steps")
         trainer.save_checkpoint(run_dir / "checkpoint_final.pt")
+        termination.save_at_boundary(trainer, run_dir, log)
 
         final_evaluation_started = time.perf_counter()
         eval_row = _evaluation_row(
@@ -956,6 +961,7 @@ def main(
         final_rows = [eval_row]
         log(_evaluation_lines("FINAL EVAL", eval_row))
         final_evaluation_elapsed = time.perf_counter() - final_evaluation_started
+        termination.save_at_boundary(trainer, run_dir, log)
 
         summary = {
             "algorithm": algorithm,
@@ -1015,6 +1021,7 @@ def main(
             f"Run folder: {run_dir}", separator,
         ]))
     finally:
+        termination.restore()
         trainer.close()
 
 
