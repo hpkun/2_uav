@@ -197,6 +197,10 @@ LOSS_FIELDS = (*(f"actor_{i}_loss" for i in range(len(RED_IDS))), "critic_loss",
 def _algorithm_name(
     actor_variant: str, method_variant: str = "baseline", critic_variant: str = "mlp",
 ) -> str:
+    if critic_variant == "entity_attention_recurrent":
+        if actor_variant != "entity_recurrent" or method_variant != "baseline":
+            raise ValueError("ERAM requires entity recurrent actors and baseline HAPPO")
+        return "eram_happo"
     if critic_variant == "relational":
         if actor_variant != "vanilla" or method_variant != "baseline":
             raise ValueError("relational critic only supports vanilla baseline HAPPO")
@@ -683,6 +687,7 @@ def _initial_resolved(
         **trainer.pcta_metadata,
         **trainer.credit_metadata,
         **trainer.tam_metadata,
+        **trainer.eram_metadata,
         **trainer.rgaa_metadata,
         **trainer.dbm_metadata,
         **trainer.tacm_metadata,
@@ -1001,6 +1006,7 @@ def main(
             **trainer.pcta_metadata,
             **trainer.credit_metadata,
             **trainer.tam_metadata,
+            **trainer.eram_metadata,
             **trainer.rgaa_metadata,
             **trainer.dbm_metadata,
             **trainer.tacm_metadata,

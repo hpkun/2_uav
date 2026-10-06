@@ -16,7 +16,9 @@ from typing import Any
 import numpy as np
 import torch
 
-from algorithm.happo.evaluation import evaluate_actors, summarize_records
+from algorithm.happo.evaluation import evaluate_actors, evaluate_recurrent_actors, summarize_records
+from algorithm.happo.eram import (EntityIndependentActors, EntityAttentionRecurrentCritic,
+                                  actor_kwargs, critic_kwargs, validate_eram_metadata)
 from algorithm.happo.networks import IndependentActors
 from algorithm.happo.dbm_rgaa import (
     DBM_RGAA_METHOD, RGAA_WIDE_METHOD, build_method_actors, dbm_metadata, wide_metadata,
@@ -109,7 +111,8 @@ def main(expected_critic_variant: str = "mlp") -> None:
     validate_checkpoint_contract(payload, env_config)
     trainer_config = payload.get("trainer_config", payload.get("config", {}))
     actor_variant = payload.get("actor_variant", trainer_config.get("actor_variant", "vanilla"))
-    if actor_variant != "vanilla":
+    is_eram = actor_variant == "entity_recurrent"
+    if actor_variant != "vanilla" and not is_eram:
         raise RuntimeError("incompatible actor architecture: vanilla evaluator requires a vanilla checkpoint")
     method_variant = payload.get("method_variant", trainer_config.get("method_variant", "baseline"))
     if method_variant not in (
@@ -118,18 +121,36 @@ def main(expected_critic_variant: str = "mlp") -> None:
     ):
         raise RuntimeError(f"unsupported HAPPO method_variant: {method_variant!r}")
     critic_variant = payload.get("critic_variant", trainer_config.get("critic_variant", "mlp"))
+    if is_eram and expected_critic_variant == "mlp":
+        expected_critic_variant = "entity_attention_recurrent"
     if critic_variant != expected_critic_variant:
         raise RuntimeError(
             f"incompatible critic variant: evaluator requires {expected_critic_variant!r}, "
             f"checkpoint contains {critic_variant!r}"
         )
     critic_architecture = payload.get("critic_architecture")
+    if is_eram:
+        if (method_variant != "baseline" or env_config["environment_version"] != "heterogeneous_mavuav_4v4_v3_11"
+                or env_config.get("role_reward", {}).get("mode") != "heterogeneous_role_coupled_gate_v1"):
+            raise RuntimeError("ERAM evaluator requires baseline v3.11 coupled-gate reward")
+        if load_environment_config(payload["environment_config"]) != env_config:
+            raise RuntimeError("ERAM evaluation environment differs from checkpoint")
+        validate_eram_metadata(payload, trainer_config)
     if critic_variant == "relational":
         if method_variant != "baseline":
             raise RuntimeError("RC-HAPPO evaluator requires method_variant='baseline'")
         if critic_architecture != RelationalCentralizedCritic.architecture():
             raise RuntimeError("incompatible relational critic architecture metadata")
-    if method_variant in (DBM_RGAA_METHOD, RGAA_WIDE_METHOD, TACM_RGAA_METHOD):
+    if is_eram:
+        actors = EntityIndependentActors(**actor_kwargs(trainer_config)).to(device)
+        if payload.get("actor_architecture") != actors.actors[0].architecture():
+            raise RuntimeError("incompatible ERAM actor architecture")
+        # Critic is validated, never used for action generation.
+        with torch.random.fork_rng(devices=[]):
+            expected_architecture = EntityAttentionRecurrentCritic(**critic_kwargs(trainer_config)).architecture()
+        if critic_architecture != expected_architecture:
+            raise RuntimeError("incompatible ERAM critic architecture")
+    elif method_variant in (DBM_RGAA_METHOD, RGAA_WIDE_METHOD, TACM_RGAA_METHOD):
         contract_config = dict(trainer_config)
         contract_config["method_variant"] = (
             DBM_RGAA_METHOD if method_variant == TACM_RGAA_METHOD else method_variant
@@ -174,6 +195,7 @@ def main(expected_critic_variant: str = "mlp") -> None:
     training_profile = str(payload["environment_profile"])
     rows = []
     algorithm = (
+        "eram_happo" if is_eram else
         "rc_happo" if critic_variant == "relational" else
         "lp_cr_rgaa_happo" if method_variant == "lp_cr_rgaa" else
         "ls_rgaa_happo" if method_variant == "ls_rgaa" else
@@ -188,7 +210,8 @@ def main(expected_critic_variant: str = "mlp") -> None:
     )
     deterministic = args.action_mode == "deterministic"
     effective_action_seed = None if deterministic else int(args.action_seed)
-    records = evaluate_actors(
+    evaluator = evaluate_recurrent_actors if is_eram else evaluate_actors
+    records = evaluator(
         actors, env_config, args.episodes, args.profile, seed=args.env_seed_start, device=device,
         deterministic=deterministic,
         action_seed=effective_action_seed,
@@ -196,6 +219,7 @@ def main(expected_critic_variant: str = "mlp") -> None:
     rows.append({
             "checkpoint": checkpoint.name, "sampled_steps": int(payload.get("sampled_steps", 0)),
             "algorithm": algorithm,
+            **({"actor_variant": actor_variant, "base_algorithm": "happo"} if is_eram else {}),
             "method_variant": method_variant,
             "critic_variant": critic_variant,
             "blue_target_strategy": "nearest_red_aircraft", "training_profile": training_profile,
@@ -226,6 +250,8 @@ def main(expected_critic_variant: str = "mlp") -> None:
     with summary_path.open("w", encoding="utf-8") as stream:
         json.dump({
             "algorithm": algorithm, "checkpoint": str(checkpoint), "training_profile": training_profile,
+            **({"actor_variant": actor_variant, "base_algorithm": "happo",
+                "actor_architecture": payload["actor_architecture"]} if is_eram else {}),
             "evaluation_profile": args.profile, "method_variant": method_variant,
             "evaluation_environment_seed_start": int(args.env_seed_start),
             "evaluation_episodes": args.episodes,

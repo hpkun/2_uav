@@ -19,6 +19,9 @@ from algorithm.modules.pcta_v2 import PCTAv2IndependentActors, target_behavior_d
 from .networks import IndependentActors
 from .recurrent import RecurrentIndependentActors
 from .recurrent_buffer import RecurrentRolloutBuffer
+from .eram import (ERAM_DEFAULTS, ERAM_CONFIG_FIELDS, EntityIndependentActors,
+                   EntityAttentionRecurrentCritic, ERAMRolloutBuffer, actor_kwargs,
+                   critic_kwargs, eram_metadata, validate_eram_metadata)
 from .tam import TAMAttentionCritic, TAMIndependentActors
 from .tam_buffer import TAMRolloutBuffer
 from .relational_critic import RelationalCentralizedCritic
@@ -63,6 +66,7 @@ from .tacm_rgaa import (
 
 
 DEFAULTS = {
+    **ERAM_DEFAULTS,
     "environment_profile": "main", "seed": 1, "device": "cpu", "num_envs": 16, "rollout_steps": 128,
     "gamma": 0.99, "gae_lambda": 0.95, "ppo_epochs": 4, "minibatch_size": 256,
     "clip_coef": 0.2, "actor_learning_rate": 3e-4, "critic_learning_rate": 1e-3,
@@ -212,7 +216,7 @@ class HAPPOTrainer:
             raise ValueError("invalid method_variant")
         if c["actor_variant"] != "vanilla" and c["method_variant"] != "baseline":
             raise ValueError("non-baseline methods require actor_variant='vanilla'")
-        if c["critic_variant"] not in ("mlp", "relational", "tam_attention"):
+        if c["critic_variant"] not in ("mlp", "relational", "tam_attention", "entity_attention_recurrent"):
             raise ValueError("critic_variant must be 'mlp', 'relational' or 'tam_attention'")
         if c["critic_variant"] == "relational" and (
             c["actor_variant"] != "vanilla" or c["method_variant"] != "baseline"
@@ -220,6 +224,10 @@ class HAPPOTrainer:
             raise ValueError("relational critic is only supported with vanilla actors and baseline HAPPO")
         if (c["actor_variant"] == "tam") != (c["critic_variant"] == "tam_attention"):
             raise ValueError("actor_variant='tam' and critic_variant='tam_attention' must be used together")
+        if (c["actor_variant"] == "entity_recurrent") != (c["critic_variant"] == "entity_attention_recurrent"):
+            raise ValueError("ERAM entity_recurrent actor requires entity_attention_recurrent critic")
+        if c["actor_variant"] == "entity_recurrent" and int(c["recurrent_sequence_length"]) <= 0:
+            raise ValueError("ERAM recurrent sequence length must be positive")
         if c["actor_variant"] == "tam" and c["tam_value_loss_type"] != "huber":
             raise ValueError("TAM critic currently requires tam_value_loss_type='huber'")
         self.agp_enabled = c["method_variant"] == "agp"
@@ -270,6 +278,12 @@ class HAPPOTrainer:
         version = self.environment_config["environment_version"]
         self.reward_mode = _resolved_reward_mode(self.environment_config)
         declared_role_reward_mode = self.environment_config.get("role_reward", {}).get("mode")
+        if self.is_eram and (
+            version != "heterogeneous_mavuav_4v4_v3_11"
+            or self.reward_mode != "heterogeneous_role_coupled_gate_v1"
+            or declared_role_reward_mode != "heterogeneous_role_coupled_gate_v1"
+        ):
+            raise ValueError("ERAM-HAPPO requires v3.11 heterogeneous_role_coupled_gate_v1")
         if c["actor_variant"] == "tam" and (
             version != "heterogeneous_mavuav_4v4_v3_9"
             or self.reward_mode != "heterogeneous_role_coupled_gate_v1"
@@ -395,6 +409,8 @@ class HAPPOTrainer:
                 observation_dim=OBS_DIM, action_dim=3, hidden_dim=int(c["hidden_dim"]),
                 recurrent_hidden_dim=int(c["recurrent_hidden_dim"]),
             ).to(self.device)
+        elif self.is_eram:
+            self.actors = EntityIndependentActors(**actor_kwargs(c)).to(self.device)
         elif c["actor_variant"] == "tam":
             self.actors = TAMIndependentActors(
                 observation_dim=OBS_DIM, action_dim=3,
@@ -429,7 +445,9 @@ class HAPPOTrainer:
             )
         if c["actor_variant"] in LEGACY_PCTA_FAMILY and float(c["pcta_consistency_coef"]) < 0.0:
             raise ValueError("pcta_consistency_coef cannot be negative")
-        if c["critic_variant"] == "tam_attention":
+        if self.is_eram:
+            self.critic = EntityAttentionRecurrentCritic(**critic_kwargs(c)).to(self.device)
+        elif c["critic_variant"] == "tam_attention":
             self.critic = TAMAttentionCritic(
                 GLOBAL_STATE_DIM,
                 recurrent_hidden_dim=int(c["tam_critic_gru_hidden_dim"]),
@@ -535,9 +553,9 @@ class HAPPOTrainer:
                 (int(c["num_envs"]), len(RED_IDS), self.actor_recurrent_hidden_dim), dtype=np.float32,
             )
             self.actor_recurrent_masks = np.zeros((int(c["num_envs"]), len(RED_IDS)), dtype=np.float32)
-        if self.is_tam:
+        if self.has_recurrent_critic:
             self.critic_hidden_states = np.zeros(
-                (int(c["num_envs"]), int(c["tam_critic_gru_hidden_dim"])), dtype=np.float32,
+                (int(c["num_envs"]), self.critic_recurrent_hidden_dim), dtype=np.float32,
             )
             self.critic_recurrent_masks = np.zeros(int(c["num_envs"]), dtype=np.float32)
         self.completed_episodes: list[dict[str, Any]] = []
@@ -572,6 +590,8 @@ class HAPPOTrainer:
 
     @property
     def actor_architecture(self) -> dict[str, Any]:
+        if self.is_eram:
+            return self.actors.actors[0].architecture()
         if self.dbm_enabled:
             mav_architecture = {
                 "type": "gaussian_mlp", "observation_dim": OBS_DIM,
@@ -679,7 +699,7 @@ class HAPPOTrainer:
 
     @property
     def critic_architecture(self) -> dict[str, Any]:
-        if self.config["critic_variant"] == "tam_attention":
+        if self.has_recurrent_critic:
             return self.critic.architecture()
         if self.config["critic_variant"] == "relational":
             return RelationalCentralizedCritic.architecture()
@@ -691,7 +711,24 @@ class HAPPOTrainer:
 
     @property
     def is_recurrent(self) -> bool:
-        return self.config["actor_variant"] in ("recurrent", "tam")
+        return self.config["actor_variant"] in ("recurrent", "tam", "entity_recurrent")
+
+    @property
+    def is_eram(self) -> bool:
+        return self.config["actor_variant"] == "entity_recurrent"
+
+    @property
+    def has_recurrent_critic(self) -> bool:
+        return self.is_tam or self.is_eram
+
+    @property
+    def critic_recurrent_hidden_dim(self) -> int:
+        field = "eram_critic_recurrent_hidden_dim" if self.is_eram else "tam_critic_gru_hidden_dim"
+        return int(self.config[field])
+
+    @property
+    def eram_metadata(self) -> dict[str, Any]:
+        return eram_metadata(self.config) if self.is_eram else {}
 
     @property
     def is_tam(self) -> bool:
@@ -699,6 +736,8 @@ class HAPPOTrainer:
 
     @property
     def actor_recurrent_hidden_dim(self) -> int:
+        if self.is_eram:
+            return int(self.config["eram_actor_recurrent_hidden_dim"])
         field = "tam_actor_gru_hidden_dim" if self.is_tam else "recurrent_hidden_dim"
         return int(self.config[field])
 
@@ -750,6 +789,9 @@ class HAPPOTrainer:
         return {}
 
     def make_buffer(self, horizon: int) -> RolloutBuffer:
+        if self.is_eram:
+            return ERAMRolloutBuffer(horizon, int(self.config["num_envs"]),
+                                     self.actor_recurrent_hidden_dim, self.critic_recurrent_hidden_dim)
         if self.is_tam:
             return TAMRolloutBuffer(
                 horizon, int(self.config["num_envs"]), self.actor_recurrent_hidden_dim,
@@ -959,7 +1001,7 @@ class HAPPOTrainer:
         strict_method_architecture = self.config["method_variant"] in (
             DBM_RGAA_METHOD, RGAA_WIDE_METHOD, TACM_RGAA_METHOD,
         )
-        if (checkpoint_variant in ("hrta", "structured_uniform", "recurrent", "tam", *PCTA_FAMILY) or strict_method_architecture) and checkpoint_architecture != self.actor_architecture:
+        if (checkpoint_variant in ("hrta", "structured_uniform", "recurrent", "tam", "entity_recurrent", *PCTA_FAMILY) or strict_method_architecture) and checkpoint_architecture != self.actor_architecture:
             raise RuntimeError(
                 f"incompatible actor architecture: checkpoint={checkpoint_architecture!r} "
                 f"current={self.actor_architecture!r}"
@@ -1168,7 +1210,7 @@ class HAPPOTrainer:
             actions: list[np.ndarray] = []
             log_probs: list[np.ndarray] = []
             next_hidden = np.empty_like(self.actor_hidden_states)
-            next_critic_hidden = np.empty_like(self.critic_hidden_states) if self.is_tam else None
+            next_critic_hidden = np.empty_like(self.critic_hidden_states) if self.has_recurrent_critic else None
             with torch.no_grad():
                 for agent, actor in enumerate(self.actors.actors):
                     action, log_prob, hidden = actor.sample_step(
@@ -1179,7 +1221,7 @@ class HAPPOTrainer:
                     actions.append(action.cpu().numpy())
                     log_probs.append(log_prob.cpu().numpy())
                     next_hidden[:, agent] = hidden.cpu().numpy()
-                if self.is_tam:
+                if self.has_recurrent_critic:
                     values_t, critic_hidden_t = self.critic.forward_step(
                         torch.as_tensor(self.global_states, device=self.device),
                         torch.as_tensor(self.critic_hidden_states, device=self.device),
@@ -1191,7 +1233,7 @@ class HAPPOTrainer:
                     values = self.critic(torch.as_tensor(self.global_states, device=self.device)).cpu().numpy()
             action_array = np.stack(actions, axis=1)
             log_prob_array = np.stack(log_probs, axis=1)
-            if self.is_tam and bool(self.config["tam_inactive_mask"]):
+            if self.is_eram or (self.is_tam and bool(self.config["tam_inactive_mask"])):
                 action_array *= self.active_masks[:, :, None]
             next_obs, next_states, rewards, terminated, truncated, next_masks, infos = self.vector_env.step(action_array)
             done = np.logical_or(terminated, truncated)
@@ -1200,7 +1242,7 @@ class HAPPOTrainer:
             else:
                 next_recurrent_masks = next_masks.astype(np.float32) * (~done)[:, None].astype(np.float32)
             next_hidden *= next_recurrent_masks[:, :, None]
-            if self.is_tam:
+            if self.has_recurrent_critic:
                 assert isinstance(self.buffer, TAMRolloutBuffer) and next_critic_hidden is not None
                 next_critic_masks = (~done).astype(np.float32)
                 next_critic_hidden *= next_critic_masks[:, None]
@@ -1220,12 +1262,12 @@ class HAPPOTrainer:
             self.observations, self.global_states, self.active_masks = next_obs, next_states, next_masks
             self.actor_hidden_states = next_hidden
             self.actor_recurrent_masks = next_recurrent_masks
-            if self.is_tam:
+            if self.has_recurrent_critic:
                 self.critic_hidden_states = next_critic_hidden
                 self.critic_recurrent_masks = next_critic_masks
             self.env_steps += self.buffer.num_envs
         with torch.no_grad():
-            if self.is_tam:
+            if self.has_recurrent_critic:
                 last_values, _ = self.critic.forward_step(
                     torch.as_tensor(self.global_states, device=self.device),
                     torch.as_tensor(self.critic_hidden_states, device=self.device),
@@ -2390,7 +2432,7 @@ class HAPPOTrainer:
             self.last_recurrent_factor_history.append(factor.detach().cpu().numpy().copy())
 
         critic_losses: list[float] = []
-        if self.is_tam:
+        if self.has_recurrent_critic:
             if not isinstance(buffer, TAMRolloutBuffer):
                 raise TypeError("TAM critic requires TAMRolloutBuffer")
             for _ in range(int(c["ppo_epochs"])):
@@ -2412,8 +2454,11 @@ class HAPPOTrainer:
                             buffer.returns[start:end, env] for env, start, end in specs
                         ]), device=self.device)
                         predicted, _ = self.critic.evaluate_values_sequence(state_batch, initial_hidden, masks)
-                        value_loss = nn.functional.huber_loss(
-                            predicted, targets, delta=float(c["tam_huber_delta"]), reduction="mean",
+                        value_loss = (
+                            (predicted - targets).square().mean() if self.is_eram else
+                            nn.functional.huber_loss(
+                                predicted, targets, delta=float(c["tam_huber_delta"]), reduction="mean",
+                            )
                         )
                         self.critic_optimizer.zero_grad()
                         (float(c["value_loss_coef"]) * value_loss).backward()
@@ -2446,6 +2491,13 @@ class HAPPOTrainer:
             "agent_update_order": order,
         })
         metrics.update(self.last_rollout_metrics)
+        if self.is_eram:
+            curriculum = self.applied_curriculum_state
+            metrics.update({"curriculum_alpha": float(curriculum["alpha"]), **{
+                f"curriculum_{key}": float(curriculum[key]) for key in (
+                    "team_xy_jitter", "slot_xy_jitter", "altitude_jitter", "speed_jitter", "heading_jitter_deg",
+                )
+            }})
         if not all(np.isfinite(value) for value in metrics.values() if isinstance(value, float)):
             raise FloatingPointError("non-finite recurrent HAPPO update")
         return metrics
@@ -2460,6 +2512,9 @@ class HAPPOTrainer:
         payload.update(self.pcta_metadata)
         payload.update(self.credit_metadata)
         payload.update(self.tam_metadata)
+        payload.update(self.eram_metadata)
+        if self.is_eram:
+            payload["sampled_steps"] = int(self.env_steps)
         payload.update(self.rgaa_metadata)
         payload.update(self.dbm_metadata)
         payload.update(self.tacm_metadata)
@@ -2564,6 +2619,7 @@ class HAPPOTrainer:
         state.update(self.pcta_metadata)
         state.update(self.credit_metadata)
         state.update(self.tam_metadata)
+        state.update(self.eram_metadata)
         state.update(self.rgaa_metadata)
         state.update(self.dbm_metadata)
         state.update(self.tacm_metadata)
@@ -2631,7 +2687,7 @@ class HAPPOTrainer:
         if self.is_recurrent:
             state["rollout_state"]["actor_hidden_states"] = self.actor_hidden_states.copy()
             state["rollout_state"]["actor_recurrent_masks"] = self.actor_recurrent_masks.copy()
-        if self.is_tam:
+        if self.has_recurrent_critic:
             state["rollout_state"]["critic_hidden_states"] = self.critic_hidden_states.copy()
             state["rollout_state"]["critic_recurrent_masks"] = self.critic_recurrent_masks.copy()
         return state
@@ -2859,7 +2915,14 @@ class HAPPOTrainer:
                         f"resume config mismatch: {field} checkpoint={saved_config.get(field, DEFAULTS[field])!r} "
                         f"current={self.config.get(field)!r}"
                     )
-        if self.is_recurrent and not self.is_tam:
+        if self.is_eram:
+            validate_eram_metadata(data, self.config)
+            if data.get("critic_architecture") != self.critic_architecture:
+                raise RuntimeError("incompatible ERAM critic architecture")
+            for field in ERAM_CONFIG_FIELDS:
+                if saved_config.get(field) != self.config[field]:
+                    raise RuntimeError(f"resume ERAM config mismatch: {field}")
+        if self.is_recurrent and not self.has_recurrent_critic:
             for field in ("recurrent_hidden_dim", "recurrent_sequence_length"):
                 if saved_config.get(field) != self.config.get(field):
                     raise RuntimeError(
@@ -2935,14 +2998,14 @@ class HAPPOTrainer:
                 raise RuntimeError("checkpoint recurrent hidden-state shape mismatch")
             if self.actor_recurrent_masks.shape != (int(self.config["num_envs"]), len(RED_IDS)):
                 raise RuntimeError("checkpoint recurrent mask shape mismatch")
-        if self.is_tam:
+        if self.has_recurrent_critic:
             for field in ("critic_hidden_states", "critic_recurrent_masks"):
                 if field not in rollout:
                     raise RuntimeError("TAM checkpoint is missing critic hidden-state continuation data")
             self.critic_hidden_states = np.asarray(rollout["critic_hidden_states"], dtype=np.float32)
             self.critic_recurrent_masks = np.asarray(rollout["critic_recurrent_masks"], dtype=np.float32)
             if self.critic_hidden_states.shape != (
-                int(self.config["num_envs"]), int(self.config["tam_critic_gru_hidden_dim"]),
+                int(self.config["num_envs"]), self.critic_recurrent_hidden_dim,
             ):
                 raise RuntimeError("checkpoint TAM critic hidden-state shape mismatch")
             if self.critic_recurrent_masks.shape != (int(self.config["num_envs"]),):

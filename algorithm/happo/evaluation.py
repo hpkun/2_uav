@@ -14,7 +14,7 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, float]:
     if not records:
         return {"completed_episodes": 0}
     n = len(records)
-    return {
+    summary = {
         "completed_episodes": n,
         "mean_episode_return": float(np.mean([r["episode_return"] for r in records])),
         "red_win_rate": sum(r["outcome"] == "red" for r in records) / n,
@@ -36,6 +36,11 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, float]:
         "mean_shared_terminal_reward_sum": float(np.mean([r.get("shared_terminal_reward_sum", 0.0) for r in records])),
         "mean_shared_safety_reward_sum": float(np.mean([r.get("shared_safety_reward_sum", 0.0) for r in records])),
     }
+    # ERAM-only per-episode means; legacy records/output keys remain unchanged.
+    for key in records[0]:
+        if key.startswith("eram_"):
+            summary[key] = float(np.mean([r[key] for r in records]))
+    return summary
 
 
 def evaluate_actors(
@@ -102,6 +107,7 @@ def evaluate_recurrent_actors(
     deterministic: bool = True,
     action_seed: int | None = None,
     inactive_mask: bool = True,
+    collect_entity_diagnostics: bool = True,
 ) -> list[dict[str, Any]]:
     """Evaluate recurrent actors with episode-safe hidden masks and action RNG."""
     records: list[dict[str, Any]] = []
@@ -117,13 +123,19 @@ def evaluate_recurrent_actors(
         recurrent_masks = torch.zeros((len(RED_IDS), 1), device=device)
         active_masks = env.active_masks.copy()
         done = False
+        entity_diagnostics: dict[str, list[float]] = {}
         while not done:
             actions: list[np.ndarray] = []
             next_hidden: list[torch.Tensor] = []
             with torch.no_grad():
                 for index, aid in enumerate(env.red_ids):
+                    actor = actors.actors[index]
+                    actor_observation = torch.as_tensor(observations[aid], device=device).unsqueeze(0)
+                    if collect_entity_diagnostics and hasattr(actor, "attention_diagnostics") and active_masks[index] > 0.5:
+                        for key, value in actor.attention_diagnostics(actor_observation).items():
+                            entity_diagnostics.setdefault(f"eram_{aid}_{key}", []).append(float(value.item()))
                     action, _, actor_hidden = actors.actors[index].sample_step(
-                        torch.as_tensor(observations[aid], device=device).unsqueeze(0),
+                        actor_observation,
                         hidden[index], recurrent_masks[index], deterministic=deterministic,
                     )
                     action_np = action.squeeze(0).cpu().numpy()
@@ -138,5 +150,7 @@ def evaluate_recurrent_actors(
                 recurrent_masks = active[:, None] if inactive_mask else torch.ones_like(active[:, None])
                 hidden = [state * recurrent_masks[index] for index, state in enumerate(next_hidden)]
                 active_masks = np.asarray(info["active_masks"], dtype=np.float32)
-        records.append(info["episode_summary"])
+        record = dict(info["episode_summary"])
+        record.update({key: float(np.mean(values)) for key, values in entity_diagnostics.items()})
+        records.append(record)
     return records
