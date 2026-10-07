@@ -8,6 +8,7 @@ import numpy as np
 import yaml
 
 from .blue_policy import BluePolicy
+from .cap_blue_policy import CAPBluePolicy
 from .dynamics import map_normalized_action, rk4_step
 from .geometry import compute_pairwise_geometry
 from .models import Aircraft, AircraftSpec, AircraftState
@@ -39,7 +40,8 @@ COUPLED_ROLE_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_8"
 GLOBAL_ROLE_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_9"
 UNARMED_MAV_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_10"
 SUPPORT_MAV_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_11"
-UNARMED_MAV_ENVIRONMENT_VERSIONS = frozenset((UNARMED_MAV_ENVIRONMENT_VERSION, SUPPORT_MAV_ENVIRONMENT_VERSION))
+CAP_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_12"
+UNARMED_MAV_ENVIRONMENT_VERSIONS = frozenset((UNARMED_MAV_ENVIRONMENT_VERSION, SUPPORT_MAV_ENVIRONMENT_VERSION, CAP_ENVIRONMENT_VERSION))
 ROLE_REWARD_MODES = frozenset(("heterogeneous_role_v1", "heterogeneous_role_coupled_v1", "heterogeneous_role_coupled_gate_v1"))
 SUPPORTED_ENVIRONMENT_VERSIONS = frozenset((ENVIRONMENT_VERSION, CURRENT_ENVIRONMENT_VERSION, ROLE_ENVIRONMENT_VERSION, COUPLED_ROLE_ENVIRONMENT_VERSION, GLOBAL_ROLE_ENVIRONMENT_VERSION, *UNARMED_MAV_ENVIRONMENT_VERSIONS))
 OBS_DIM = 100
@@ -192,8 +194,9 @@ def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("v3.9/v3.10 blue_kill must be +100")
     if set(cfg["blue_policy"]) != {"target_strategy", "guidance_mode", "target_refresh_steps"}:
         raise ValueError("blue_policy has unknown or missing fields")
-    if cfg["blue_policy"]["target_strategy"] != BluePolicy.TARGET_STRATEGY:
-        raise ValueError(f"blue_policy.target_strategy must be {BluePolicy.TARGET_STRATEGY!r}")
+    target_strategy = CAPBluePolicy.TARGET_STRATEGY if cfg["environment_version"] == CAP_ENVIRONMENT_VERSION else BluePolicy.TARGET_STRATEGY
+    if cfg["blue_policy"]["target_strategy"] != target_strategy:
+        raise ValueError(f"blue_policy.target_strategy must be {target_strategy!r}")
     if cfg["blue_policy"]["guidance_mode"] != BluePolicy.GUIDANCE_MODE:
         raise ValueError(f"blue_policy.guidance_mode must be {BluePolicy.GUIDANCE_MODE!r}")
     refresh_steps = cfg["blue_policy"]["target_refresh_steps"]
@@ -254,7 +257,8 @@ class HeterogeneousMAVUAVAirCombatEnv:
         self.profile = profile or str(self.config["scenario"]["default_profile"])
         if self.profile not in self.config["randomization_profiles"]:
             raise ValueError(f"unknown randomization profile: {self.profile}")
-        self.blue_policy = BluePolicy(
+        policy_class = CAPBluePolicy if self.config["environment_version"] == CAP_ENVIRONMENT_VERSION else BluePolicy
+        self.blue_policy = policy_class(
             self.decision_dt, self.physics_dt, self.config["battlefield"],
             int(self.config["blue_policy"]["target_refresh_steps"]),
         )
@@ -283,6 +287,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
             GLOBAL_ROLE_ENVIRONMENT_VERSION: "heterogeneous_role_coupled_gate_v1",
             UNARMED_MAV_ENVIRONMENT_VERSION: "heterogeneous_role_coupled_gate_v1",
             SUPPORT_MAV_ENVIRONMENT_VERSION: "heterogeneous_role_coupled_gate_v1",
+            CAP_ENVIRONMENT_VERSION: "heterogeneous_role_coupled_gate_v1",
         }
         self.reward_mode = role_modes.get(self.config["environment_version"], str(shaping.get("mode", "absolute")))
         self.shaping_gamma = float(shaping.get("gamma", 0.0))
@@ -359,6 +364,8 @@ class HeterogeneousMAVUAVAirCombatEnv:
         self._blue_attack_kills.clear()
         self._running = True
         strategy = self.blue_policy.reset(self.rng)
+        self.blue_policy.prepare_step({aid: self.entities[aid] for aid in BLUE_IDS},
+                                      {aid: self.entities[aid] for aid in RED_IDS}, self.step_count)
         return self._observations(), {
             "outcome": None, "attack_events": [], "killed_ids": [], "death_causes": {},
             "active_masks": self.active_masks.copy(), "blue_target_strategy": strategy, "profile": self.profile,
@@ -399,6 +406,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
         red_actions = self._action_dict(actions)
         red_entities = {aid: self.entities[aid] for aid in RED_IDS}
         all_actions = dict(red_actions)
+        self.blue_policy.prepare_step({aid: self.entities[aid] for aid in BLUE_IDS}, red_entities, self.step_count)
         for aid in BLUE_IDS:
             all_actions[aid] = self.blue_policy.action(
                 self.entities[aid], red_entities, self.step_count,

@@ -54,7 +54,7 @@ def validate_checkpoint_contract(payload: dict[str, Any], env_config: dict[str, 
     if actual != expected:
         raise RuntimeError("incompatible HAPPO checkpoint environment contract")
     version = env_config["environment_version"]
-    if version.endswith(("v3_10", "v3_11")):
+    if version.endswith(("v3_10", "v3_11", "v3_12")):
         expected_capability = {
             "mav_direct_attack_capability": False,
             "mav_direct_attack_shaping": "none",
@@ -66,7 +66,7 @@ def validate_checkpoint_contract(payload: dict[str, Any], env_config: dict[str, 
     env_shaping = env_config.get("shaping", {})
     env_mode = ("heterogeneous_role_v1" if version.endswith("v3_7") else
                 "heterogeneous_role_coupled_v1" if version.endswith("v3_8") else
-                "heterogeneous_role_coupled_gate_v1" if version.endswith(("v3_9", "v3_10", "v3_11")) else
+                "heterogeneous_role_coupled_gate_v1" if version.endswith(("v3_9", "v3_10", "v3_11", "v3_12")) else
                 str(env_shaping.get("mode", "absolute")))
     checkpoint_mode = str(payload.get("reward_mode", payload.get("reward_shaping_mode", "absolute")))
     if checkpoint_mode != env_mode:
@@ -190,7 +190,7 @@ def main(expected_critic_variant: str = "mlp") -> None:
     version = env_config["environment_version"]
     reward_mode = ("heterogeneous_role_v1" if version.endswith("v3_7") else
                    "heterogeneous_role_coupled_v1" if version.endswith("v3_8") else
-                   "heterogeneous_role_coupled_gate_v1" if version.endswith(("v3_9", "v3_10", "v3_11")) else
+                   "heterogeneous_role_coupled_gate_v1" if version.endswith(("v3_9", "v3_10", "v3_11", "v3_12")) else
                    str(env_config.get("shaping", {}).get("mode", "absolute")))
     training_profile = str(payload["environment_profile"])
     rows = []
@@ -222,7 +222,7 @@ def main(expected_critic_variant: str = "mlp") -> None:
             **({"actor_variant": actor_variant, "base_algorithm": "happo"} if is_eram else {}),
             "method_variant": method_variant,
             "critic_variant": critic_variant,
-            "blue_target_strategy": "nearest_red_aircraft", "training_profile": training_profile,
+            "blue_target_strategy": env_config["blue_policy"]["target_strategy"], "training_profile": training_profile,
             "evaluation_profile": args.profile,
             "evaluation_environment_seed_start": int(args.env_seed_start),
             "episodes": args.episodes, "evaluation_episodes": args.episodes,

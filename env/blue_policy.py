@@ -124,6 +124,10 @@ class BluePolicy:
             ),
         ) if alive_red else None
 
+    def prepare_step(self, all_blue, all_red, decision_step) -> None:
+        """Legacy policy has no team preparation; preserves historical behavior."""
+        return None
+
     def _within_battlefield(self, state: object) -> bool:
         return (
             self.battlefield["x"][0] <= state.x <= self.battlefield["x"][1]
