@@ -15,6 +15,8 @@ from .models import Aircraft, AircraftSpec, AircraftState
 from .reward import potential_shaping_reward, situation_reward
 from .reward_chen_v315 import (CHEN_VERSION, CHEN_MODE, CHEN_CONFIG, angle_reward,
                               distance_reward, speed_reward, mav_distance_reward, situation_score)
+from .reward_chen_v316 import (VERSION as CHEN_SHARED_VERSION, MODE as CHEN_SHARED_MODE,
+                                CONFIG as CHEN_SHARED_CONFIG, shared_reward as chen_shared_reward)
 from .reward_role_v37 import (
     target_score, uav_angle_reward, uav_speed_reward, uav_distance_reward,
     uav_process_reward, mav_aspect_reward, mav_awareness_reward,
@@ -45,11 +47,11 @@ SUPPORT_MAV_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_11"
 CAP_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_12"
 SINGLE_LOCK_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_13"
 CLEAN_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_14"
-SINGLE_LOCK_ENVIRONMENT_VERSIONS = frozenset((SINGLE_LOCK_ENVIRONMENT_VERSION, CLEAN_ENVIRONMENT_VERSION, CHEN_VERSION))
+SINGLE_LOCK_ENVIRONMENT_VERSIONS = frozenset((SINGLE_LOCK_ENVIRONMENT_VERSION, CLEAN_ENVIRONMENT_VERSION, CHEN_VERSION, CHEN_SHARED_VERSION))
 CAP_ENVIRONMENT_VERSIONS = frozenset((CAP_ENVIRONMENT_VERSION, *SINGLE_LOCK_ENVIRONMENT_VERSIONS))
 UNARMED_MAV_ENVIRONMENT_VERSIONS = frozenset((UNARMED_MAV_ENVIRONMENT_VERSION, SUPPORT_MAV_ENVIRONMENT_VERSION, *CAP_ENVIRONMENT_VERSIONS))
 ROLE_REWARD_MODES = frozenset(("heterogeneous_role_v1", "heterogeneous_role_coupled_v1", "heterogeneous_role_coupled_gate_v1"))
-NON_SHAPING_REWARD_MODES = ROLE_REWARD_MODES | {"clean_combat_v1", CHEN_MODE}
+NON_SHAPING_REWARD_MODES = ROLE_REWARD_MODES | {"clean_combat_v1", CHEN_MODE, CHEN_SHARED_MODE}
 SUPPORTED_ENVIRONMENT_VERSIONS = frozenset((ENVIRONMENT_VERSION, CURRENT_ENVIRONMENT_VERSION, ROLE_ENVIRONMENT_VERSION, COUPLED_ROLE_ENVIRONMENT_VERSION, GLOBAL_ROLE_ENVIRONMENT_VERSION, *UNARMED_MAV_ENVIRONMENT_VERSIONS))
 OBS_DIM = 100
 GLOBAL_STATE_DIM = 117
@@ -76,7 +78,7 @@ def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
     allowed = expected | {"shaping", "role_reward"}
     if config.get("environment_version") == CLEAN_ENVIRONMENT_VERSION:
         allowed.add("clean_reward")
-    if config.get("environment_version") == CHEN_VERSION:
+    if config.get("environment_version") in (CHEN_VERSION, CHEN_SHARED_VERSION):
         allowed.add("chen_reward")
     if not expected <= set(config) or not set(config) <= allowed:
         raise ValueError(f"config keys must be {sorted(expected)} with optional shaping, got {sorted(config)}")
@@ -193,6 +195,11 @@ def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("v3.8 role_reward must match the frozen heterogeneous_role_coupled_v1 contract")
         if float(cfg["reward"]["blue_kill"]) != 100.0:
             raise ValueError("v3.8 blue_kill must be +100")
+    elif cfg["environment_version"] == CHEN_SHARED_VERSION:
+        if shaping is not None or "role_reward" in cfg or cfg.get("chen_reward") != CHEN_SHARED_CONFIG:
+            raise ValueError("v3.16 requires frozen chen_shared_event_dominant_v1 contract")
+        if any(float(value) != 0 for value in cfg["reward"].values()) or float(cfg["safety"]["red_safe_distance_penalty"]) != 0:
+            raise ValueError("v3.16 disables legacy event/terminal/safety rewards")
     elif cfg["environment_version"] == CHEN_VERSION:
         if shaping is not None or "role_reward" in cfg or cfg.get("chen_reward") != CHEN_CONFIG:
             raise ValueError("v3.15 requires frozen chen_heterogeneous_v1 contract")
@@ -306,6 +313,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
         self._chen_seen_blue_kills = set()
         self._chen_mav_contribution = 0.0
         self._chen_local_sums = {aid: 0.0 for aid in RED_IDS}
+        self._chen_shared_sums = {}
         self._role_process_sums = {aid: 0.0 for aid in RED_IDS}
         self._reward_target_previous = {aid: None for aid in RED_IDS[1:]}
         self._reward_target_switches = {aid: 0 for aid in RED_IDS[1:]}
@@ -326,6 +334,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
             SINGLE_LOCK_ENVIRONMENT_VERSION: "heterogeneous_role_coupled_gate_v1",
             CLEAN_ENVIRONMENT_VERSION: "clean_combat_v1",
             CHEN_VERSION: CHEN_MODE,
+            CHEN_SHARED_VERSION: CHEN_SHARED_MODE,
         }
         self.reward_mode = role_modes.get(self.config["environment_version"], str(shaping.get("mode", "absolute")))
         self.shaping_gamma = float(shaping.get("gamma", 0.0))
@@ -397,6 +406,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
         self._chen_seen_blue_kills = set()
         self._chen_mav_contribution = 0.0
         self._chen_local_sums = {aid: 0.0 for aid in RED_IDS}
+        self._chen_shared_sums = {}
         self._role_process_sums = {aid: 0.0 for aid in RED_IDS}
         self._reward_target_previous = {aid: None for aid in RED_IDS[1:]}
         self._reward_target_switches = {aid: 0 for aid in RED_IDS[1:]}
@@ -467,7 +477,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
         death_causes = self._apply_boundaries()
         # Snapshot after boundary handling, before simultaneous combat deaths.
         clean_guides = self._clean_guide_rewards() if self.reward_mode == "clean_combat_v1" else {}
-        chen_dense = self._chen_dense_rewards() if self.reward_mode == CHEN_MODE else {}
+        chen_dense = self._chen_dense_rewards() if self.reward_mode in (CHEN_MODE, CHEN_SHARED_MODE) else {}
         chen_mav_alive = self.entities["MAV"].state.alive
         attack_events, attack_deaths = self._resolve_attacks()
         death_causes.update(attack_deaths)
@@ -490,7 +500,24 @@ class HeterogeneousMAVUAVAirCombatEnv:
         if outcome == "red": terminal = float(reward_cfg["terminal_red_win"])
         elif outcome == "blue": terminal = float(reward_cfg["terminal_blue_win"])
         elif outcome == "draw": terminal = float(reward_cfg["terminal_draw"])
-        if self.reward_mode == CHEN_MODE:
+        if self.reward_mode == CHEN_SHARED_MODE:
+            team_reward, role_diagnostics, new_kills = chen_shared_reward(
+                chen_dense, death_causes, self._chen_seen_blue_kills, self.config["chen_reward"])
+            # Diagnostic only: never added to process/event/shared training reward.
+            if chen_mav_alive:
+                mc = self.config["chen_reward"]["mav"]
+                self._chen_mav_contribution = min(mc["contribution_cap"],
+                    self._chen_mav_contribution + mc["kill_contribution"] * new_kills)
+            role_diagnostics["mav_team_contribution_diagnostic"] = self._chen_mav_contribution
+            rewards = {aid: team_reward for aid in RED_IDS}
+            event, terminal = role_diagnostics["shared_event_reward"], 0.0
+            for key in ("shared_event_reward", "shared_process_reward", "shared_reward",
+                        "mav_q_process", "uav1_q_process", "uav2_q_process", "uav3_q_process",
+                        "uav1_raw_process", "uav2_raw_process", "uav3_raw_process",
+                        "event_blue_kill_reward", "event_uav_combat_loss_reward",
+                        "event_uav_boundary_loss_reward", "event_mav_death_reward"):
+                self._chen_shared_sums[key] = self._chen_shared_sums.get(key, 0.0) + role_diagnostics[key]
+        elif self.reward_mode == CHEN_MODE:
             local, role_diagnostics = self._chen_rewards(chen_dense, attack_events, death_causes, chen_mav_alive)
             team_reward = float(sum(local.values()) / 4.0)
             rewards = {aid: team_reward for aid in RED_IDS}
@@ -729,7 +756,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
             return None
         g = compute_pairwise_geometry(self.entities[attacker_id].state, self.entities[target_id].state)
         c = self.config["combat"]
-        lower_ok = g.distance > 0.0 if self.config["environment_version"] in (CLEAN_ENVIRONMENT_VERSION, CHEN_VERSION) else c["distance"][0] <= g.distance
+        lower_ok = g.distance > 0.0 if self.config["environment_version"] in (CLEAN_ENVIRONMENT_VERSION, CHEN_VERSION, CHEN_SHARED_VERSION) else c["distance"][0] <= g.distance
         return g if (lower_ok and g.distance <= c["distance"][1]
                      and g.ata < np.deg2rad(c["ata_deg"]) and g.aa < np.deg2rad(c["aa_deg"])) else None
 
@@ -924,6 +951,12 @@ class HeterogeneousMAVUAVAirCombatEnv:
             "terminal_reward_sum": float(self._terminal_reward_sum),
             "safety_reward_sum": float(self._safety_reward_sum),
             **({"team_guide_reward_sum": self._clean_guide_sum} if self.reward_mode == "clean_combat_v1" else {}),
+            **({**{f"{key}_sum": value for key, value in self._chen_shared_sums.items()},
+                "team_reward_sum": self.episode_return,
+                "raw_uav_process_sum": sum(self._chen_shared_sums.get(f"{aid.lower()}_raw_process", 0.) for aid in RED_IDS[1:]),
+                "normalized_uav_process_sum": sum(self._chen_shared_sums.get(f"{aid.lower()}_q_process", 0.) for aid in RED_IDS[1:]),
+                "mav_team_contribution_diagnostic": self._chen_mav_contribution}
+               if self.reward_mode == CHEN_SHARED_MODE else {}),
             **({"chen_local_reward_sums": dict(self._chen_local_sums),
                 "mav_team_contribution_cumulative": self._chen_mav_contribution} if self.reward_mode == CHEN_MODE else {}),
             **({

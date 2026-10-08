@@ -7,6 +7,7 @@ import numpy as np
 import torch
 
 from env.mavuav import BLUE_IDS, RED_IDS, HeterogeneousMAVUAVAirCombatEnv
+from env.reward_chen_v316 import EPISODE_FIELDS as V316_EPISODE_FIELDS
 from algorithm.modules.hrta import ENEMY_SLICES, FRIEND_SLICES
 
 
@@ -15,6 +16,8 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, float]:
         return {"completed_episodes": 0}
     n = len(records)
     summary = {
+        **({f"mean_{key}": float(np.mean([r[key] for r in records]))
+            for key in V316_EPISODE_FIELDS} if "shared_process_reward_sum" in records[0] else {}),
         "completed_episodes": n,
         "mean_episode_return": float(np.mean([r["episode_return"] for r in records])),
         "red_win_rate": sum(r["outcome"] == "red" for r in records) / n,

@@ -17,6 +17,7 @@ from algorithm.modules.structured_uniform import StructuredUniformIndependentAct
 from algorithm.modules.pcta import PCTAIndependentActors, pursuit_consistency
 from algorithm.modules.pcta_v2 import PCTAv2IndependentActors, target_behavior_diagnostics
 from .networks import IndependentActors
+from env.reward_chen_v316 import METADATA as V316_METADATA, validate_metadata as validate_v316_metadata
 from .v315_protocol import (V315_DEFAULTS, ValueNorm, LatentRolloutBuffer,
                             orthogonal_initialize, clipped_huber_value_loss,
                             validate_metadata as validate_v315_metadata)
@@ -186,7 +187,8 @@ def _restore_cuda_rng_state(states: list[torch.Tensor] | None) -> None:
 def _resolved_reward_mode(environment_config: Mapping[str, Any]) -> str:
     version = environment_config["environment_version"]
     shaping_mode = str(environment_config.get("shaping", {}).get("mode", "absolute"))
-    return ("chen_heterogeneous_v1" if version.endswith("v3_15") else
+    return ("chen_shared_event_dominant_v1" if version.endswith("v3_16") else
+            "chen_heterogeneous_v1" if version.endswith(("v3_15", "v3_16")) else
             "clean_combat_v1" if version.endswith("v3_14") else
                 "heterogeneous_role_v1" if version.endswith("v3_7") else
             "heterogeneous_role_coupled_v1" if version.endswith("v3_8") else
@@ -271,7 +273,7 @@ class HAPPOTrainer:
             if self.loss_separated_enabled else None
         )
         self.environment_config = load_environment_config(env_config)
-        self.v315 = self.environment_config["environment_version"].endswith("v3_15")
+        self.v315 = self.environment_config["environment_version"].endswith(("v3_15", "v3_16"))
         if self.v315:
             for field, expected in V315_DEFAULTS.items():
                 if field not in c:
@@ -292,7 +294,7 @@ class HAPPOTrainer:
         shaping = self.environment_config.get("shaping", {})
         self.reward_shaping_mode = str(shaping.get("mode", "absolute"))
         version = self.environment_config["environment_version"]
-        if version in ("heterogeneous_mavuav_4v4_v3_13", "heterogeneous_mavuav_4v4_v3_14", "heterogeneous_mavuav_4v4_v3_15"):
+        if version in ("heterogeneous_mavuav_4v4_v3_13", "heterogeneous_mavuav_4v4_v3_14", "heterogeneous_mavuav_4v4_v3_15", "heterogeneous_mavuav_4v4_v3_16"):
             if (c["actor_variant"], c["critic_variant"], c["method_variant"]) != ("vanilla", "mlp", "baseline"):
                 raise ValueError("v3.13/v3.14 is open only to vanilla HAPPO with mlp critic and baseline method")
             self.combat_capability_metadata["weapon_engagement_mode"] = "single_target_lock"
@@ -2754,12 +2756,14 @@ class HAPPOTrainer:
         data = torch.load(path, map_location=self.device, weights_only=False)
         if self.v315:
             validate_v315_metadata(data, self.config)
+            if self.environment_config["environment_version"].endswith("v3_16"):
+                validate_v316_metadata(data)
         expected = (self.environment_config["environment_version"], OBS_DIM, GLOBAL_STATE_DIM)
         actual = (data.get("environment_version"), data.get("observation_dim"), data.get("global_state_dim"))
         if actual != expected:
             raise RuntimeError("incompatible checkpoint contract for HAPPO environment")
         for field, value in self.combat_capability_metadata.items():
-            if field in data or self.environment_config["environment_version"].endswith(("v3_10", "v3_11", "v3_12", "v3_13", "v3_14", "v3_15")):
+            if field in data or self.environment_config["environment_version"].endswith(("v3_10", "v3_11", "v3_12", "v3_13", "v3_14", "v3_15", "v3_16")):
                 if data.get(field) != value:
                     raise RuntimeError(f"incompatible checkpoint combat capability contract: {field}")
         checkpoint_mode = data.get("reward_mode", data.get("reward_shaping_mode", "absolute"))
@@ -3104,6 +3108,8 @@ class HAPPOTrainer:
         data = torch.load(path, map_location=self.device, weights_only=False)
         if self.v315:
             validate_v315_metadata(data, self.config)
+            if self.environment_config["environment_version"].endswith("v3_16"):
+                validate_v316_metadata(data)
             if data.get("environment_config") != self.environment_config:
                 raise RuntimeError("v3.15 weights environment config differs from checkpoint")
             for field, expected in self.combat_capability_metadata.items():
@@ -3119,7 +3125,7 @@ class HAPPOTrainer:
             raise RuntimeError("incompatible HAPPO checkpoint reward shaping contract")
         self._validate_actor_architecture(data)
         self._validate_critic_architecture(data)
-        if self.environment_config["environment_version"] in ("heterogeneous_mavuav_4v4_v3_13", "heterogeneous_mavuav_4v4_v3_14", "heterogeneous_mavuav_4v4_v3_15"):
+        if self.environment_config["environment_version"] in ("heterogeneous_mavuav_4v4_v3_13", "heterogeneous_mavuav_4v4_v3_14", "heterogeneous_mavuav_4v4_v3_15", "heterogeneous_mavuav_4v4_v3_16"):
             if data.get("weapon_engagement_mode") != "single_target_lock":
                 raise RuntimeError("incompatible v3.13/v3.14 weapon engagement mode")
         if self.is_eram:
@@ -3217,4 +3223,6 @@ class HAPPOTrainer:
 
     @property
     def v315_metadata(self) -> dict[str, Any]:
-        return {key: self.config[key] for key in V315_DEFAULTS} if self.v315 else {}
+        return ({**{key: self.config[key] for key in V315_DEFAULTS},
+                 **(V316_METADATA if self.environment_config["environment_version"].endswith("v3_16") else {})}
+                if self.v315 else {})

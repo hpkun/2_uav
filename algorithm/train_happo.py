@@ -27,6 +27,7 @@ from algorithm.happo.dbm_rgaa import DBM_RGAA_METHOD, RGAA_WIDE_METHOD
 from algorithm.happo.tacm_rgaa import TACM_RGAA_METHOD
 from algorithm.happo.evaluation import evaluate_actors, evaluate_recurrent_actors, summarize_records
 from env.mavuav import RED_IDS, ROLE_REWARD_MODES, NON_SHAPING_REWARD_MODES, load_environment_config
+from env.reward_chen_v316 import EPISODE_FIELDS as V316_EPISODE_FIELDS
 
 
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "happo.yaml"
@@ -406,6 +407,8 @@ def _episode_metrics(records: list[Mapping[str, Any]]) -> dict[str, Any]:
         }
     n = len(records)
     return {
+        **({f"mean_{key}": float(np.mean([r[key] for r in records]))
+            for key in V316_EPISODE_FIELDS} if "shared_process_reward_sum" in records[0] else {}),
         "mean_episode_return": float(np.mean([r["episode_return"] for r in records])),
         "red_win_rate": sum(r["outcome"] == "red" for r in records) / n,
         "blue_win_rate": sum(r["outcome"] == "blue" for r in records) / n,
@@ -473,7 +476,7 @@ def _evaluation_row(
         "method_variant": trainer.config["method_variant"],
         "environment_version": trainer.environment_config["environment_version"],
         **({"weapon_engagement_mode": trainer.environment_config["combat"]["weapon_engagement_mode"]}
-           if trainer.environment_config["environment_version"].endswith(("v3_13", "v3_14", "v3_15")) else {}),
+           if trainer.environment_config["environment_version"].endswith(("v3_13", "v3_14", "v3_15", "v3_16")) else {}),
         "reward_mode": trainer.reward_mode,
         "reward_shaping_mode": trainer.reward_shaping_mode if trainer.reward_mode not in NON_SHAPING_REWARD_MODES else None,
         "shaping_gamma": trainer.shaping_gamma if trainer.reward_mode not in NON_SHAPING_REWARD_MODES else None,
@@ -662,7 +665,7 @@ def _initial_resolved(
         "method_variant": trainer.config["method_variant"],
         "environment_version": env_config["environment_version"],
         **({"weapon_engagement_mode": env_config["combat"]["weapon_engagement_mode"]}
-           if env_config["environment_version"].endswith(("v3_13", "v3_14", "v3_15")) else {}),
+           if env_config["environment_version"].endswith(("v3_13", "v3_14", "v3_15", "v3_16")) else {}),
         "reward_mode": trainer.reward_mode,
         "reward_shaping_mode": trainer.reward_shaping_mode if trainer.reward_mode not in NON_SHAPING_REWARD_MODES else None,
         "shaping_gamma": trainer.shaping_gamma if trainer.reward_mode not in NON_SHAPING_REWARD_MODES else None,
@@ -887,6 +890,8 @@ def main(
             training_fields = TRAINING_FIELDS + LSA_RGAA_FIELDS
         else:
             training_fields = TRAINING_FIELDS
+        if env_config["environment_version"].endswith("v3_16"):
+            training_fields += tuple(f"mean_{key}" for key in V316_EPISODE_FIELDS)
         configured_horizon = int(trainer.config["rollout_steps"])
         num_envs = int(trainer.config["num_envs"])
         window = ProgressWindow()
@@ -979,7 +984,7 @@ def main(
             "method_variant": method_variant,
             "environment_version": env_config["environment_version"],
             **({"weapon_engagement_mode": env_config["combat"]["weapon_engagement_mode"]}
-               if env_config["environment_version"].endswith(("v3_13", "v3_14", "v3_15")) else {}),
+               if env_config["environment_version"].endswith(("v3_13", "v3_14", "v3_15", "v3_16")) else {}),
             "reward_mode": trainer.reward_mode,
             "reward_shaping_mode": trainer.reward_shaping_mode if trainer.reward_mode not in NON_SHAPING_REWARD_MODES else None,
             "shaping_gamma": trainer.shaping_gamma if trainer.reward_mode not in NON_SHAPING_REWARD_MODES else None,

@@ -35,19 +35,21 @@ def _environment_state(env: HeterogeneousMAVUAVAirCombatEnv) -> dict[str, Any]:
         "randomization_override": deepcopy(env.randomization_override),
         "blue_policy_state": deepcopy(env.blue_policy.state_dict()),
     }
-    if env.config["environment_version"] in ("heterogeneous_mavuav_4v4_v3_13", "heterogeneous_mavuav_4v4_v3_14", "heterogeneous_mavuav_4v4_v3_15"):
+    if env.config["environment_version"] in ("heterogeneous_mavuav_4v4_v3_13", "heterogeneous_mavuav_4v4_v3_14", "heterogeneous_mavuav_4v4_v3_15", "heterogeneous_mavuav_4v4_v3_16"):
         state["weapon_lock_target"] = deepcopy(env.weapon_lock_target)
     if env.config["environment_version"].endswith("v3_14"):
         state["clean_guide_sum"] = env._clean_guide_sum
-    if env.config["environment_version"].endswith("v3_15"):
+    if env.config["environment_version"].endswith(("v3_15", "v3_16")):
         state["chen_reward_state"] = {"seen_blue_kills": set(env._chen_seen_blue_kills),
                                      "mav_contribution": env._chen_mav_contribution,
                                      "local_sums": deepcopy(env._chen_local_sums)}
+        if env.config["environment_version"].endswith("v3_16"):
+            state["chen_reward_state"]["shared_sums"] = deepcopy(env._chen_shared_sums)
     return state
 
 
 def _restore_environment_state(env: HeterogeneousMAVUAVAirCombatEnv, state: Mapping[str, Any]) -> None:
-    if env.config["environment_version"] in ("heterogeneous_mavuav_4v4_v3_13", "heterogeneous_mavuav_4v4_v3_14", "heterogeneous_mavuav_4v4_v3_15"):
+    if env.config["environment_version"] in ("heterogeneous_mavuav_4v4_v3_13", "heterogeneous_mavuav_4v4_v3_14", "heterogeneous_mavuav_4v4_v3_15", "heterogeneous_mavuav_4v4_v3_16"):
         locks = state.get("weapon_lock_target")
         ids = (*env.red_ids, *env.blue_ids)
         if not isinstance(locks, Mapping) or set(locks) != set(ids) or locks["MAV"] is not None:
@@ -64,11 +66,13 @@ def _restore_environment_state(env: HeterogeneousMAVUAVAirCombatEnv, state: Mapp
     env.episode_return = float(state["episode_return"])
     if env.config["environment_version"].endswith("v3_14"):
         env._clean_guide_sum = float(state["clean_guide_sum"])
-    if env.config["environment_version"].endswith("v3_15"):
+    if env.config["environment_version"].endswith(("v3_15", "v3_16")):
         chen = state["chen_reward_state"]
         env._chen_seen_blue_kills = set(chen["seen_blue_kills"])
         env._chen_mav_contribution = float(chen["mav_contribution"])
         env._chen_local_sums = deepcopy(chen["local_sums"])
+        if env.config["environment_version"].endswith("v3_16"):
+            env._chen_shared_sums = deepcopy(chen["shared_sums"])
     env._running = bool(state["running"])
     env._potential_shaping_sum = float(state.get("potential_shaping_sum", 0.0))
     env._absolute_situation_sum = float(state.get("absolute_situation_sum", 0.0))
