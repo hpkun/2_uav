@@ -20,6 +20,8 @@ from algorithm.happo.evaluation import evaluate_actors, evaluate_recurrent_actor
 from algorithm.happo.eram import (EntityIndependentActors, EntityAttentionRecurrentCritic,
                                   actor_kwargs, critic_kwargs, validate_eram_metadata)
 from algorithm.happo.networks import IndependentActors
+from algorithm.happo.v315_protocol import ValueNorm, validate_metadata as validate_v315_metadata
+from algorithm.happo.v315_protocol import V315_DEFAULTS
 from algorithm.happo.dbm_rgaa import (
     DBM_RGAA_METHOD, RGAA_WIDE_METHOD, build_method_actors, dbm_metadata, wide_metadata,
 )
@@ -54,7 +56,7 @@ def validate_checkpoint_contract(payload: dict[str, Any], env_config: dict[str, 
     if actual != expected:
         raise RuntimeError("incompatible HAPPO checkpoint environment contract")
     version = env_config["environment_version"]
-    if version.endswith(("v3_10", "v3_11", "v3_12", "v3_13", "v3_14")):
+    if version.endswith(("v3_10", "v3_11", "v3_12", "v3_13", "v3_14", "v3_15")):
         expected_capability = {
             "mav_direct_attack_capability": False,
             "mav_direct_attack_shaping": "none",
@@ -64,7 +66,8 @@ def validate_checkpoint_contract(payload: dict[str, Any], env_config: dict[str, 
             if payload.get(field) != value:
                 raise RuntimeError(f"incompatible HAPPO checkpoint combat capability: {field}")
     env_shaping = env_config.get("shaping", {})
-    env_mode = ("clean_combat_v1" if version.endswith("v3_14") else
+    env_mode = ("chen_heterogeneous_v1" if version.endswith("v3_15") else
+                "clean_combat_v1" if version.endswith("v3_14") else
                 "heterogeneous_role_v1" if version.endswith("v3_7") else
                 "heterogeneous_role_coupled_v1" if version.endswith("v3_8") else
                 "heterogeneous_role_coupled_gate_v1" if version.endswith(("v3_9", "v3_10", "v3_11", "v3_12", "v3_13")) else
@@ -82,11 +85,15 @@ def validate_checkpoint_contract(payload: dict[str, Any], env_config: dict[str, 
     method_variant = payload.get(
         "method_variant", trainer_config.get("method_variant", "baseline"),
     )
-    if version in ("heterogeneous_mavuav_4v4_v3_13", "heterogeneous_mavuav_4v4_v3_14"):
+    if version in ("heterogeneous_mavuav_4v4_v3_13", "heterogeneous_mavuav_4v4_v3_14", "heterogeneous_mavuav_4v4_v3_15"):
         variants = (payload.get("actor_variant", trainer_config.get("actor_variant", "vanilla")),
                     payload.get("critic_variant", trainer_config.get("critic_variant", "mlp")), method_variant)
         if variants != ("vanilla", "mlp", "baseline") or payload.get("weapon_engagement_mode") != "single_target_lock":
             raise RuntimeError("incompatible v3.13/v3.14 vanilla single-target weapon contract")
+    if version.endswith("v3_15"):
+        validate_v315_metadata(payload)
+        if load_environment_config(payload["environment_config"]) != env_config:
+            raise RuntimeError("v3.15 evaluation environment differs from checkpoint")
     if method_variant in (DBM_RGAA_METHOD, RGAA_WIDE_METHOD, TACM_RGAA_METHOD):
         if "environment_config" not in payload:
             raise RuntimeError(
@@ -115,6 +122,9 @@ def main(expected_critic_variant: str = "mlp") -> None:
     else:
         env_config = load_environment_config(None)
     validate_checkpoint_contract(payload, env_config)
+    if env_config["environment_version"].endswith("v3_15"):
+        value_normalizer = ValueNorm().to(device)
+        value_normalizer.load_state_dict(payload["value_normalizer"])
     trainer_config = payload.get("trainer_config", payload.get("config", {}))
     actor_variant = payload.get("actor_variant", trainer_config.get("actor_variant", "vanilla"))
     is_eram = actor_variant == "entity_recurrent"
@@ -194,7 +204,8 @@ def main(expected_critic_variant: str = "mlp") -> None:
     actors.load_state_dict(payload["actors"])
     actors.eval()
     version = env_config["environment_version"]
-    reward_mode = ("clean_combat_v1" if version.endswith("v3_14") else
+    reward_mode = ("chen_heterogeneous_v1" if version.endswith("v3_15") else
+                "clean_combat_v1" if version.endswith("v3_14") else
                 "heterogeneous_role_v1" if version.endswith("v3_7") else
                    "heterogeneous_role_coupled_v1" if version.endswith("v3_8") else
                    "heterogeneous_role_coupled_gate_v1" if version.endswith(("v3_9", "v3_10", "v3_11", "v3_12", "v3_13")) else
@@ -240,7 +251,8 @@ def main(expected_critic_variant: str = "mlp") -> None:
             "action_seed": effective_action_seed,
             "environment_version": env_config["environment_version"],
             **({"weapon_engagement_mode": env_config["combat"]["weapon_engagement_mode"]}
-               if version.endswith(("v3_13", "v3_14")) else {}),
+               if version.endswith(("v3_13", "v3_14", "v3_15")) else {}),
+            **({key: payload[key] for key in V315_DEFAULTS} if version.endswith("v3_15") else {}),
             "reward_mode": reward_mode,
             "reward_shaping_mode": reward_mode if reward_mode not in NON_SHAPING_REWARD_MODES else None,
             "shaping_gamma": float(env_config.get("shaping", {}).get("gamma", 0.0)) if reward_mode not in NON_SHAPING_REWARD_MODES else None,
@@ -272,7 +284,8 @@ def main(expected_critic_variant: str = "mlp") -> None:
             "environment_version": env_config["environment_version"],
             **({"weapon_engagement_mode": env_config["combat"]["weapon_engagement_mode"],
                 "blue_target_strategy": env_config["blue_policy"]["target_strategy"]}
-               if version.endswith(("v3_13", "v3_14")) else {}),
+               if version.endswith(("v3_13", "v3_14", "v3_15")) else {}),
+            **({key: payload[key] for key in V315_DEFAULTS} if version.endswith("v3_15") else {}),
             "reward_mode": reward_mode,
             "reward_shaping_mode": reward_mode if reward_mode not in NON_SHAPING_REWARD_MODES else None,
             "shaping_gamma": float(env_config.get("shaping", {}).get("gamma", 0.0)) if reward_mode not in NON_SHAPING_REWARD_MODES else None,

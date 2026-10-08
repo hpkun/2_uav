@@ -1,0 +1,34 @@
+# Chen-aligned pure v3.15 baseline; version-isolated probability/value contract.
+training:
+  environment_profile: main
+  seed: 1
+  device: cuda
+  num_envs: 16
+  rollout_steps: 128
+  gamma: 0.99
+  gae_lambda: 0.95
+  ppo_epochs: 4
+  minibatch_size: 256
+  clip_coef: 0.2
+  actor_learning_rate: 0.0005
+  critic_learning_rate: 0.0005
+  entropy_coef: 0.01
+  value_loss_coef: 0.5
+  max_grad_norm: 10.0
+  hidden_dim: 128
+  actor_log_std_init: -0.25
+  actor_variant: vanilla
+  critic_variant: mlp
+  method_variant: baseline
+  randomization_curriculum_enabled: false
+  curriculum_start_profile: learnability
+  curriculum_end_profile: main
+  curriculum_steps: 400000
+  final_evaluation_role: execution_smoke
+  action_probability_protocol: latent_gaussian_raw_v1
+  entropy_semantics: latent_gaussian
+  use_valuenorm: true
+  use_huber_loss: true
+  huber_delta: 10.0
+  use_clipped_value_loss: true
+  orthogonal_init: true

@@ -17,6 +17,9 @@ from algorithm.modules.structured_uniform import StructuredUniformIndependentAct
 from algorithm.modules.pcta import PCTAIndependentActors, pursuit_consistency
 from algorithm.modules.pcta_v2 import PCTAv2IndependentActors, target_behavior_diagnostics
 from .networks import IndependentActors
+from .v315_protocol import (V315_DEFAULTS, ValueNorm, LatentRolloutBuffer,
+                            orthogonal_initialize, clipped_huber_value_loss,
+                            validate_metadata as validate_v315_metadata)
 from .recurrent import RecurrentIndependentActors
 from .recurrent_buffer import RecurrentRolloutBuffer
 from .eram import (ERAM_DEFAULTS, ERAM_CONFIG_FIELDS, EntityIndependentActors,
@@ -183,7 +186,8 @@ def _restore_cuda_rng_state(states: list[torch.Tensor] | None) -> None:
 def _resolved_reward_mode(environment_config: Mapping[str, Any]) -> str:
     version = environment_config["environment_version"]
     shaping_mode = str(environment_config.get("shaping", {}).get("mode", "absolute"))
-    return ("clean_combat_v1" if version.endswith("v3_14") else
+    return ("chen_heterogeneous_v1" if version.endswith("v3_15") else
+            "clean_combat_v1" if version.endswith("v3_14") else
                 "heterogeneous_role_v1" if version.endswith("v3_7") else
             "heterogeneous_role_coupled_v1" if version.endswith("v3_8") else
             "heterogeneous_role_coupled_gate_v1" if version.endswith(("v3_9", "v3_10", "v3_11", "v3_12", "v3_13")) else
@@ -267,6 +271,17 @@ class HAPPOTrainer:
             if self.loss_separated_enabled else None
         )
         self.environment_config = load_environment_config(env_config)
+        self.v315 = self.environment_config["environment_version"].endswith("v3_15")
+        if self.v315:
+            for field, expected in V315_DEFAULTS.items():
+                if field not in c:
+                    c[field] = expected
+                if c[field] != expected:
+                    raise ValueError(f"v3.15 requires {field}={expected!r}")
+            if c["randomization_curriculum_enabled"]:
+                raise ValueError("v3.15 requires fixed initialization without curriculum")
+        elif any(c.get(key, False) for key in ("use_valuenorm", "use_huber_loss", "use_clipped_value_loss", "orthogonal_init")) or c.get("action_probability_protocol") == "latent_gaussian_raw_v1":
+            raise ValueError("v3.15 probability/value contract cannot be enabled on legacy environments")
         self.combat_capability_metadata = {
             "mav_direct_attack_capability": bool(
                 self.environment_config["combat"].get("mav_can_attack", True)
@@ -277,7 +292,7 @@ class HAPPOTrainer:
         shaping = self.environment_config.get("shaping", {})
         self.reward_shaping_mode = str(shaping.get("mode", "absolute"))
         version = self.environment_config["environment_version"]
-        if version in ("heterogeneous_mavuav_4v4_v3_13", "heterogeneous_mavuav_4v4_v3_14"):
+        if version in ("heterogeneous_mavuav_4v4_v3_13", "heterogeneous_mavuav_4v4_v3_14", "heterogeneous_mavuav_4v4_v3_15"):
             if (c["actor_variant"], c["critic_variant"], c["method_variant"]) != ("vanilla", "mlp", "baseline"):
                 raise ValueError("v3.13/v3.14 is open only to vanilla HAPPO with mlp critic and baseline method")
             self.combat_capability_metadata["weapon_engagement_mode"] = "single_target_lock"
@@ -467,6 +482,11 @@ class HAPPOTrainer:
             self.critic = RelationalCentralizedCritic(GLOBAL_STATE_DIM).to(self.device)
         else:
             self.critic = CentralizedCritic(GLOBAL_STATE_DIM, int(c["hidden_dim"])).to(self.device)
+        self.value_normalizer = ValueNorm().to(self.device) if self.v315 else None
+        if self.v315:
+            for actor in self.actors.actors:
+                orthogonal_initialize(actor.network, .01)
+            orthogonal_initialize(self.critic.network, 1.0)
         self.actor_optimizers = [torch.optim.Adam(actor.parameters(), lr=float(c["actor_learning_rate"])) for actor in self.actors.actors]
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=float(c["critic_learning_rate"]))
         if self.credit_enabled:
@@ -794,6 +814,8 @@ class HAPPOTrainer:
         return {}
 
     def make_buffer(self, horizon: int) -> RolloutBuffer:
+        if self.v315:
+            return LatentRolloutBuffer(horizon, int(self.config["num_envs"]))
         if self.is_eram:
             return ERAMRolloutBuffer(horizon, int(self.config["num_envs"]),
                                      self.actor_recurrent_hidden_dim, self.critic_recurrent_hidden_dim)
@@ -1067,12 +1089,18 @@ class HAPPOTrainer:
                     tau_teacher=float(self.config["tacm_tau_teacher"]),
                 ) if self.tacm_enabled else None
             )
-            actions, log_probs = [], []
+            actions, log_probs, raw_actions = [], [], []
             with torch.no_grad():
                 for agent, actor in enumerate(self.actors.actors):
-                    action, log_prob = actor.sample(torch.as_tensor(self.observations[:, agent], device=self.device))
+                    obs_tensor = torch.as_tensor(self.observations[:, agent], device=self.device)
+                    if self.v315:
+                        action, raw_action, log_prob = actor.sample_with_raw(obs_tensor)
+                        raw_actions.append(raw_action.cpu().numpy())
+                    else:
+                        action, log_prob = actor.sample(obs_tensor)
                     actions.append(action.cpu().numpy()); log_probs.append(log_prob.cpu().numpy())
-                values = self.critic(torch.as_tensor(self.global_states, device=self.device)).cpu().numpy()
+                predictions = self.critic(torch.as_tensor(self.global_states, device=self.device))
+                values = (self.value_normalizer.denormalize(predictions) if self.v315 else predictions).cpu().numpy()
             if self.loss_separated_enabled:
                 process_values = self._ls_values(self.observations, loss=False)
                 loss_values = self._ls_values(self.observations, loss=True)
@@ -1152,11 +1180,14 @@ class HAPPOTrainer:
                 else:
                     self.buffer.insert(**insert_kwargs)
             else:
-                self.buffer.insert(self.observations, self.global_states, action_array, log_prob_array, training_rewards, values, terminated, truncated, self.active_masks)
+                kwargs = {"raw_actions": np.stack(raw_actions, axis=1)} if self.v315 else {}
+                self.buffer.insert(self.observations, self.global_states, action_array, log_prob_array, training_rewards, values, terminated, truncated, self.active_masks, **kwargs)
             completed.extend(info["episode_summary"] for info in infos if "episode_summary" in info)
             self.observations, self.global_states, self.active_masks = next_obs, next_states, next_masks
             self.env_steps += self.buffer.num_envs
-        with torch.no_grad(): last_values = self.critic(torch.as_tensor(self.global_states, device=self.device)).cpu().numpy()
+        with torch.no_grad():
+            predictions = self.critic(torch.as_tensor(self.global_states, device=self.device))
+            last_values = (self.value_normalizer.denormalize(predictions) if self.v315 else predictions).cpu().numpy()
         self.buffer.compute_returns_and_advantages(last_values, float(self.config["gamma"]), float(self.config["gae_lambda"]))
         if self.loss_separated_enabled:
             if not isinstance(self.buffer, LossSeparatedRoleRolloutBuffer):
@@ -1692,6 +1723,7 @@ class HAPPOTrainer:
         num_agents = len(RED_IDS)
         observations = torch.as_tensor(self.buffer.observations.reshape(-1, num_agents, OBS_DIM), device=self.device)
         actions = torch.as_tensor(self.buffer.actions.reshape(-1, num_agents, 3), device=self.device)
+        probability_actions = torch.as_tensor(self.buffer.raw_actions.reshape(-1, num_agents, 3), device=self.device) if self.v315 else actions
         old_log_probs = torch.as_tensor(self.buffer.log_probs.reshape(-1, num_agents), device=self.device)
         active_masks = torch.as_tensor(self.buffer.active_masks.reshape(-1, num_agents), device=self.device)
         advantages = torch.as_tensor(self.buffer.advantages.reshape(-1), device=self.device)
@@ -2028,7 +2060,8 @@ class HAPPOTrainer:
                     idx = torch.as_tensor(sample_order[start:start + mini], device=self.device)
                     idx = idx[active[idx]]
                     if not len(idx): continue
-                    new_log_prob, entropy = self.actors.actors[agent].evaluate_actions(observations[idx, agent], actions[idx, agent])
+                    evaluator = self.actors.actors[agent].evaluate_raw_actions if self.v315 else self.actors.actors[agent].evaluate_actions
+                    new_log_prob, entropy = evaluator(observations[idx, agent], probability_actions[idx, agent])
                     ratio = torch.exp(new_log_prob - old_log_probs[idx, agent])
                     effective = (factor[idx] * normalized[idx]).detach()
                     policy_loss = -torch.minimum(ratio * effective, ratio.clamp(1.0 - clip, 1.0 + clip) * effective).mean()
@@ -2085,7 +2118,8 @@ class HAPPOTrainer:
                         float(c["tacm_temporal_coef"]), float(c["max_grad_norm"]),
                     )
             with torch.no_grad():
-                new_all, _ = self.actors.actors[agent].evaluate_actions(observations[:, agent], actions[:, agent])
+                evaluator = self.actors.actors[agent].evaluate_raw_actions if self.v315 else self.actors.actors[agent].evaluate_actions
+                new_all, _ = evaluator(observations[:, agent], probability_actions[:, agent])
                 factor = preceding_factor_update(factor, old_log_probs[:, agent], new_all, active_masks[:, agent])
             if self.rgaa_enabled:
                 self.last_rgaa_factor_history.append(factor.detach().cpu().numpy().copy())
@@ -2121,11 +2155,17 @@ class HAPPOTrainer:
                 pcta_v2_head_disagreement_sum += temporal.head_disagreement_sum
                 pcta_v2_head_disagreement_count += temporal.head_disagreement_count
         critic_losses = []
+        if self.v315:
+            # Raw rollout values/returns for GAE; all loss inputs use the SAME new statistics.
+            self.value_normalizer.update(returns)
+            critic_targets = self.value_normalizer.normalize(returns)
+            old_values = self.value_normalizer.normalize(torch.as_tensor(self.buffer.values.reshape(-1), device=self.device))
         for _ in range(int(c["ppo_epochs"])):
             sample_order = self.rng.permutation(total)
             for start in range(0, total, mini):
                 idx = torch.as_tensor(sample_order[start:start + mini], device=self.device)
-                value_loss = (self.critic(states[idx]) - returns[idx]).square().mean()
+                value_loss = (clipped_huber_value_loss(self.critic(states[idx]), old_values[idx], critic_targets[idx],
+                                                     float(c["clip_coef"]), float(c["huber_delta"])) if self.v315 else (self.critic(states[idx]) - returns[idx]).square().mean())
                 self.critic_optimizer.zero_grad(); (float(c["value_loss_coef"]) * value_loss).backward()
                 nn.utils.clip_grad_norm_(self.critic.parameters(), float(c["max_grad_norm"])); self.critic_optimizer.step()
                 critic_losses.append(float(value_loss.item()))
@@ -2529,6 +2569,9 @@ class HAPPOTrainer:
         payload.update(self.ls_rgaa_metadata)
         payload.update(self.lsa_rgaa_metadata)
         payload.update(self.combat_capability_metadata)
+        if self.v315:
+            payload.update(self.v315_metadata)
+            payload["value_normalizer"] = self.value_normalizer.state_dict()
         if self.rgaa_enabled:
             payload["algorithm"] = (
                 "tacm_rgaa_happo" if self.tacm_enabled else
@@ -2634,6 +2677,9 @@ class HAPPOTrainer:
         state.update(self.ls_rgaa_metadata)
         state.update(self.lsa_rgaa_metadata)
         state.update(self.combat_capability_metadata)
+        if self.v315:
+            state.update(self.v315_metadata)
+            state["value_normalizer"] = self.value_normalizer.state_dict()
         if self.rgaa_enabled:
             state["algorithm"] = (
                 "tacm_rgaa_happo" if self.tacm_enabled else
@@ -2704,12 +2750,14 @@ class HAPPOTrainer:
 
     def load_checkpoint(self, path: str | Path) -> int:
         data = torch.load(path, map_location=self.device, weights_only=False)
+        if self.v315:
+            validate_v315_metadata(data, self.config)
         expected = (self.environment_config["environment_version"], OBS_DIM, GLOBAL_STATE_DIM)
         actual = (data.get("environment_version"), data.get("observation_dim"), data.get("global_state_dim"))
         if actual != expected:
             raise RuntimeError("incompatible checkpoint contract for HAPPO environment")
         for field, value in self.combat_capability_metadata.items():
-            if field in data or self.environment_config["environment_version"].endswith(("v3_10", "v3_11", "v3_12", "v3_13", "v3_14")):
+            if field in data or self.environment_config["environment_version"].endswith(("v3_10", "v3_11", "v3_12", "v3_13", "v3_14", "v3_15")):
                 if data.get(field) != value:
                     raise RuntimeError(f"incompatible checkpoint combat capability contract: {field}")
         checkpoint_mode = data.get("reward_mode", data.get("reward_shaping_mode", "absolute"))
@@ -2938,6 +2986,8 @@ class HAPPOTrainer:
             raise RuntimeError("resume environment config mismatch: resolved content differs from checkpoint")
         self.actors.load_state_dict(data["actors"])
         self.critic.load_state_dict(data["critic"])
+        if self.v315:
+            self.value_normalizer.load_state_dict(data["value_normalizer"])
         if self.credit_enabled:
             assert self.credit_critic is not None
             self.credit_critic.load_state_dict(data["credit_critic"])
@@ -3050,6 +3100,13 @@ class HAPPOTrainer:
     def load(self, path: str | Path) -> None:
         # v3.13 weights retain the same isolated weapon contract as exact resume.
         data = torch.load(path, map_location=self.device, weights_only=False)
+        if self.v315:
+            validate_v315_metadata(data, self.config)
+            if data.get("environment_config") != self.environment_config:
+                raise RuntimeError("v3.15 weights environment config differs from checkpoint")
+            for field, expected in self.combat_capability_metadata.items():
+                if data.get(field) != expected:
+                    raise RuntimeError(f"incompatible v3.15 combat capability: {field}")
         if (data.get("environment_version"), data.get("observation_dim"), data.get("global_state_dim")) != (self.environment_config["environment_version"], OBS_DIM, GLOBAL_STATE_DIM):
             raise RuntimeError("incompatible HAPPO checkpoint environment contract")
         checkpoint_mode = data.get("reward_mode", data.get("reward_shaping_mode", "absolute"))
@@ -3060,7 +3117,7 @@ class HAPPOTrainer:
             raise RuntimeError("incompatible HAPPO checkpoint reward shaping contract")
         self._validate_actor_architecture(data)
         self._validate_critic_architecture(data)
-        if self.environment_config["environment_version"] in ("heterogeneous_mavuav_4v4_v3_13", "heterogeneous_mavuav_4v4_v3_14"):
+        if self.environment_config["environment_version"] in ("heterogeneous_mavuav_4v4_v3_13", "heterogeneous_mavuav_4v4_v3_14", "heterogeneous_mavuav_4v4_v3_15"):
             if data.get("weapon_engagement_mode") != "single_target_lock":
                 raise RuntimeError("incompatible v3.13/v3.14 weapon engagement mode")
         if self.is_eram:
@@ -3129,6 +3186,8 @@ class HAPPOTrainer:
                 f"(expected {self.config['environment_profile']!r})"
             )
         self.actors.load_state_dict(data["actors"]); self.critic.load_state_dict(data["critic"])
+        if self.v315:
+            self.value_normalizer.load_state_dict(data["value_normalizer"])
         if self.rgaa_enabled:
             if "role_critic_mav" not in data or "role_critic_uav" not in data:
                 raise RuntimeError("RGAA weights checkpoint is missing role critics")
@@ -3153,3 +3212,7 @@ class HAPPOTrainer:
 
     def close(self) -> None:
         self.vector_env.close()
+
+    @property
+    def v315_metadata(self) -> dict[str, Any]:
+        return {key: self.config[key] for key in V315_DEFAULTS} if self.v315 else {}

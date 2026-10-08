@@ -473,7 +473,7 @@ def _evaluation_row(
         "method_variant": trainer.config["method_variant"],
         "environment_version": trainer.environment_config["environment_version"],
         **({"weapon_engagement_mode": trainer.environment_config["combat"]["weapon_engagement_mode"]}
-           if trainer.environment_config["environment_version"].endswith(("v3_13", "v3_14")) else {}),
+           if trainer.environment_config["environment_version"].endswith(("v3_13", "v3_14", "v3_15")) else {}),
         "reward_mode": trainer.reward_mode,
         "reward_shaping_mode": trainer.reward_shaping_mode if trainer.reward_mode not in NON_SHAPING_REWARD_MODES else None,
         "shaping_gamma": trainer.shaping_gamma if trainer.reward_mode not in NON_SHAPING_REWARD_MODES else None,
@@ -662,7 +662,7 @@ def _initial_resolved(
         "method_variant": trainer.config["method_variant"],
         "environment_version": env_config["environment_version"],
         **({"weapon_engagement_mode": env_config["combat"]["weapon_engagement_mode"]}
-           if env_config["environment_version"].endswith(("v3_13", "v3_14")) else {}),
+           if env_config["environment_version"].endswith(("v3_13", "v3_14", "v3_15")) else {}),
         "reward_mode": trainer.reward_mode,
         "reward_shaping_mode": trainer.reward_shaping_mode if trainer.reward_mode not in NON_SHAPING_REWARD_MODES else None,
         "shaping_gamma": trainer.shaping_gamma if trainer.reward_mode not in NON_SHAPING_REWARD_MODES else None,
@@ -692,6 +692,7 @@ def _initial_resolved(
         **trainer.credit_metadata,
         **trainer.tam_metadata,
         **trainer.eram_metadata,
+        **trainer.v315_metadata,
         **trainer.rgaa_metadata,
         **trainer.dbm_metadata,
         **trainer.tacm_metadata,
@@ -978,7 +979,7 @@ def main(
             "method_variant": method_variant,
             "environment_version": env_config["environment_version"],
             **({"weapon_engagement_mode": env_config["combat"]["weapon_engagement_mode"]}
-               if env_config["environment_version"].endswith(("v3_13", "v3_14")) else {}),
+               if env_config["environment_version"].endswith(("v3_13", "v3_14", "v3_15")) else {}),
             "reward_mode": trainer.reward_mode,
             "reward_shaping_mode": trainer.reward_shaping_mode if trainer.reward_mode not in NON_SHAPING_REWARD_MODES else None,
             "shaping_gamma": trainer.shaping_gamma if trainer.reward_mode not in NON_SHAPING_REWARD_MODES else None,
@@ -1013,6 +1014,7 @@ def main(
             **trainer.credit_metadata,
             **trainer.tam_metadata,
             **trainer.eram_metadata,
+            **trainer.v315_metadata,
             **trainer.rgaa_metadata,
             **trainer.dbm_metadata,
             **trainer.tacm_metadata,

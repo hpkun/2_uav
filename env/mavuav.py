@@ -13,6 +13,8 @@ from .dynamics import map_normalized_action, rk4_step
 from .geometry import compute_pairwise_geometry
 from .models import Aircraft, AircraftSpec, AircraftState
 from .reward import potential_shaping_reward, situation_reward
+from .reward_chen_v315 import (CHEN_VERSION, CHEN_MODE, CHEN_CONFIG, angle_reward,
+                              distance_reward, speed_reward, mav_distance_reward, situation_score)
 from .reward_role_v37 import (
     target_score, uav_angle_reward, uav_speed_reward, uav_distance_reward,
     uav_process_reward, mav_aspect_reward, mav_awareness_reward,
@@ -43,11 +45,11 @@ SUPPORT_MAV_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_11"
 CAP_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_12"
 SINGLE_LOCK_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_13"
 CLEAN_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_14"
-SINGLE_LOCK_ENVIRONMENT_VERSIONS = frozenset((SINGLE_LOCK_ENVIRONMENT_VERSION, CLEAN_ENVIRONMENT_VERSION))
+SINGLE_LOCK_ENVIRONMENT_VERSIONS = frozenset((SINGLE_LOCK_ENVIRONMENT_VERSION, CLEAN_ENVIRONMENT_VERSION, CHEN_VERSION))
 CAP_ENVIRONMENT_VERSIONS = frozenset((CAP_ENVIRONMENT_VERSION, *SINGLE_LOCK_ENVIRONMENT_VERSIONS))
 UNARMED_MAV_ENVIRONMENT_VERSIONS = frozenset((UNARMED_MAV_ENVIRONMENT_VERSION, SUPPORT_MAV_ENVIRONMENT_VERSION, *CAP_ENVIRONMENT_VERSIONS))
 ROLE_REWARD_MODES = frozenset(("heterogeneous_role_v1", "heterogeneous_role_coupled_v1", "heterogeneous_role_coupled_gate_v1"))
-NON_SHAPING_REWARD_MODES = ROLE_REWARD_MODES | {"clean_combat_v1"}
+NON_SHAPING_REWARD_MODES = ROLE_REWARD_MODES | {"clean_combat_v1", CHEN_MODE}
 SUPPORTED_ENVIRONMENT_VERSIONS = frozenset((ENVIRONMENT_VERSION, CURRENT_ENVIRONMENT_VERSION, ROLE_ENVIRONMENT_VERSION, COUPLED_ROLE_ENVIRONMENT_VERSION, GLOBAL_ROLE_ENVIRONMENT_VERSION, *UNARMED_MAV_ENVIRONMENT_VERSIONS))
 OBS_DIM = 100
 GLOBAL_STATE_DIM = 117
@@ -74,6 +76,8 @@ def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
     allowed = expected | {"shaping", "role_reward"}
     if config.get("environment_version") == CLEAN_ENVIRONMENT_VERSION:
         allowed.add("clean_reward")
+    if config.get("environment_version") == CHEN_VERSION:
+        allowed.add("chen_reward")
     if not expected <= set(config) or not set(config) <= allowed:
         raise ValueError(f"config keys must be {sorted(expected)} with optional shaping, got {sorted(config)}")
     cfg = deepcopy(dict(config))
@@ -189,6 +193,13 @@ def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("v3.8 role_reward must match the frozen heterogeneous_role_coupled_v1 contract")
         if float(cfg["reward"]["blue_kill"]) != 100.0:
             raise ValueError("v3.8 blue_kill must be +100")
+    elif cfg["environment_version"] == CHEN_VERSION:
+        if shaping is not None or "role_reward" in cfg or cfg.get("chen_reward") != CHEN_CONFIG:
+            raise ValueError("v3.15 requires frozen chen_heterogeneous_v1 contract")
+        if any(float(value) != 0 for value in cfg["reward"].values()):
+            raise ValueError("v3.15 disables all legacy event/terminal rewards")
+        if float(cfg["safety"]["red_safe_distance_penalty"]) != 0.0:
+            raise ValueError("v3.15 safety penalty must be zero")
     elif cfg["environment_version"] == CLEAN_ENVIRONMENT_VERSION:
         frozen = {"mode": "clean_combat_v1", "guide_target": "nearest_team_visible",
                   "guide_ata_deg": 30.0, "far_guide_reward": .01,
@@ -292,6 +303,9 @@ class HeterogeneousMAVUAVAirCombatEnv:
         self._terminal_reward_sum = 0.0
         self._safety_reward_sum = 0.0
         self._clean_guide_sum = 0.0
+        self._chen_seen_blue_kills = set()
+        self._chen_mav_contribution = 0.0
+        self._chen_local_sums = {aid: 0.0 for aid in RED_IDS}
         self._role_process_sums = {aid: 0.0 for aid in RED_IDS}
         self._reward_target_previous = {aid: None for aid in RED_IDS[1:]}
         self._reward_target_switches = {aid: 0 for aid in RED_IDS[1:]}
@@ -311,6 +325,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
             CAP_ENVIRONMENT_VERSION: "heterogeneous_role_coupled_gate_v1",
             SINGLE_LOCK_ENVIRONMENT_VERSION: "heterogeneous_role_coupled_gate_v1",
             CLEAN_ENVIRONMENT_VERSION: "clean_combat_v1",
+            CHEN_VERSION: CHEN_MODE,
         }
         self.reward_mode = role_modes.get(self.config["environment_version"], str(shaping.get("mode", "absolute")))
         self.shaping_gamma = float(shaping.get("gamma", 0.0))
@@ -379,6 +394,9 @@ class HeterogeneousMAVUAVAirCombatEnv:
         self._terminal_reward_sum = 0.0
         self._safety_reward_sum = 0.0
         self._clean_guide_sum = 0.0
+        self._chen_seen_blue_kills = set()
+        self._chen_mav_contribution = 0.0
+        self._chen_local_sums = {aid: 0.0 for aid in RED_IDS}
         self._role_process_sums = {aid: 0.0 for aid in RED_IDS}
         self._reward_target_previous = {aid: None for aid in RED_IDS[1:]}
         self._reward_target_switches = {aid: 0 for aid in RED_IDS[1:]}
@@ -449,6 +467,8 @@ class HeterogeneousMAVUAVAirCombatEnv:
         death_causes = self._apply_boundaries()
         # Snapshot after boundary handling, before simultaneous combat deaths.
         clean_guides = self._clean_guide_rewards() if self.reward_mode == "clean_combat_v1" else {}
+        chen_dense = self._chen_dense_rewards() if self.reward_mode == CHEN_MODE else {}
+        chen_mav_alive = self.entities["MAV"].state.alive
         attack_events, attack_deaths = self._resolve_attacks()
         death_causes.update(attack_deaths)
         self.step_count += 1
@@ -470,7 +490,15 @@ class HeterogeneousMAVUAVAirCombatEnv:
         if outcome == "red": terminal = float(reward_cfg["terminal_red_win"])
         elif outcome == "blue": terminal = float(reward_cfg["terminal_blue_win"])
         elif outcome == "draw": terminal = float(reward_cfg["terminal_draw"])
-        if self.reward_mode == "clean_combat_v1":
+        if self.reward_mode == CHEN_MODE:
+            local, role_diagnostics = self._chen_rewards(chen_dense, attack_events, death_causes, chen_mav_alive)
+            team_reward = float(sum(local.values()) / 4.0)
+            rewards = {aid: team_reward for aid in RED_IDS}
+            event = float(sum(role_diagnostics[f"{aid.lower()}_r_event"] for aid in RED_IDS) / 4.0)
+            terminal = 0.0
+            for aid in RED_IDS:
+                self._chen_local_sums[aid] += local[aid]
+        elif self.reward_mode == "clean_combat_v1":
             team_guide = float(sum(v["reward"] for v in clean_guides.values()) / 3.0)
             team_reward = float(event + terminal + team_guide)
             rewards = {aid: team_reward for aid in RED_IDS}
@@ -521,6 +549,85 @@ class HeterogeneousMAVUAVAirCombatEnv:
         if not all(np.isfinite(v) for v in rewards.values()) or not np.isfinite(team_reward) or not all(np.all(np.isfinite(v)) for v in observations.values()) or not np.all(np.isfinite(self.global_state())):
             raise FloatingPointError("environment produced non-finite output")
         return observations, rewards, terminated, truncated, info
+
+    def _chen_dense_rewards(self) -> dict[str, dict[str, Any]]:
+        """Post-boundary/pre-combat snapshot, using only allowed sensor visibility."""
+        diagnostics = {}
+        mav = self.entities["MAV"].state
+        visible = [bid for bid in BLUE_IDS if self.entities[bid].state.alive and self.direct_visible("MAV", bid)]
+        distances = [compute_pairwise_geometry(mav, self.entities[bid].state).distance for bid in visible]
+        cfg = self.config["chen_reward"]["mav"]
+        rd = mav_distance_reward(min(distances) if distances else None,
+                                 cfg["danger_distance"], cfg["safe_distance"]) if mav.alive else 0.0
+        aspect = 0.0
+        if mav.alive:
+            for bid in visible:
+                ta = compute_pairwise_geometry(self.entities[bid].state, mav).ata
+                if ta < np.pi / 4:
+                    aspect -= 1.0 - ta / (np.pi / 4)
+        diagnostics.update(mav_r_dist=rd, mav_r_threat=0.0, mav_r_aspect=float(aspect),
+                           mav_r_pos=0.0, mav_r_aware=0.0,
+                           mav_r_safety=float(.5 * rd + .2 * aspect), mav_r_support=0.0)
+        eligible = [bid for bid in BLUE_IDS if self.entities[bid].state.alive and self.team_visible(bid)]
+        for aid in RED_IDS[1:]:
+            own = self.entities[aid].state
+            candidates = []
+            if own.alive:
+                for bid in eligible:
+                    blue = self.entities[bid].state
+                    geometry = compute_pairwise_geometry(own, blue)
+                    score = situation_score(geometry, own, blue, self.config["normalization"],
+                                            self.config["combat"]["distance"][1])
+                    candidates.append((score, -BLUE_IDS.index(bid), bid, geometry))
+            target, score, rs, ra, rd = None, 0.0, 0.0, 0.0, 0.0
+            if candidates:
+                score, _, target, geometry = max(candidates, key=lambda entry: entry[:2])
+                rs = speed_reward(own.v, self.entities[target].state.v)
+                ra = angle_reward(geometry.ata, geometry.aa)
+                rd = distance_reward(geometry.distance)
+            prefix = aid.lower()
+            diagnostics.update({f"{prefix}_reward_target": target, f"{prefix}_situation_score": score,
+                                f"{prefix}_r_speed": rs, f"{prefix}_r_angle": ra,
+                                f"{prefix}_r_distance": rd, f"{prefix}_r_height": 0.0,
+                                f"{prefix}_r_dodge": 0.0})
+        return diagnostics
+
+    def _chen_rewards(self, dense, attack_events, death_causes, mav_alive_before_combat):
+        """Attribute actual synchronous attack events; count each Blue once for MAV.
+
+        Simultaneous valid co-attackers each receive their own actual attack-event
+        credit. Duplicate events for the same (UAV, Blue) are never paid twice.
+        No killer is guessed from distance; no shared terminal reward is injected.
+        """
+        diagnostics = dict(dense)
+        new_kills = {bid for bid, cause in death_causes.items()
+                     if bid in BLUE_IDS and cause == "red_attack"} - self._chen_seen_blue_kills
+        valid_events = {(event["attacker"], event["target"]) for event in attack_events
+                        if event["attacker"] in RED_IDS[1:] and event["target"] in new_kills}
+        mc = self.config["chen_reward"]["mav"]
+        contribution = 0.0
+        if mav_alive_before_combat:
+            contribution = min(mc["contribution_cap"] - self._chen_mav_contribution,
+                               len(new_kills) * mc["kill_contribution"])
+            self._chen_mav_contribution += contribution
+        self._chen_seen_blue_kills.update(new_kills)
+        mev = contribution - mc["death_penalty"] * int("MAV" in death_causes)
+        local = {"MAV": diagnostics["mav_r_safety"] + diagnostics["mav_r_support"] + mev}
+        diagnostics.update(mav_r_event=float(mev), mav_team_contribution_cumulative=self._chen_mav_contribution)
+        uc = self.config["chen_reward"]["uav"]
+        for aid in RED_IDS[1:]:
+            p = aid.lower()
+            kill = uc["kill_reward"] * sum(attacker == aid for attacker, _ in valid_events)
+            combat = uc["combat_loss"] if death_causes.get(aid) == "blue_attack" else 0.0
+            boundary = uc["boundary_loss"] if death_causes.get(aid) == "boundary" else 0.0
+            event = float(kill + combat + boundary)
+            local[aid] = float(uc["speed_weight"] * diagnostics[f"{p}_r_speed"]
+                               + uc["angle_weight"] * diagnostics[f"{p}_r_angle"]
+                               + uc["distance_weight"] * diagnostics[f"{p}_r_distance"] + event)
+            diagnostics.update({f"{p}_r_event": event, f"{p}_kill_event": float(kill),
+                                f"{p}_combat_loss_event": float(combat), f"{p}_boundary_loss_event": float(boundary)})
+        diagnostics.update({f"{aid.lower()}_reward_local": float(value) for aid, value in local.items()})
+        return local, diagnostics
 
     def _clean_guide_rewards(self) -> dict[str, dict[str, Any]]:
         """Nearest visible-target guide, evaluated on the pre-combat snapshot."""
@@ -614,7 +721,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
             return None
         g = compute_pairwise_geometry(self.entities[attacker_id].state, self.entities[target_id].state)
         c = self.config["combat"]
-        lower_ok = g.distance > 0.0 if self.config["environment_version"] == CLEAN_ENVIRONMENT_VERSION else c["distance"][0] <= g.distance
+        lower_ok = g.distance > 0.0 if self.config["environment_version"] in (CLEAN_ENVIRONMENT_VERSION, CHEN_VERSION) else c["distance"][0] <= g.distance
         return g if (lower_ok and g.distance <= c["distance"][1]
                      and g.ata < np.deg2rad(c["ata_deg"]) and g.aa < np.deg2rad(c["aa_deg"])) else None
 
@@ -809,6 +916,8 @@ class HeterogeneousMAVUAVAirCombatEnv:
             "terminal_reward_sum": float(self._terminal_reward_sum),
             "safety_reward_sum": float(self._safety_reward_sum),
             **({"team_guide_reward_sum": self._clean_guide_sum} if self.reward_mode == "clean_combat_v1" else {}),
+            **({"chen_local_reward_sums": dict(self._chen_local_sums),
+                "mav_team_contribution_cumulative": self._chen_mav_contribution} if self.reward_mode == CHEN_MODE else {}),
             **({
                 "mav_process_reward_sum": self._role_process_sums["MAV"],
                 **{f"{aid.lower()}_process_reward_sum": self._role_process_sums[aid] for aid in RED_IDS[1:]},

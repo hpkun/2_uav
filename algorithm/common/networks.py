@@ -34,6 +34,16 @@ class GaussianActor(nn.Module):
         log_probs = distribution.log_prob(raw) - torch.log(1.0 - clipped.square() + self.epsilon)
         return log_probs.sum(dim=-1), distribution.entropy().sum(dim=-1)
 
+    def sample_with_raw(self, observations: torch.Tensor, deterministic: bool = False):
+        """v3.15: store latent u; bounded actions alone cannot preserve saturated u."""
+        distribution = self._distribution(observations)
+        raw = distribution.mean if deterministic else distribution.rsample()
+        return raw.tanh(), raw, distribution.log_prob(raw).sum(dim=-1)
+
+    def evaluate_raw_actions(self, observations: torch.Tensor, raw_actions: torch.Tensor):
+        distribution = self._distribution(observations)
+        return distribution.log_prob(raw_actions).sum(dim=-1), distribution.entropy().sum(dim=-1)
+
 
 class CentralizedCritic(nn.Module):
     def __init__(self, state_dim: int = GLOBAL_STATE_DIM, hidden_dim: int = 128) -> None:
