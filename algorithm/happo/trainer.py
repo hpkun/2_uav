@@ -11,7 +11,7 @@ from torch import nn
 from algorithm.common.buffer import RolloutBuffer
 from algorithm.common.networks import CentralizedCritic
 from env.vector_env import MAVUAVVectorEnv
-from env.mavuav import ENVIRONMENT_VERSION, GLOBAL_STATE_DIM, OBS_DIM, RED_IDS, ROLE_REWARD_MODES, load_environment_config
+from env.mavuav import ENVIRONMENT_VERSION, GLOBAL_STATE_DIM, OBS_DIM, RED_IDS, ROLE_REWARD_MODES, NON_SHAPING_REWARD_MODES, load_environment_config
 from algorithm.modules.hrta import HRTAIndependentActors
 from algorithm.modules.structured_uniform import StructuredUniformIndependentActors
 from algorithm.modules.pcta import PCTAIndependentActors, pursuit_consistency
@@ -183,7 +183,8 @@ def _restore_cuda_rng_state(states: list[torch.Tensor] | None) -> None:
 def _resolved_reward_mode(environment_config: Mapping[str, Any]) -> str:
     version = environment_config["environment_version"]
     shaping_mode = str(environment_config.get("shaping", {}).get("mode", "absolute"))
-    return ("heterogeneous_role_v1" if version.endswith("v3_7") else
+    return ("clean_combat_v1" if version.endswith("v3_14") else
+                "heterogeneous_role_v1" if version.endswith("v3_7") else
             "heterogeneous_role_coupled_v1" if version.endswith("v3_8") else
             "heterogeneous_role_coupled_gate_v1" if version.endswith(("v3_9", "v3_10", "v3_11", "v3_12", "v3_13")) else
             shaping_mode)
@@ -276,9 +277,9 @@ class HAPPOTrainer:
         shaping = self.environment_config.get("shaping", {})
         self.reward_shaping_mode = str(shaping.get("mode", "absolute"))
         version = self.environment_config["environment_version"]
-        if version == "heterogeneous_mavuav_4v4_v3_13":
+        if version in ("heterogeneous_mavuav_4v4_v3_13", "heterogeneous_mavuav_4v4_v3_14"):
             if (c["actor_variant"], c["critic_variant"], c["method_variant"]) != ("vanilla", "mlp", "baseline"):
-                raise ValueError("v3.13 is open only to vanilla HAPPO with mlp critic and baseline method")
+                raise ValueError("v3.13/v3.14 is open only to vanilla HAPPO with mlp critic and baseline method")
             self.combat_capability_metadata["weapon_engagement_mode"] = "single_target_lock"
         self.reward_mode = _resolved_reward_mode(self.environment_config)
         declared_role_reward_mode = self.environment_config.get("role_reward", {}).get("mode")
@@ -2512,7 +2513,7 @@ class HAPPOTrainer:
 
     def save(self, path: str | Path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        payload = {"environment_version": self.environment_config["environment_version"], "environment_profile": self.config["environment_profile"], "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM, "actor_variant": self.config["actor_variant"], "critic_variant": self.config["critic_variant"], "method_variant": self.config["method_variant"], "reward_mode": self.reward_mode, "reward_shaping_mode": self.reward_shaping_mode if self.reward_mode not in ROLE_REWARD_MODES else None, "shaping_gamma": self.shaping_gamma if self.reward_mode not in ROLE_REWARD_MODES else None, "training_gamma": float(self.config["gamma"]), "actor_architecture": self.actor_architecture, "actor_parameter_counts": self.actor_parameter_counts, "critic_architecture": self.critic_architecture, "critic_parameter_count": self.critic_parameter_count, "environment_config": deepcopy(self.environment_config), "actors": self.actors.state_dict(), "critic": self.critic.state_dict(), "config": self.config}
+        payload = {"environment_version": self.environment_config["environment_version"], "environment_profile": self.config["environment_profile"], "observation_dim": OBS_DIM, "global_state_dim": GLOBAL_STATE_DIM, "actor_variant": self.config["actor_variant"], "critic_variant": self.config["critic_variant"], "method_variant": self.config["method_variant"], "reward_mode": self.reward_mode, "reward_shaping_mode": self.reward_shaping_mode if self.reward_mode not in NON_SHAPING_REWARD_MODES else None, "shaping_gamma": self.shaping_gamma if self.reward_mode not in NON_SHAPING_REWARD_MODES else None, "training_gamma": float(self.config["gamma"]), "actor_architecture": self.actor_architecture, "actor_parameter_counts": self.actor_parameter_counts, "critic_architecture": self.critic_architecture, "critic_parameter_count": self.critic_parameter_count, "environment_config": deepcopy(self.environment_config), "actors": self.actors.state_dict(), "critic": self.critic.state_dict(), "config": self.config}
         payload.update(self.pcta_metadata)
         payload.update(self.credit_metadata)
         payload.update(self.tam_metadata)
@@ -2581,9 +2582,9 @@ class HAPPOTrainer:
             "actor_variant": self.config["actor_variant"],
             "critic_variant": self.config["critic_variant"],
             "method_variant": self.config["method_variant"],
-            "reward_shaping_mode": self.reward_shaping_mode if self.reward_mode not in ROLE_REWARD_MODES else None,
+            "reward_shaping_mode": self.reward_shaping_mode if self.reward_mode not in NON_SHAPING_REWARD_MODES else None,
             "reward_mode": self.reward_mode,
-            "shaping_gamma": self.shaping_gamma if self.reward_mode not in ROLE_REWARD_MODES else None,
+            "shaping_gamma": self.shaping_gamma if self.reward_mode not in NON_SHAPING_REWARD_MODES else None,
             "training_gamma": float(self.config["gamma"]),
             "agp_lambda": float(self.config["agp_lambda"]),
             "actor_architecture": self.actor_architecture,
@@ -2708,7 +2709,7 @@ class HAPPOTrainer:
         if actual != expected:
             raise RuntimeError("incompatible checkpoint contract for HAPPO environment")
         for field, value in self.combat_capability_metadata.items():
-            if field in data or self.environment_config["environment_version"].endswith(("v3_10", "v3_11", "v3_12", "v3_13")):
+            if field in data or self.environment_config["environment_version"].endswith(("v3_10", "v3_11", "v3_12", "v3_13", "v3_14")):
                 if data.get(field) != value:
                     raise RuntimeError(f"incompatible checkpoint combat capability contract: {field}")
         checkpoint_mode = data.get("reward_mode", data.get("reward_shaping_mode", "absolute"))
@@ -3059,9 +3060,9 @@ class HAPPOTrainer:
             raise RuntimeError("incompatible HAPPO checkpoint reward shaping contract")
         self._validate_actor_architecture(data)
         self._validate_critic_architecture(data)
-        if self.environment_config["environment_version"] == "heterogeneous_mavuav_4v4_v3_13":
+        if self.environment_config["environment_version"] in ("heterogeneous_mavuav_4v4_v3_13", "heterogeneous_mavuav_4v4_v3_14"):
             if data.get("weapon_engagement_mode") != "single_target_lock":
-                raise RuntimeError("incompatible v3.13 weapon engagement mode")
+                raise RuntimeError("incompatible v3.13/v3.14 weapon engagement mode")
         if self.is_eram:
             validate_eram_metadata(data, self.config)
             if data.get("critic_architecture") != self.critic_architecture:

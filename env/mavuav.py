@@ -42,9 +42,12 @@ UNARMED_MAV_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_10"
 SUPPORT_MAV_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_11"
 CAP_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_12"
 SINGLE_LOCK_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_13"
-CAP_ENVIRONMENT_VERSIONS = frozenset((CAP_ENVIRONMENT_VERSION, SINGLE_LOCK_ENVIRONMENT_VERSION))
+CLEAN_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_14"
+SINGLE_LOCK_ENVIRONMENT_VERSIONS = frozenset((SINGLE_LOCK_ENVIRONMENT_VERSION, CLEAN_ENVIRONMENT_VERSION))
+CAP_ENVIRONMENT_VERSIONS = frozenset((CAP_ENVIRONMENT_VERSION, *SINGLE_LOCK_ENVIRONMENT_VERSIONS))
 UNARMED_MAV_ENVIRONMENT_VERSIONS = frozenset((UNARMED_MAV_ENVIRONMENT_VERSION, SUPPORT_MAV_ENVIRONMENT_VERSION, *CAP_ENVIRONMENT_VERSIONS))
 ROLE_REWARD_MODES = frozenset(("heterogeneous_role_v1", "heterogeneous_role_coupled_v1", "heterogeneous_role_coupled_gate_v1"))
+NON_SHAPING_REWARD_MODES = ROLE_REWARD_MODES | {"clean_combat_v1"}
 SUPPORTED_ENVIRONMENT_VERSIONS = frozenset((ENVIRONMENT_VERSION, CURRENT_ENVIRONMENT_VERSION, ROLE_ENVIRONMENT_VERSION, COUPLED_ROLE_ENVIRONMENT_VERSION, GLOBAL_ROLE_ENVIRONMENT_VERSION, *UNARMED_MAV_ENVIRONMENT_VERSIONS))
 OBS_DIM = 100
 GLOBAL_STATE_DIM = 117
@@ -69,6 +72,8 @@ def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
         "randomization_profiles", "sensing", "normalization", "safety", "combat", "reward", "blue_policy",
     }
     allowed = expected | {"shaping", "role_reward"}
+    if config.get("environment_version") == CLEAN_ENVIRONMENT_VERSION:
+        allowed.add("clean_reward")
     if not expected <= set(config) or not set(config) <= allowed:
         raise ValueError(f"config keys must be {sorted(expected)} with optional shaping, got {sorted(config)}")
     cfg = deepcopy(dict(config))
@@ -129,12 +134,12 @@ def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
         if cfg["environment_version"] in UNARMED_MAV_ENVIRONMENT_VERSIONS
         else legacy_combat_fields
     )
-    if cfg["environment_version"] == SINGLE_LOCK_ENVIRONMENT_VERSION:
+    if cfg["environment_version"] in SINGLE_LOCK_ENVIRONMENT_VERSIONS:
         expected_combat_fields |= {"weapon_engagement_mode"}
     if set(combat) != expected_combat_fields:
         raise ValueError("combat has unknown or missing fields")
-    if cfg["environment_version"] == SINGLE_LOCK_ENVIRONMENT_VERSION and combat["weapon_engagement_mode"] != "single_target_lock":
-        raise ValueError("v3.13 requires combat.weapon_engagement_mode='single_target_lock'")
+    if cfg["environment_version"] in SINGLE_LOCK_ENVIRONMENT_VERSIONS and combat["weapon_engagement_mode"] != "single_target_lock":
+        raise ValueError("v3.13/v3.14 requires combat.weapon_engagement_mode='single_target_lock'")
     if cfg["environment_version"] in UNARMED_MAV_ENVIRONMENT_VERSIONS and combat["mav_can_attack"] is not False:
         raise ValueError("v3.10/v3.11 combat.mav_can_attack must be false")
     combat["distance"] = _pair(combat["distance"], "combat.distance")
@@ -184,6 +189,14 @@ def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("v3.8 role_reward must match the frozen heterogeneous_role_coupled_v1 contract")
         if float(cfg["reward"]["blue_kill"]) != 100.0:
             raise ValueError("v3.8 blue_kill must be +100")
+    elif cfg["environment_version"] == CLEAN_ENVIRONMENT_VERSION:
+        frozen = {"mode": "clean_combat_v1", "guide_target": "nearest_team_visible",
+                  "guide_ata_deg": 30.0, "far_guide_reward": .01,
+                  "near_guide_reward": .02, "near_distance": 5000.0}
+        if shaping is not None or "role_reward" in cfg or cfg.get("clean_reward") != frozen:
+            raise ValueError("v3.14 requires frozen clean_combat_v1 without legacy shaping/role rewards")
+        if float(cfg["safety"]["red_safe_distance_penalty"]) != 0.0:
+            raise ValueError("v3.14 safety penalty must be zero")
     else:
         if shaping is not None:
             raise ValueError("v3.9/v3.10 must omit PBRS shaping")
@@ -278,6 +291,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
         self._event_reward_sum = 0.0
         self._terminal_reward_sum = 0.0
         self._safety_reward_sum = 0.0
+        self._clean_guide_sum = 0.0
         self._role_process_sums = {aid: 0.0 for aid in RED_IDS}
         self._reward_target_previous = {aid: None for aid in RED_IDS[1:]}
         self._reward_target_switches = {aid: 0 for aid in RED_IDS[1:]}
@@ -296,6 +310,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
             SUPPORT_MAV_ENVIRONMENT_VERSION: "heterogeneous_role_coupled_gate_v1",
             CAP_ENVIRONMENT_VERSION: "heterogeneous_role_coupled_gate_v1",
             SINGLE_LOCK_ENVIRONMENT_VERSION: "heterogeneous_role_coupled_gate_v1",
+            CLEAN_ENVIRONMENT_VERSION: "clean_combat_v1",
         }
         self.reward_mode = role_modes.get(self.config["environment_version"], str(shaping.get("mode", "absolute")))
         self.shaping_gamma = float(shaping.get("gamma", 0.0))
@@ -363,6 +378,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
         self._event_reward_sum = 0.0
         self._terminal_reward_sum = 0.0
         self._safety_reward_sum = 0.0
+        self._clean_guide_sum = 0.0
         self._role_process_sums = {aid: 0.0 for aid in RED_IDS}
         self._reward_target_previous = {aid: None for aid in RED_IDS[1:]}
         self._reward_target_switches = {aid: 0 for aid in RED_IDS[1:]}
@@ -378,7 +394,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
         return self._observations(), {
             "outcome": None, "attack_events": [], "killed_ids": [], "death_causes": {},
             "active_masks": self.active_masks.copy(), "blue_target_strategy": strategy, "profile": self.profile,
-            **(self._weapon_lock_diagnostics() if self.config["environment_version"] == SINGLE_LOCK_ENVIRONMENT_VERSION else {}),
+            **(self._weapon_lock_diagnostics() if self.config["environment_version"] in SINGLE_LOCK_ENVIRONMENT_VERSIONS else {}),
         }
 
     def _action_dict(self, actions: Mapping[str, np.ndarray] | np.ndarray | list[np.ndarray]) -> dict[str, np.ndarray]:
@@ -412,7 +428,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
     def step(self, actions: Mapping[str, np.ndarray] | np.ndarray | list[np.ndarray]):
         if not self._running:
             raise RuntimeError("reset() must be called before step()")
-        potential_prev = self._team_situation_reward() if self.reward_mode not in ROLE_REWARD_MODES else 0.0
+        potential_prev = self._team_situation_reward() if self.reward_mode not in NON_SHAPING_REWARD_MODES else 0.0
         red_actions = self._action_dict(actions)
         red_entities = {aid: self.entities[aid] for aid in RED_IDS}
         all_actions = dict(red_actions)
@@ -431,6 +447,8 @@ class HeterogeneousMAVUAVAirCombatEnv:
                 if entity.state.alive:
                     entity.state = rk4_step(entity.state, commands[aid], self.physics_dt, entity.spec)
         death_causes = self._apply_boundaries()
+        # Snapshot after boundary handling, before simultaneous combat deaths.
+        clean_guides = self._clean_guide_rewards() if self.reward_mode == "clean_combat_v1" else {}
         attack_events, attack_deaths = self._resolve_attacks()
         death_causes.update(attack_deaths)
         self.step_count += 1
@@ -439,7 +457,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
         safety_violation = minimum_friendly_distance < float(safety_cfg["red_safe_distance"])
         safety_reward = float(safety_cfg["red_safe_distance_penalty"]) if safety_violation else 0.0
         terminated, truncated, outcome = self._termination()
-        situation = self._team_situation_reward() if self.reward_mode not in ROLE_REWARD_MODES else 0.0
+        situation = self._team_situation_reward() if self.reward_mode not in NON_SHAPING_REWARD_MODES else 0.0
         done = terminated or truncated
         potential_next_effective, potential_shaping = potential_shaping_reward(
             potential_prev, situation, self.shaping_gamma, done,
@@ -452,7 +470,15 @@ class HeterogeneousMAVUAVAirCombatEnv:
         if outcome == "red": terminal = float(reward_cfg["terminal_red_win"])
         elif outcome == "blue": terminal = float(reward_cfg["terminal_blue_win"])
         elif outcome == "draw": terminal = float(reward_cfg["terminal_draw"])
-        if self.reward_mode in ROLE_REWARD_MODES:
+        if self.reward_mode == "clean_combat_v1":
+            team_guide = float(sum(v["reward"] for v in clean_guides.values()) / 3.0)
+            team_reward = float(event + terminal + team_guide)
+            rewards = {aid: team_reward for aid in RED_IDS}
+            role_diagnostics = {"team_guide_reward": team_guide,
+                                **{f"{aid.lower()}_guide_{key}": value
+                                   for aid, guide in clean_guides.items() for key, value in guide.items()}}
+            self._clean_guide_sum += team_guide
+        elif self.reward_mode in ROLE_REWARD_MODES:
             role_process, role_diagnostics = self._role_process_rewards()
             shared = float(event + terminal + safety_reward)
             rewards = {aid: float(role_process[aid] + shared) for aid in RED_IDS}
@@ -487,7 +513,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
             "absolute_situation": float(situation), "team_reward": float(team_reward),
             **role_diagnostics,
         }
-        if self.config["environment_version"] == SINGLE_LOCK_ENVIRONMENT_VERSION:
+        if self.config["environment_version"] in SINGLE_LOCK_ENVIRONMENT_VERSIONS:
             info.update(self._weapon_lock_diagnostics())
         if terminated or truncated:
             info["episode_summary"] = self._episode_summary(outcome)
@@ -495,6 +521,21 @@ class HeterogeneousMAVUAVAirCombatEnv:
         if not all(np.isfinite(v) for v in rewards.values()) or not np.isfinite(team_reward) or not all(np.all(np.isfinite(v)) for v in observations.values()) or not np.all(np.isfinite(self.global_state())):
             raise FloatingPointError("environment produced non-finite output")
         return observations, rewards, terminated, truncated, info
+
+    def _clean_guide_rewards(self) -> dict[str, dict[str, Any]]:
+        """Nearest visible-target guide, evaluated on the pre-combat snapshot."""
+        cfg = self.config["clean_reward"]
+        visible = [bid for bid in BLUE_IDS if self.entities[bid].state.alive and self.team_visible(bid)]
+        result = {}
+        for aid in RED_IDS[1:]:
+            target, reward = None, 0.0
+            if self.entities[aid].state.alive and visible:
+                pairs = [(compute_pairwise_geometry(self.entities[aid].state, self.entities[bid].state), bid) for bid in visible]
+                geometry, target = min(pairs, key=lambda pair: (pair[0].distance, BLUE_IDS.index(pair[1])))
+                if geometry.ata < np.deg2rad(cfg["guide_ata_deg"]):
+                    reward = float(cfg["near_guide_reward"] if geometry.distance <= cfg["near_distance"] else cfg["far_guide_reward"])
+            result[aid] = {"target": target, "reward": reward}
+        return result
 
     def _minimum_friendly_red_distance(self) -> float:
         alive = [self.entities[aid] for aid in RED_IDS if self.entities[aid].state.alive]
@@ -532,7 +573,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
         return deaths
 
     def _resolve_attacks(self) -> tuple[list[dict[str, str]], dict[str, str]]:
-        if self.config["environment_version"] == SINGLE_LOCK_ENVIRONMENT_VERSION:
+        if self.config["environment_version"] in SINGLE_LOCK_ENVIRONMENT_VERSIONS:
             return self._resolve_single_lock_attacks()
         combat = self.config["combat"]
         pairs: list[tuple[str, str]] = []
@@ -573,7 +614,8 @@ class HeterogeneousMAVUAVAirCombatEnv:
             return None
         g = compute_pairwise_geometry(self.entities[attacker_id].state, self.entities[target_id].state)
         c = self.config["combat"]
-        return g if (c["distance"][0] <= g.distance <= c["distance"][1]
+        lower_ok = g.distance > 0.0 if self.config["environment_version"] == CLEAN_ENVIRONMENT_VERSION else c["distance"][0] <= g.distance
+        return g if (lower_ok and g.distance <= c["distance"][1]
                      and g.ata < np.deg2rad(c["ata_deg"]) and g.aa < np.deg2rad(c["aa_deg"])) else None
 
     def _acquire_weapon_lock(self, attacker_id: str, targets: tuple[str, ...]) -> str | None:
@@ -757,15 +799,16 @@ class HeterogeneousMAVUAVAirCombatEnv:
             "mav_loss": int(not self.entities["MAV"].state.alive),
             "blue_target_strategy": self.blue_policy.TARGET_STRATEGY, "episode_return": float(self.episode_return),
             "environment_version": self.config["environment_version"],
-            **(self._weapon_lock_diagnostics() if self.config["environment_version"] == SINGLE_LOCK_ENVIRONMENT_VERSION else {}),
-            "reward_shaping_mode": self.reward_mode if self.reward_mode not in ROLE_REWARD_MODES else None,
+            **(self._weapon_lock_diagnostics() if self.config["environment_version"] in SINGLE_LOCK_ENVIRONMENT_VERSIONS else {}),
+            "reward_shaping_mode": self.reward_mode if self.reward_mode not in NON_SHAPING_REWARD_MODES else None,
             "reward_mode": self.reward_mode,
-            "shaping_gamma": self.shaping_gamma if self.reward_mode not in ROLE_REWARD_MODES else None,
+            "shaping_gamma": self.shaping_gamma if self.reward_mode not in NON_SHAPING_REWARD_MODES else None,
             "potential_shaping_sum": float(self._potential_shaping_sum),
             "absolute_situation_sum": float(self._absolute_situation_sum),
             "event_reward_sum": float(self._event_reward_sum),
             "terminal_reward_sum": float(self._terminal_reward_sum),
             "safety_reward_sum": float(self._safety_reward_sum),
+            **({"team_guide_reward_sum": self._clean_guide_sum} if self.reward_mode == "clean_combat_v1" else {}),
             **({
                 "mav_process_reward_sum": self._role_process_sums["MAV"],
                 **{f"{aid.lower()}_process_reward_sum": self._role_process_sums[aid] for aid in RED_IDS[1:]},

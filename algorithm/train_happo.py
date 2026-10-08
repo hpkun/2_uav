@@ -26,7 +26,7 @@ from algorithm.happo.trainer import LEGACY_PCTA_FAMILY, PCTA_V2_VARIANT
 from algorithm.happo.dbm_rgaa import DBM_RGAA_METHOD, RGAA_WIDE_METHOD
 from algorithm.happo.tacm_rgaa import TACM_RGAA_METHOD
 from algorithm.happo.evaluation import evaluate_actors, evaluate_recurrent_actors, summarize_records
-from env.mavuav import RED_IDS, ROLE_REWARD_MODES, load_environment_config
+from env.mavuav import RED_IDS, ROLE_REWARD_MODES, NON_SHAPING_REWARD_MODES, load_environment_config
 
 
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "happo.yaml"
@@ -473,10 +473,10 @@ def _evaluation_row(
         "method_variant": trainer.config["method_variant"],
         "environment_version": trainer.environment_config["environment_version"],
         **({"weapon_engagement_mode": trainer.environment_config["combat"]["weapon_engagement_mode"]}
-           if trainer.environment_config["environment_version"].endswith("v3_13") else {}),
+           if trainer.environment_config["environment_version"].endswith(("v3_13", "v3_14")) else {}),
         "reward_mode": trainer.reward_mode,
-        "reward_shaping_mode": trainer.reward_shaping_mode if trainer.reward_mode not in ROLE_REWARD_MODES else None,
-        "shaping_gamma": trainer.shaping_gamma if trainer.reward_mode not in ROLE_REWARD_MODES else None,
+        "reward_shaping_mode": trainer.reward_shaping_mode if trainer.reward_mode not in NON_SHAPING_REWARD_MODES else None,
+        "shaping_gamma": trainer.shaping_gamma if trainer.reward_mode not in NON_SHAPING_REWARD_MODES else None,
         "training_gamma": float(trainer.config["gamma"]),
         "seed": seed, "training_seed": seed,
         "blue_target_strategy": trainer.environment_config.get("blue_policy", {}).get("target_strategy", "nearest_red_aircraft"), "training_profile": trainer.config["environment_profile"],
@@ -662,10 +662,10 @@ def _initial_resolved(
         "method_variant": trainer.config["method_variant"],
         "environment_version": env_config["environment_version"],
         **({"weapon_engagement_mode": env_config["combat"]["weapon_engagement_mode"]}
-           if env_config["environment_version"].endswith("v3_13") else {}),
+           if env_config["environment_version"].endswith(("v3_13", "v3_14")) else {}),
         "reward_mode": trainer.reward_mode,
-        "reward_shaping_mode": trainer.reward_shaping_mode if trainer.reward_mode not in ROLE_REWARD_MODES else None,
-        "shaping_gamma": trainer.shaping_gamma if trainer.reward_mode not in ROLE_REWARD_MODES else None,
+        "reward_shaping_mode": trainer.reward_shaping_mode if trainer.reward_mode not in NON_SHAPING_REWARD_MODES else None,
+        "shaping_gamma": trainer.shaping_gamma if trainer.reward_mode not in NON_SHAPING_REWARD_MODES else None,
         "training_gamma": float(trainer.config["gamma"]),
         "actor_variant": trainer.config["actor_variant"],
         "critic_variant": trainer.config["critic_variant"],
@@ -978,10 +978,10 @@ def main(
             "method_variant": method_variant,
             "environment_version": env_config["environment_version"],
             **({"weapon_engagement_mode": env_config["combat"]["weapon_engagement_mode"]}
-               if env_config["environment_version"].endswith("v3_13") else {}),
+               if env_config["environment_version"].endswith(("v3_13", "v3_14")) else {}),
             "reward_mode": trainer.reward_mode,
-            "reward_shaping_mode": trainer.reward_shaping_mode if trainer.reward_mode not in ROLE_REWARD_MODES else None,
-            "shaping_gamma": trainer.shaping_gamma if trainer.reward_mode not in ROLE_REWARD_MODES else None,
+            "reward_shaping_mode": trainer.reward_shaping_mode if trainer.reward_mode not in NON_SHAPING_REWARD_MODES else None,
+            "shaping_gamma": trainer.shaping_gamma if trainer.reward_mode not in NON_SHAPING_REWARD_MODES else None,
             "training_gamma": float(trainer.config["gamma"]),
             "agp_lambda": float(trainer.config["agp_lambda"]),
             "blue_target_strategy": env_config["blue_policy"]["target_strategy"],
