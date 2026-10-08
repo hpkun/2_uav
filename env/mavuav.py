@@ -41,7 +41,9 @@ GLOBAL_ROLE_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_9"
 UNARMED_MAV_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_10"
 SUPPORT_MAV_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_11"
 CAP_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_12"
-UNARMED_MAV_ENVIRONMENT_VERSIONS = frozenset((UNARMED_MAV_ENVIRONMENT_VERSION, SUPPORT_MAV_ENVIRONMENT_VERSION, CAP_ENVIRONMENT_VERSION))
+SINGLE_LOCK_ENVIRONMENT_VERSION = "heterogeneous_mavuav_4v4_v3_13"
+CAP_ENVIRONMENT_VERSIONS = frozenset((CAP_ENVIRONMENT_VERSION, SINGLE_LOCK_ENVIRONMENT_VERSION))
+UNARMED_MAV_ENVIRONMENT_VERSIONS = frozenset((UNARMED_MAV_ENVIRONMENT_VERSION, SUPPORT_MAV_ENVIRONMENT_VERSION, *CAP_ENVIRONMENT_VERSIONS))
 ROLE_REWARD_MODES = frozenset(("heterogeneous_role_v1", "heterogeneous_role_coupled_v1", "heterogeneous_role_coupled_gate_v1"))
 SUPPORTED_ENVIRONMENT_VERSIONS = frozenset((ENVIRONMENT_VERSION, CURRENT_ENVIRONMENT_VERSION, ROLE_ENVIRONMENT_VERSION, COUPLED_ROLE_ENVIRONMENT_VERSION, GLOBAL_ROLE_ENVIRONMENT_VERSION, *UNARMED_MAV_ENVIRONMENT_VERSIONS))
 OBS_DIM = 100
@@ -127,8 +129,12 @@ def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
         if cfg["environment_version"] in UNARMED_MAV_ENVIRONMENT_VERSIONS
         else legacy_combat_fields
     )
+    if cfg["environment_version"] == SINGLE_LOCK_ENVIRONMENT_VERSION:
+        expected_combat_fields |= {"weapon_engagement_mode"}
     if set(combat) != expected_combat_fields:
         raise ValueError("combat has unknown or missing fields")
+    if cfg["environment_version"] == SINGLE_LOCK_ENVIRONMENT_VERSION and combat["weapon_engagement_mode"] != "single_target_lock":
+        raise ValueError("v3.13 requires combat.weapon_engagement_mode='single_target_lock'")
     if cfg["environment_version"] in UNARMED_MAV_ENVIRONMENT_VERSIONS and combat["mav_can_attack"] is not False:
         raise ValueError("v3.10/v3.11 combat.mav_can_attack must be false")
     combat["distance"] = _pair(combat["distance"], "combat.distance")
@@ -194,7 +200,7 @@ def validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("v3.9/v3.10 blue_kill must be +100")
     if set(cfg["blue_policy"]) != {"target_strategy", "guidance_mode", "target_refresh_steps"}:
         raise ValueError("blue_policy has unknown or missing fields")
-    target_strategy = CAPBluePolicy.TARGET_STRATEGY if cfg["environment_version"] == CAP_ENVIRONMENT_VERSION else BluePolicy.TARGET_STRATEGY
+    target_strategy = CAPBluePolicy.TARGET_STRATEGY if cfg["environment_version"] in CAP_ENVIRONMENT_VERSIONS else BluePolicy.TARGET_STRATEGY
     if cfg["blue_policy"]["target_strategy"] != target_strategy:
         raise ValueError(f"blue_policy.target_strategy must be {target_strategy!r}")
     if cfg["blue_policy"]["guidance_mode"] != BluePolicy.GUIDANCE_MODE:
@@ -257,7 +263,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
         self.profile = profile or str(self.config["scenario"]["default_profile"])
         if self.profile not in self.config["randomization_profiles"]:
             raise ValueError(f"unknown randomization profile: {self.profile}")
-        policy_class = CAPBluePolicy if self.config["environment_version"] == CAP_ENVIRONMENT_VERSION else BluePolicy
+        policy_class = CAPBluePolicy if self.config["environment_version"] in CAP_ENVIRONMENT_VERSIONS else BluePolicy
         self.blue_policy = policy_class(
             self.decision_dt, self.physics_dt, self.config["battlefield"],
             int(self.config["blue_policy"]["target_refresh_steps"]),
@@ -278,6 +284,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
         self._reward_target_none_steps = {aid: 0 for aid in RED_IDS[1:]}
         self._running = False
         self._attack_streak: dict[tuple[str, str], int] = {}
+        self.weapon_lock_target: dict[str, str | None] = {aid: None for aid in ENTITY_IDS}
         self._red_attack_kills: set[str] = set()
         self._blue_attack_kills: set[str] = set()
         shaping = self.config.get("shaping", {})
@@ -288,6 +295,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
             UNARMED_MAV_ENVIRONMENT_VERSION: "heterogeneous_role_coupled_gate_v1",
             SUPPORT_MAV_ENVIRONMENT_VERSION: "heterogeneous_role_coupled_gate_v1",
             CAP_ENVIRONMENT_VERSION: "heterogeneous_role_coupled_gate_v1",
+            SINGLE_LOCK_ENVIRONMENT_VERSION: "heterogeneous_role_coupled_gate_v1",
         }
         self.reward_mode = role_modes.get(self.config["environment_version"], str(shaping.get("mode", "absolute")))
         self.shaping_gamma = float(shaping.get("gamma", 0.0))
@@ -360,6 +368,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
         self._reward_target_switches = {aid: 0 for aid in RED_IDS[1:]}
         self._reward_target_none_steps = {aid: 0 for aid in RED_IDS[1:]}
         self._attack_streak.clear()
+        self.weapon_lock_target = {aid: None for aid in ENTITY_IDS}
         self._red_attack_kills.clear()
         self._blue_attack_kills.clear()
         self._running = True
@@ -369,6 +378,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
         return self._observations(), {
             "outcome": None, "attack_events": [], "killed_ids": [], "death_causes": {},
             "active_masks": self.active_masks.copy(), "blue_target_strategy": strategy, "profile": self.profile,
+            **(self._weapon_lock_diagnostics() if self.config["environment_version"] == SINGLE_LOCK_ENVIRONMENT_VERSION else {}),
         }
 
     def _action_dict(self, actions: Mapping[str, np.ndarray] | np.ndarray | list[np.ndarray]) -> dict[str, np.ndarray]:
@@ -477,6 +487,8 @@ class HeterogeneousMAVUAVAirCombatEnv:
             "absolute_situation": float(situation), "team_reward": float(team_reward),
             **role_diagnostics,
         }
+        if self.config["environment_version"] == SINGLE_LOCK_ENVIRONMENT_VERSION:
+            info.update(self._weapon_lock_diagnostics())
         if terminated or truncated:
             info["episode_summary"] = self._episode_summary(outcome)
         observations = self._observations()
@@ -520,6 +532,8 @@ class HeterogeneousMAVUAVAirCombatEnv:
         return deaths
 
     def _resolve_attacks(self) -> tuple[list[dict[str, str]], dict[str, str]]:
+        if self.config["environment_version"] == SINGLE_LOCK_ENVIRONMENT_VERSION:
+            return self._resolve_single_lock_attacks()
         combat = self.config["combat"]
         pairs: list[tuple[str, str]] = []
         for attacker_id in ENTITY_IDS:
@@ -550,6 +564,79 @@ class HeterogeneousMAVUAVAirCombatEnv:
             else: self._blue_attack_kills.add(target)
         for key in list(self._attack_streak):
             if key[0] in deaths or key[1] in deaths:
+                self._attack_streak[key] = 0
+        return events, deaths
+
+    def _weapon_gate_geometry(self, attacker_id: str, target_id: str):
+        """No sensor, reward selector or navigation assignment enters weapon eligibility."""
+        if not self.entities[attacker_id].state.alive or not self.entities[target_id].state.alive:
+            return None
+        g = compute_pairwise_geometry(self.entities[attacker_id].state, self.entities[target_id].state)
+        c = self.config["combat"]
+        return g if (c["distance"][0] <= g.distance <= c["distance"][1]
+                     and g.ata < np.deg2rad(c["ata_deg"]) and g.aa < np.deg2rad(c["aa_deg"])) else None
+
+    def _acquire_weapon_lock(self, attacker_id: str, targets: tuple[str, ...]) -> str | None:
+        candidates = []
+        for target_id in targets:
+            g = self._weapon_gate_geometry(attacker_id, target_id)
+            if g is not None:
+                candidates.append((g.ata, g.aa, g.distance, targets.index(target_id), target_id))
+        return min(candidates)[-1] if candidates else None
+
+    def _clear_weapon_lock(self, attacker_id: str) -> None:
+        self.weapon_lock_target[attacker_id] = None
+        for key in list(self._attack_streak):
+            if key[0] == attacker_id:
+                self._attack_streak[key] = 0
+
+    def _weapon_lock_diagnostics(self) -> dict[str, Any]:
+        return {"weapon_engagement_mode": "single_target_lock",
+                "weapon_lock_target": dict(self.weapon_lock_target),
+                "weapon_lock_streak": {aid: self._attack_streak.get((aid, target), 0) if target else 0
+                                       for aid, target in self.weapon_lock_target.items()}}
+
+    def _resolve_single_lock_attacks(self) -> tuple[list[dict[str, str]], dict[str, str]]:
+        """Acquire/update all locks BEFORE synchronous candidate/death resolution.
+
+        Only one full-gate pair per attacker can accumulate. Acquisitions begin
+        at one; no pre-accumulation and no second acquisition after this batch.
+        """
+        candidates = []
+        for attacker_id in ENTITY_IDS:
+            if attacker_id == "MAV" or not self.entities[attacker_id].state.alive:
+                self._clear_weapon_lock(attacker_id)
+                continue
+            targets = BLUE_IDS if attacker_id in RED_IDS else RED_IDS
+            target = self.weapon_lock_target[attacker_id]
+            if target not in targets or self._weapon_gate_geometry(attacker_id, target) is None:
+                self._clear_weapon_lock(attacker_id)
+                target = self._acquire_weapon_lock(attacker_id, targets)
+                self.weapon_lock_target[attacker_id] = target
+                if target is not None:
+                    self._attack_streak[attacker_id, target] = 0
+            for other in targets:
+                if other != target:
+                    self._attack_streak[attacker_id, other] = 0
+            if target is not None:
+                key = attacker_id, target
+                self._attack_streak[key] = self._attack_streak.get(key, 0) + 1
+                if self._attack_streak[key] >= int(self.config["combat"]["hold_steps"]):
+                    candidates.append(key)
+        events = [{"attacker": a, "target": b} for a, b in sorted(candidates)]
+        deaths: dict[str, str] = {}
+        for _, target in candidates:
+            cause = "red_attack" if target in BLUE_IDS else "blue_attack"
+            self._deactivate(target, cause, deaths)
+            if cause == "red_attack": self._red_attack_kills.add(target)
+            else: self._blue_attack_kills.add(target)
+        # Includes boundary deaths applied before combat, dead attackers and
+        # targets killed by a different attacker. Never reacquire during cleanup.
+        for attacker_id, target in self.weapon_lock_target.copy().items():
+            if not self.entities[attacker_id].state.alive or (target is not None and not self.entities[target].state.alive):
+                self._clear_weapon_lock(attacker_id)
+        for key in list(self._attack_streak):
+            if not self.entities[key[0]].state.alive or not self.entities[key[1]].state.alive:
                 self._attack_streak[key] = 0
         return events, deaths
 
@@ -670,6 +757,7 @@ class HeterogeneousMAVUAVAirCombatEnv:
             "mav_loss": int(not self.entities["MAV"].state.alive),
             "blue_target_strategy": self.blue_policy.TARGET_STRATEGY, "episode_return": float(self.episode_return),
             "environment_version": self.config["environment_version"],
+            **(self._weapon_lock_diagnostics() if self.config["environment_version"] == SINGLE_LOCK_ENVIRONMENT_VERSION else {}),
             "reward_shaping_mode": self.reward_mode if self.reward_mode not in ROLE_REWARD_MODES else None,
             "reward_mode": self.reward_mode,
             "shaping_gamma": self.shaping_gamma if self.reward_mode not in ROLE_REWARD_MODES else None,

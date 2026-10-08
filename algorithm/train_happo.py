@@ -472,6 +472,8 @@ def _evaluation_row(
         ),
         "method_variant": trainer.config["method_variant"],
         "environment_version": trainer.environment_config["environment_version"],
+        **({"weapon_engagement_mode": trainer.environment_config["combat"]["weapon_engagement_mode"]}
+           if trainer.environment_config["environment_version"].endswith("v3_13") else {}),
         "reward_mode": trainer.reward_mode,
         "reward_shaping_mode": trainer.reward_shaping_mode if trainer.reward_mode not in ROLE_REWARD_MODES else None,
         "shaping_gamma": trainer.shaping_gamma if trainer.reward_mode not in ROLE_REWARD_MODES else None,
@@ -659,6 +661,8 @@ def _initial_resolved(
         ),
         "method_variant": trainer.config["method_variant"],
         "environment_version": env_config["environment_version"],
+        **({"weapon_engagement_mode": env_config["combat"]["weapon_engagement_mode"]}
+           if env_config["environment_version"].endswith("v3_13") else {}),
         "reward_mode": trainer.reward_mode,
         "reward_shaping_mode": trainer.reward_shaping_mode if trainer.reward_mode not in ROLE_REWARD_MODES else None,
         "shaping_gamma": trainer.shaping_gamma if trainer.reward_mode not in ROLE_REWARD_MODES else None,
@@ -973,6 +977,8 @@ def main(
             "actor_variant": actor_variant, "critic_variant": critic_variant,
             "method_variant": method_variant,
             "environment_version": env_config["environment_version"],
+            **({"weapon_engagement_mode": env_config["combat"]["weapon_engagement_mode"]}
+               if env_config["environment_version"].endswith("v3_13") else {}),
             "reward_mode": trainer.reward_mode,
             "reward_shaping_mode": trainer.reward_shaping_mode if trainer.reward_mode not in ROLE_REWARD_MODES else None,
             "shaping_gamma": trainer.shaping_gamma if trainer.reward_mode not in ROLE_REWARD_MODES else None,

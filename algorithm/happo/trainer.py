@@ -185,7 +185,7 @@ def _resolved_reward_mode(environment_config: Mapping[str, Any]) -> str:
     shaping_mode = str(environment_config.get("shaping", {}).get("mode", "absolute"))
     return ("heterogeneous_role_v1" if version.endswith("v3_7") else
             "heterogeneous_role_coupled_v1" if version.endswith("v3_8") else
-            "heterogeneous_role_coupled_gate_v1" if version.endswith(("v3_9", "v3_10", "v3_11", "v3_12")) else
+            "heterogeneous_role_coupled_gate_v1" if version.endswith(("v3_9", "v3_10", "v3_11", "v3_12", "v3_13")) else
             shaping_mode)
 
 
@@ -276,6 +276,10 @@ class HAPPOTrainer:
         shaping = self.environment_config.get("shaping", {})
         self.reward_shaping_mode = str(shaping.get("mode", "absolute"))
         version = self.environment_config["environment_version"]
+        if version == "heterogeneous_mavuav_4v4_v3_13":
+            if (c["actor_variant"], c["critic_variant"], c["method_variant"]) != ("vanilla", "mlp", "baseline"):
+                raise ValueError("v3.13 is open only to vanilla HAPPO with mlp critic and baseline method")
+            self.combat_capability_metadata["weapon_engagement_mode"] = "single_target_lock"
         self.reward_mode = _resolved_reward_mode(self.environment_config)
         declared_role_reward_mode = self.environment_config.get("role_reward", {}).get("mode")
         if self.is_eram and (
@@ -2704,7 +2708,7 @@ class HAPPOTrainer:
         if actual != expected:
             raise RuntimeError("incompatible checkpoint contract for HAPPO environment")
         for field, value in self.combat_capability_metadata.items():
-            if field in data or self.environment_config["environment_version"].endswith(("v3_10", "v3_11", "v3_12")):
+            if field in data or self.environment_config["environment_version"].endswith(("v3_10", "v3_11", "v3_12", "v3_13")):
                 if data.get(field) != value:
                     raise RuntimeError(f"incompatible checkpoint combat capability contract: {field}")
         checkpoint_mode = data.get("reward_mode", data.get("reward_shaping_mode", "absolute"))
@@ -3043,6 +3047,7 @@ class HAPPOTrainer:
         return self.env_steps
 
     def load(self, path: str | Path) -> None:
+        # v3.13 weights retain the same isolated weapon contract as exact resume.
         data = torch.load(path, map_location=self.device, weights_only=False)
         if (data.get("environment_version"), data.get("observation_dim"), data.get("global_state_dim")) != (self.environment_config["environment_version"], OBS_DIM, GLOBAL_STATE_DIM):
             raise RuntimeError("incompatible HAPPO checkpoint environment contract")
@@ -3054,6 +3059,9 @@ class HAPPOTrainer:
             raise RuntimeError("incompatible HAPPO checkpoint reward shaping contract")
         self._validate_actor_architecture(data)
         self._validate_critic_architecture(data)
+        if self.environment_config["environment_version"] == "heterogeneous_mavuav_4v4_v3_13":
+            if data.get("weapon_engagement_mode") != "single_target_lock":
+                raise RuntimeError("incompatible v3.13 weapon engagement mode")
         if self.is_eram:
             validate_eram_metadata(data, self.config)
             if data.get("critic_architecture") != self.critic_architecture:

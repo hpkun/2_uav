@@ -54,7 +54,7 @@ def validate_checkpoint_contract(payload: dict[str, Any], env_config: dict[str, 
     if actual != expected:
         raise RuntimeError("incompatible HAPPO checkpoint environment contract")
     version = env_config["environment_version"]
-    if version.endswith(("v3_10", "v3_11", "v3_12")):
+    if version.endswith(("v3_10", "v3_11", "v3_12", "v3_13")):
         expected_capability = {
             "mav_direct_attack_capability": False,
             "mav_direct_attack_shaping": "none",
@@ -66,7 +66,7 @@ def validate_checkpoint_contract(payload: dict[str, Any], env_config: dict[str, 
     env_shaping = env_config.get("shaping", {})
     env_mode = ("heterogeneous_role_v1" if version.endswith("v3_7") else
                 "heterogeneous_role_coupled_v1" if version.endswith("v3_8") else
-                "heterogeneous_role_coupled_gate_v1" if version.endswith(("v3_9", "v3_10", "v3_11", "v3_12")) else
+                "heterogeneous_role_coupled_gate_v1" if version.endswith(("v3_9", "v3_10", "v3_11", "v3_12", "v3_13")) else
                 str(env_shaping.get("mode", "absolute")))
     checkpoint_mode = str(payload.get("reward_mode", payload.get("reward_shaping_mode", "absolute")))
     if checkpoint_mode != env_mode:
@@ -81,6 +81,11 @@ def validate_checkpoint_contract(payload: dict[str, Any], env_config: dict[str, 
     method_variant = payload.get(
         "method_variant", trainer_config.get("method_variant", "baseline"),
     )
+    if version == "heterogeneous_mavuav_4v4_v3_13":
+        variants = (payload.get("actor_variant", trainer_config.get("actor_variant", "vanilla")),
+                    payload.get("critic_variant", trainer_config.get("critic_variant", "mlp")), method_variant)
+        if variants != ("vanilla", "mlp", "baseline") or payload.get("weapon_engagement_mode") != "single_target_lock":
+            raise RuntimeError("incompatible v3.13 vanilla single-target weapon contract")
     if method_variant in (DBM_RGAA_METHOD, RGAA_WIDE_METHOD, TACM_RGAA_METHOD):
         if "environment_config" not in payload:
             raise RuntimeError(
@@ -190,7 +195,7 @@ def main(expected_critic_variant: str = "mlp") -> None:
     version = env_config["environment_version"]
     reward_mode = ("heterogeneous_role_v1" if version.endswith("v3_7") else
                    "heterogeneous_role_coupled_v1" if version.endswith("v3_8") else
-                   "heterogeneous_role_coupled_gate_v1" if version.endswith(("v3_9", "v3_10", "v3_11", "v3_12")) else
+                   "heterogeneous_role_coupled_gate_v1" if version.endswith(("v3_9", "v3_10", "v3_11", "v3_12", "v3_13")) else
                    str(env_config.get("shaping", {}).get("mode", "absolute")))
     training_profile = str(payload["environment_profile"])
     rows = []
@@ -232,6 +237,8 @@ def main(expected_critic_variant: str = "mlp") -> None:
             "effective_action_seed": effective_action_seed,
             "action_seed": effective_action_seed,
             "environment_version": env_config["environment_version"],
+            **({"weapon_engagement_mode": env_config["combat"]["weapon_engagement_mode"]}
+               if version.endswith("v3_13") else {}),
             "reward_mode": reward_mode,
             "reward_shaping_mode": reward_mode if reward_mode not in ROLE_REWARD_MODES else None,
             "shaping_gamma": float(env_config.get("shaping", {}).get("gamma", 0.0)) if reward_mode not in ROLE_REWARD_MODES else None,
@@ -261,6 +268,9 @@ def main(expected_critic_variant: str = "mlp") -> None:
             "effective_action_seed": effective_action_seed,
             "action_seed": effective_action_seed,
             "environment_version": env_config["environment_version"],
+            **({"weapon_engagement_mode": env_config["combat"]["weapon_engagement_mode"],
+                "blue_target_strategy": env_config["blue_policy"]["target_strategy"]}
+               if version.endswith("v3_13") else {}),
             "reward_mode": reward_mode,
             "reward_shaping_mode": reward_mode if reward_mode not in ROLE_REWARD_MODES else None,
             "shaping_gamma": float(env_config.get("shaping", {}).get("gamma", 0.0)) if reward_mode not in ROLE_REWARD_MODES else None,

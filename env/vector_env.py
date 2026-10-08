@@ -15,7 +15,7 @@ from .mavuav import HeterogeneousMAVUAVAirCombatEnv, RED_IDS
 
 
 def _environment_state(env: HeterogeneousMAVUAVAirCombatEnv) -> dict[str, Any]:
-    return {
+    state = {
         "entities": deepcopy(env.entities), "step_count": env.step_count,
         "episode_return": env.episode_return, "running": env._running,
         "potential_shaping_sum": env._potential_shaping_sum,
@@ -35,9 +35,24 @@ def _environment_state(env: HeterogeneousMAVUAVAirCombatEnv) -> dict[str, Any]:
         "randomization_override": deepcopy(env.randomization_override),
         "blue_policy_state": deepcopy(env.blue_policy.state_dict()),
     }
+    if env.config["environment_version"] == "heterogeneous_mavuav_4v4_v3_13":
+        state["weapon_lock_target"] = deepcopy(env.weapon_lock_target)
+    return state
 
 
 def _restore_environment_state(env: HeterogeneousMAVUAVAirCombatEnv, state: Mapping[str, Any]) -> None:
+    if env.config["environment_version"] == "heterogeneous_mavuav_4v4_v3_13":
+        locks = state.get("weapon_lock_target")
+        ids = (*env.red_ids, *env.blue_ids)
+        if not isinstance(locks, Mapping) or set(locks) != set(ids) or locks["MAV"] is not None:
+            raise ValueError("v3.13 environment state requires complete weapon_lock_target with unarmed MAV")
+        for aid, target in locks.items():
+            targets = env.blue_ids if aid in env.red_ids else env.red_ids
+            if target is not None and (target not in targets or not state["entities"][aid].state.alive or not state["entities"][target].state.alive):
+                raise ValueError("invalid v3.13 restored weapon lock")
+            if any(value != 0 and key[0] == aid and key[1] != target for key, value in state["attack_streak"].items()):
+                raise ValueError("v3.13 restored streak violates single-target lock")
+        env.weapon_lock_target = deepcopy(dict(locks))
     env.entities = deepcopy(state["entities"])
     env.step_count = int(state["step_count"])
     env.episode_return = float(state["episode_return"])
