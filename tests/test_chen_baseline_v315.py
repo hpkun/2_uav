@@ -153,6 +153,54 @@ def test_simultaneous_own_kill_and_own_combat_loss():
     assert info['uav1_r_event']==0
 
 
+@pytest.mark.parametrize('count', [1,2,3])
+def test_cokill_total_credit_is_200_with_duplicate_events(count):
+    e=scene();d=e._chen_dense_rewards();attackers=RED_IDS[1:1+count]
+    events=[{'attacker':aid,'target':'Blue1'} for aid in attackers]*2
+    _,info=e._chen_rewards(d,events,{'Blue1':'red_attack'},True)
+    for aid in RED_IDS[1:]:
+        assert info[f'{aid.lower()}_kill_event']==pytest.approx(200/count if aid in attackers else 0)
+    assert sum(info[f'{aid.lower()}_kill_event'] for aid in RED_IDS[1:])==pytest.approx(200)
+    assert info['mav_r_event']==50
+    _,again=e._chen_rewards(d,events,{'Blue1':'red_attack'},True)
+    assert all(again[f'{aid.lower()}_kill_event']==0 for aid in RED_IDS[1:])
+    assert again['mav_r_event']==0
+
+
+def test_multiple_unique_blue_kills_share_credit_independently():
+    e=scene();d=e._chen_dense_rewards()
+    events=[{'attacker':'UAV1','target':'Blue1'},
+            {'attacker':'UAV2','target':'Blue1'},
+            {'attacker':'UAV3','target':'Blue2'}]
+    # Neither a MAV event nor an event without a new red-attack Blue death qualifies.
+    events += [{'attacker':'MAV','target':'Blue1'},
+               {'attacker':'UAV3','target':'Blue3'}]
+    _,info=e._chen_rewards(d,events,{'Blue1':'red_attack','Blue2':'red_attack','Blue3':'boundary'},True)
+    assert [info[f'{aid.lower()}_kill_event'] for aid in RED_IDS[1:]]==[100,100,200]
+    assert info['mav_r_event']==100
+
+
+def test_cokill_own_loss_and_fixed_team_average(monkeypatch):
+    e=scene()
+    monkeypatch.setattr(e.blue_policy,'action',lambda *args: np.zeros(3))
+    def resolve():
+        e.entities['Blue1'].state.alive=False
+        e.entities['UAV1'].state.alive=False
+        e._red_attack_kills.add('Blue1');e._blue_attack_kills.add('UAV1')
+        return ([{'attacker':'UAV1','target':'Blue1'},
+                 {'attacker':'UAV2','target':'Blue1'}],
+                {'Blue1':'red_attack','UAV1':'blue_attack'})
+    monkeypatch.setattr(e,'_resolve_attacks',resolve)
+    _,rewards,_,_,info=e.step(np.zeros((4,3)))
+    assert info['uav1_kill_event']==info['uav2_kill_event']==100
+    assert info['uav1_r_event']==-100 and info['uav2_r_event']==100
+    assert info['uav3_r_event']==0 and info['mav_r_event']==50
+    expected=sum(info[f'{aid.lower()}_reward_local'] for aid in RED_IDS)/4
+    assert info['team_reward']==expected
+    assert all(rewards[aid]==expected for aid in RED_IDS)
+    assert info['terminal_reward']==0
+
+
 @pytest.mark.parametrize('distance,expected', [(0,-1),(2500,-.5),(4999,-.0002),(5000,-.5),(7500,-.25),(10000,.2),(None,.2)])
 def test_mav_distance_segments(distance,expected):
     assert mav_distance_reward(distance,5000,10000)==pytest.approx(expected)
@@ -264,7 +312,7 @@ def continuation_check(a,b):
     torch.set_rng_state(cpu)
     if cuda is not None:torch.cuda.set_rng_state_all(cuda)
     b.collect_rollout();mb=b.update();assert ma==mb
-    for field in ('actions','raw_actions','log_probs','values','returns','advantages','rewards'):
+    for field in ('actions','raw_actions','log_probs','values','old_normalized_values','returns','advantages','rewards'):
         np.testing.assert_array_equal(getattr(a.buffer,field),getattr(b.buffer,field))
         assert np.isfinite(getattr(a.buffer,field)).all()
     for left,right in ((a.actors,b.actors),(a.critic,b.critic),(a.value_normalizer,b.value_normalizer)):
@@ -304,12 +352,12 @@ def test_legacy_uses_original_sample_and_evaluation(trainers,monkeypatch):
     t.collect_rollout();t.update()
 
 
-def test_critic_loss_inputs_share_current_normalized_scale(trainers,monkeypatch):
+def test_critic_loss_uses_saved_old_prediction_and_current_normalized_targets(trainers,monkeypatch):
     t=trainers();t.value_normalizer.update(torch.tensor([-100.,300.]))
-    t.collect_rollout();raw_old=t.buffer.values.copy();raw_returns=t.buffer.returns.copy()
+    t.collect_rollout();saved_old=t.buffer.old_normalized_values.copy();raw_returns=t.buffer.returns.copy()
     calls=[];original=trainer_module.clipped_huber_value_loss
     def spy(new,old,target,clip,delta):
-        expected_old=t.value_normalizer.normalize(torch.as_tensor(raw_old.reshape(-1)))
+        expected_old=torch.as_tensor(saved_old.reshape(-1))
         expected_return=t.value_normalizer.normalize(torch.as_tensor(raw_returns.reshape(-1)))
         # A full minibatch is shuffled together; match paired old/target values.
         pairs=list(zip(expected_old.tolist(),expected_return.tolist()))
@@ -320,6 +368,31 @@ def test_critic_loss_inputs_share_current_normalized_scale(trainers,monkeypatch)
         return original(new,old,target,clip,delta)
     monkeypatch.setattr(trainer_module,'clipped_huber_value_loss',spy)
     t.update();assert calls
+
+
+def test_valuenorm_stat_change_preserves_collection_time_clipping_identity(trainers):
+    t=trainers();t.value_normalizer.update(torch.tensor([-100.,300.]))
+    t.collect_rollout()
+    saved=t.buffer.old_normalized_values.copy();raw=t.buffer.values.copy()
+    assert saved.shape==t.buffer.values.shape
+    # Verify every saved value is the original critic forward, and GAE storage
+    # stays denormalized. No critic optimizer is stepped in this identity test.
+    with torch.no_grad():
+        for step in range(t.buffer.horizon):
+            prediction=t.critic(torch.as_tensor(t.buffer.global_states[step]))
+            torch.testing.assert_close(prediction,torch.as_tensor(saved[step]),rtol=0,atol=0)
+            torch.testing.assert_close(t.value_normalizer.denormalize(prediction),
+                                       torch.as_tensor(raw[step]),rtol=0,atol=0)
+    parameters={k:v.clone() for k,v in t.critic.state_dict().items()}
+    t.value_normalizer.update(torch.tensor([100000.,200000.]))
+    with torch.no_grad():
+        for step in range(t.buffer.horizon):
+            prediction=t.critic(torch.as_tensor(t.buffer.global_states[step]))
+            torch.testing.assert_close(prediction,torch.as_tensor(saved[step]),rtol=0,atol=0)
+    assert all(torch.equal(v,t.critic.state_dict()[k]) for k,v in parameters.items())
+    assert not torch.allclose(t.value_normalizer.normalize(torch.as_tensor(raw)),torch.as_tensor(saved))
+    np.testing.assert_array_equal(t.buffer.old_normalized_values,saved)
+    np.testing.assert_array_equal(t.buffer.values,raw)
 
 
 def test_resolved_config_metadata_and_weights_save(trainers,tmp_path):

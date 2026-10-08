@@ -18,9 +18,13 @@ class LatentRolloutBuffer(RolloutBuffer):
     def __init__(self, horizon, num_envs):
         super().__init__(horizon, num_envs)
         self.raw_actions = np.zeros_like(self.actions)
+        # Keep the critic's collection-time output unchanged for value clipping.
+        # self.values remains in raw reward units for team GAE.
+        self.old_normalized_values = np.zeros_like(self.values)
 
-    def insert(self, *args, raw_actions, **kwargs):
+    def insert(self, *args, raw_actions, old_normalized_values, **kwargs):
         self.raw_actions[self.position] = raw_actions
+        self.old_normalized_values[self.position] = old_normalized_values
         super().insert(*args, **kwargs)
 
 

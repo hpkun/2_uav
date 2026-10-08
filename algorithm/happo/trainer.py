@@ -1180,7 +1180,8 @@ class HAPPOTrainer:
                 else:
                     self.buffer.insert(**insert_kwargs)
             else:
-                kwargs = {"raw_actions": np.stack(raw_actions, axis=1)} if self.v315 else {}
+                kwargs = {"raw_actions": np.stack(raw_actions, axis=1),
+                          "old_normalized_values": predictions.cpu().numpy()} if self.v315 else {}
                 self.buffer.insert(self.observations, self.global_states, action_array, log_prob_array, training_rewards, values, terminated, truncated, self.active_masks, **kwargs)
             completed.extend(info["episode_summary"] for info in infos if "episode_summary" in info)
             self.observations, self.global_states, self.active_masks = next_obs, next_states, next_masks
@@ -2156,10 +2157,11 @@ class HAPPOTrainer:
                 pcta_v2_head_disagreement_count += temporal.head_disagreement_count
         critic_losses = []
         if self.v315:
-            # Raw rollout values/returns for GAE; all loss inputs use the SAME new statistics.
+            # Normalize targets with updated statistics, but preserve the actual
+            # collection-time critic output as the clipping baseline. Raw GAE is unchanged.
             self.value_normalizer.update(returns)
             critic_targets = self.value_normalizer.normalize(returns)
-            old_values = self.value_normalizer.normalize(torch.as_tensor(self.buffer.values.reshape(-1), device=self.device))
+            old_values = torch.as_tensor(self.buffer.old_normalized_values.reshape(-1), device=self.device)
         for _ in range(int(c["ppo_epochs"])):
             sample_order = self.rng.permutation(total)
             for start in range(0, total, mini):

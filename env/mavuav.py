@@ -595,8 +595,8 @@ class HeterogeneousMAVUAVAirCombatEnv:
     def _chen_rewards(self, dense, attack_events, death_causes, mav_alive_before_combat):
         """Attribute actual synchronous attack events; count each Blue once for MAV.
 
-        Simultaneous valid co-attackers each receive their own actual attack-event
-        credit. Duplicate events for the same (UAV, Blue) are never paid twice.
+        Each newly killed Blue contributes one kill reward, shared equally among
+        its actual valid UAV co-attackers. Duplicate events are never paid twice.
         No killer is guessed from distance; no shared terminal reward is injected.
         """
         diagnostics = dict(dense)
@@ -615,9 +615,17 @@ class HeterogeneousMAVUAVAirCombatEnv:
         local = {"MAV": diagnostics["mav_r_safety"] + diagnostics["mav_r_support"] + mev}
         diagnostics.update(mav_r_event=float(mev), mav_team_contribution_cumulative=self._chen_mav_contribution)
         uc = self.config["chen_reward"]["uav"]
+        kill_credit = {aid: 0.0 for aid in RED_IDS[1:]}
+        for bid in BLUE_IDS:
+            attackers = {aid for aid, target in valid_events if target == bid}
+            if attackers:
+                share = uc["kill_reward"] / len(attackers)
+                for aid in RED_IDS[1:]:
+                    if aid in attackers:
+                        kill_credit[aid] += share
         for aid in RED_IDS[1:]:
             p = aid.lower()
-            kill = uc["kill_reward"] * sum(attacker == aid for attacker, _ in valid_events)
+            kill = kill_credit[aid]
             combat = uc["combat_loss"] if death_causes.get(aid) == "blue_attack" else 0.0
             boundary = uc["boundary_loss"] if death_causes.get(aid) == "boundary" else 0.0
             event = float(kill + combat + boundary)

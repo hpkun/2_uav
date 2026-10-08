@@ -36,10 +36,11 @@ hold1全部继承v3.14；不增加missile/ammo/cooldown，不改变任何历史�
 - `R_angle=1−(ATA+AA)/π`，不clip。
 - d转km：`R_distance=1`(d<=5)，`exp[−.921(d−5)]`(5<d<10)，`−1`(d>=10)。
 - `R_speed=1`(Vb<.5Vr)，`2−2Vb/Vr`(.5Vr<=Vb<=1.5Vr)，`−1`(Vb>1.5Vr)。
-- 事件来自真实`attack_events`与`death_causes`：自身有效kill+200，blue_attack−200，boundary−100。
-  同一transition合法事件相加；相同(UAV,Blue)重复记录只付一次。同步候选中多个真实
-  co-attackers参与同一Blue毁伤时各保留自己的attack-event credit；不凭距离推断killer，
-  不修改combat attribution。MAV的team contribution仍只按unique Blue计一次。
+- 事件来自真实`attack_events`与`death_causes`：每架新unique Blue毁伤总kill credit+200，
+  blue_attack−200，boundary−100。同一transition合法事件相加；相同(UAV,Blue)重复记录只付一次。
+  **ENV_MAPPING**：同步有效UAV co-attackers均分该Blue的+200，即每个获得`200 / |A_b|`。
+  论文没有规定同步多攻击者的归因方法；这是环境映射，不凭距离推断killer，不修改combat attribution。
+  多架Blue分别结算，已结算Blue不重复支付。MAV的team contribution仍只按unique Blue计一次。
 
 `r_M = .5 R_dist + .2 R_aspect + R_event,M`，support=0，threat=0。
 
@@ -79,9 +80,11 @@ ValueNorm使用HARL式debiased EMA moments：beta=.99999、epsilon=1e-5、varian
 该rollout的PPO critic epochs使用固定统计，不在各minibatch之间移动尺度。
 这项更新频率显式记录为实现选择，并不声称逐行复制HARL。
 
-- Critic输出normalized value；收集和bootstrap时denormalize后写buffer/计算GAE。
+- Critic输出normalized value；收集时原样保存至v3.15-only `old_normalized_values`用于value clipping。
+  同时denormalize后写`values`，bootstrap也denormalize后用于GAE。
 - buffer rewards、values、returns、advantages均为environment尺度。
-- critic optimization开始时更新统计，将raw return与raw old value转换到同一normalized尺度。
+- critic optimization开始时更新统计，仅将raw returns转换为当前normalized targets。
+  old clipping baseline直接读取采样时保存的normalized critic prediction，绝不以新统计重新归一化raw old values。
 - clipped prediction为old+clip(new−old,−.2,.2)。delta10的Huber采用
   `0.5 e²`(|e|<=10)，否则`10(|e|−5)`；clipped/unclipped逐元素取max再mean。
 - value_loss_coef仍.5；Adam不更换，不改HAPPO随机顺序、preceding factor或active mask。
